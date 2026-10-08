@@ -1,0 +1,147 @@
+{
+  "exhaustive": {
+    "nbHits": true,
+    "typo": true
+  },
+  "exhaustiveNbHits": true,
+  "exhaustiveTypo": true,
+  "hits": [
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "ea_sarah"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Can anyone recommend a reliable chauffeur service in Dubai for executives? Our travel desk is <i>overwhelmed</i>."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: What tools do executive assistants use?"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_ea_sarah",
+        "story_45409500"
+      ],
+      "author": "ea_sarah",
+      "comment_text": "Can anyone recommend a reliable chauffeur service in Dubai for executives? Our travel desk is <i>overwhelmed</i>.",
+      "created_at": "2026-10-06T08:00:00Z",
+      "created_at_i": 1791273600,
+      "objectID": "45410020",
+      "parent_id": 45409500,
+      "story_id": 45409500,
+      "story_title": "Ask HN: What tools do executive assistants use?",
+      "updated_at": "2026-10-06T08:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "dxb_ops"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Alternatives to Blacklane for corporate travel in Dubai?"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_dxb_ops",
+        "story_45410001",
+        "ask_hn"
+      ],
+      "author": "dxb_ops",
+      "children": [
+        45410002
+      ],
+      "created_at": "2026-10-05T09:00:00Z",
+      "created_at_i": 1791190800,
+      "num_comments": 9,
+      "objectID": "45410001",
+      "points": 12,
+      "story_id": 45410001,
+      "title": "Ask HN: Alternatives to Blacklane for corporate travel in Dubai?",
+      "updated_at": "2026-10-05T09:00:00Z",
+      "story_text": "We&#x27;ve been frustrated with Blacklane&#x27;s pricing lately and are looking for a chauffeur service with monthly invoicing for ~40 execs.<p>Any recommendations?"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "longwinded"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Long story incoming. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. The one thing nobody fixed was ground transport: we still book chauffeurs by WhatsApp &amp; email, and finance hates the receipts."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: What did your startup fail to automate?"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_longwinded",
+        "story_45409600"
+      ],
+      "author": "longwinded",
+      "comment_text": "Long story incoming. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. We spent most of last quarter rebuilding our internal tooling, migrating the booking system and arguing about calendars. The one thing nobody fixed was ground transport: we still book chauffeurs by WhatsApp &amp; email, and finance hates the receipts.",
+      "created_at": "2026-10-04T13:00:00Z",
+      "created_at_i": 1791118800,
+      "objectID": "45410021",
+      "parent_id": 45409600,
+      "story_id": 45409600,
+      "story_title": "Ask HN: What did your startup fail to automate?",
+      "updated_at": "2026-10-04T13:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "pressbot42"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Chauffeur startup expands to 50 new cities"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_pressbot42",
+        "story_45410008"
+      ],
+      "author": "pressbot42",
+      "children": [],
+      "created_at": "2026-10-02T07:00:00Z",
+      "created_at_i": 1790924400,
+      "num_comments": 0,
+      "objectID": "45410008",
+      "points": 3,
+      "story_id": 45410008,
+      "title": "Chauffeur startup expands to 50 new cities",
+      "updated_at": "2026-10-02T07:00:00Z",
+      "url": "https://www.blacklane.com/en/press/50-new-cities/"
+    }
+  ],
+  "hitsPerPage": 50,
+  "nbHits": 4,
+  "nbPages": 1,
+  "page": 0,
+  "params": "query=chauffeur&tags=%28story%2Ccomment%29&advancedSyntax=true&analyticsTags=backend",
+  "processingTimeMS": 2,
+  "query": "chauffeur",
+  "serverTimeMS": 3
+}

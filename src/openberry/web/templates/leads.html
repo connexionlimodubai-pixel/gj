@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% set base = "/c/" ~ company.id %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">{{ company.name }}</p>
+    <h1>Leads</h1>
+    <p class="lede">People and accounts showing intent, scored against your ideal customer profile.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn" href="{{ base }}/leads.csv{{ query_with(request, page=None) if request.query_params else '' }}">{{ m.icon("download") }}Export CSV</a>
+    <a class="btn" href="#import" data-open-details="import">{{ m.icon("upload") }}Import CSV</a>
+    <a class="btn btn-primary" href="{{ base }}/leads/new">{{ m.icon("plus") }}Add lead</a>
+  </div>
+</div>
+
+<details class="card import-card" id="import">
+  <summary>{{ m.icon("upload") }}Import leads from a CSV file</summary>
+  <form method="post" action="{{ base }}/leads/import" enctype="multipart/form-data" class="import-form">
+    {{ m.csrf() }}
+    <div class="field">
+      <label for="csv-file">CSV file</label>
+      <input class="input" id="csv-file" name="file" type="file" accept=".csv,text/csv" required aria-describedby="csv-help">
+      <p class="help" id="csv-help">Works with LinkedIn, Sales Navigator, Apollo or CRM exports. Recognised columns include name (or first + last name), title, company, LinkedIn URL, email, location, industry, company size and notes. Duplicates are merged, never doubled.</p>
+    </div>
+    <button class="btn btn-primary" type="submit">{{ m.icon("upload") }}Import</button>
+  </form>
+</details>
+
+<form class="filters card" method="get" action="{{ base }}/leads" role="search">
+  <div class="field filter-search">
+    <label for="f-q" class="sr-only">Search leads</label>
+    <span class="input-icon">{{ m.icon("search") }}</span>
+    <input class="input" id="f-q" name="q" type="search" value="{{ filters.search }}" placeholder="Search name, title, company, notes…">
+  </div>
+  <div class="field"><label for="f-tier">Tier</label>
+    <select class="input" id="f-tier" name="tier" data-autosubmit><option value="">All tiers</option>{% for t in TIERS %}<option value="{{ t }}"{% if filters.tier == t %} selected{% endif %}>{{ t|capitalize }}</option>{% endfor %}</select></div>
+  <div class="field"><label for="f-status">Status</label>
+    <select class="input" id="f-status" name="status" data-autosubmit><option value="">Any status</option>{% for value, label in STATUS_OPTIONS %}<option value="{{ value }}"{% if filters.status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+  <div class="field"><label for="f-kind">Kind</label>
+    <select class="input" id="f-kind" name="kind" data-autosubmit><option value="">People &amp; accounts</option><option value="person"{% if filters.kind == "person" %} selected{% endif %}>People</option><option value="account"{% if filters.kind == "account" %} selected{% endif %}>Accounts</option></select></div>
+  <div class="field"><label for="f-source">Source</label>
+    <select class="input" id="f-source" name="source" data-autosubmit><option value="">Any source</option>{% for s in LEAD_SOURCES %}<option value="{{ s }}"{% if filters.source == s %} selected{% endif %}>{{ s|source_label }}</option>{% endfor %}</select></div>
+  <div class="field"><label for="f-sort">Sort by</label>
+    <select class="input" id="f-sort" name="sort" data-autosubmit>{% for value, label in sorts.items() %}<option value="{{ value }}"{% if filters.sort == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+  <div class="filter-actions">
+    <button class="btn" type="submit">Apply</button>
+    {% if filtered or filters.sort != "score" %}<a class="btn btn-ghost" href="{{ base }}/leads">Reset</a>{% endif %}
+  </div>
+</form>
+
+{% if items %}
+<div class="card card-flush">
+  <div class="table-wrap">
+    <table class="table leads-table">
+      <thead><tr>
+        <th scope="col">Lead</th><th scope="col" class="hide-sm">Company</th><th scope="col" class="hide-md">Location</th>
+        <th scope="col">Score</th><th scope="col" class="hide-md">Why</th><th scope="col" class="hide-sm">Last signal</th><th scope="col">Status</th>
+      </tr></thead>
+      <tbody>
+        {% for lead in items %}
+        <tr>
+          <td><div class="lead-cell">{{ m.avatar(lead.full_name, lead.kind) }}<div class="min0"><a class="lead-name" href="{{ base }}/leads/{{ lead.id }}">{{ m.lead_title(lead) }}</a><span class="sub">{{ m.lead_sub(lead) }}</span></div></div></td>
+          <td class="hide-sm">{{ lead.lead_company or "—" }}</td>
+          <td class="hide-md">{{ lead.location or "—" }}</td>
+          <td><div class="score-cell">{{ m.score(lead.score, lead.tier) }}{{ m.tier_badge(lead.tier) }}</div></td>
+          <td class="hide-md why-cell">{% set r = lead|top_reason %}{% if r %}{{ m.reason(r) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="hide-sm nowrap">{{ m.when(lead.last_signal_at, "—") }}</td>
+          <td>{{ m.status_pill(lead.status) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card-foot">{{ m.pager(pager) }}</div>
+</div>
+{% elif any_leads %}
+<div class="card">
+  {% call m.empty("search", "No leads match these filters") %}
+  <p>Try a broader search or <a href="{{ base }}/leads">reset the filters</a>.</p>
+  {% endcall %}
+</div>
+{% else %}
+<div class="card">
+  {% call m.empty("users", "No leads yet") %}
+  <p>Run a scan, import a CSV, or ask Claude to find leads.</p>
+  <div class="btn-row center">
+    <form method="post" action="{{ base }}/scan">{{ m.csrf() }}<button class="btn btn-sm btn-primary" type="submit">{{ m.icon("refresh", 14) }}Run a scan</button></form>
+    <a class="btn btn-sm" href="#import" data-open-details="import">{{ m.icon("upload", 14) }}Import CSV</a>
+    <a class="btn btn-sm" href="{{ base }}/leads/new">{{ m.icon("plus", 14) }}Add a lead</a>
+  </div>
+  {% endcall %}
+</div>
+{% endif %}
+{% endblock %}

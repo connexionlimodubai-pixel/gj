@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% set base = "/c/" ~ company.id %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">{{ company.name }}</p>
+    <h1>Outreach</h1>
+    <p class="lede">Review, approve and send. OpenBerry never sends anything: copy each approved message into LinkedIn or your inbox, then mark it sent.</p>
+  </div>
+</div>
+
+<nav class="tabs" aria-label="Outreach queue">
+  {% for key, label in tabs %}
+  <a href="?tab={{ key }}"{% if tab == key %} aria-current="page"{% endif %}>{{ label }}<span class="count">{{ tab_counts[key] }}</span></a>
+  {% endfor %}
+</nav>
+
+{% if tab == "followups" %}
+  {% if followups %}
+  <ul class="queue">
+    {% for f in followups %}
+    <li class="card queue-item">
+      <div class="queue-head">
+        {{ m.avatar(f.lead.full_name, f.lead.kind) }}
+        <div class="min0 grow"><a class="lead-name" href="{{ base }}/leads/{{ f.lead.id }}">{{ m.lead_title(f.lead) }}</a><span class="sub">{{ m.lead_sub(f.lead) }}{% if f.lead.lead_company and f.lead.kind == "person" %} · {{ f.lead.lead_company }}{% endif %}</span></div>
+        {{ m.score(f.lead.score, f.lead.tier) }}
+      </div>
+      <p class="queue-meta">Follow-up step {{ f.next_step }} · due {{ m.when(f.due_since) }}</p>
+      <div class="btn-row">
+        <form method="post" action="{{ base }}/leads/{{ f.lead.id }}/draft">{{ m.csrf() }}<input type="hidden" name="step" value="{{ f.next_step }}"><button class="btn btn-sm btn-primary" type="submit">{{ m.icon("edit", 14) }}Draft follow-up</button></form>
+        <a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ f.lead.id }}#outreach">Open lead</a>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="card">{% call m.empty("clock", "No follow-ups due") %}<p>Leads you contacted show up here once the follow-up delay has passed without a reply.</p>{% endcall %}</div>
+  {% endif %}
+{% elif messages %}
+<ul class="queue">
+  {% for msg in messages %}
+  {% set lead = leads.get(msg.lead_id) %}
+  {% set too_long = msg.channel == "linkedin_connect" and msg.body|length > LINKEDIN_CONNECT_LIMIT %}
+  <li class="card queue-item" id="q-{{ msg.id }}">
+    <div class="queue-head">
+      {% if lead %}
+      {{ m.avatar(lead.full_name, lead.kind) }}
+      <div class="min0 grow"><a class="lead-name" href="{{ base }}/leads/{{ lead.id }}">{{ m.lead_title(lead) }}</a><span class="sub">{{ m.lead_sub(lead) }}{% if lead.lead_company and lead.kind == "person" %} · {{ lead.lead_company }}{% endif %}</span></div>
+      {{ m.score(lead.score, lead.tier) }}
+      {% endif %}
+      {{ m.msg_pill(msg.status) }}
+    </div>
+    <p class="queue-meta">{{ msg.channel|channel_label }} · step {{ msg.step }} · {{ m.when(msg.sent_at or msg.created_at) }}</p>
+    {% if msg.subject %}<p class="queue-subject"><span class="muted">Subject:</span> {{ msg.subject }}</p>{% endif %}
+    <div class="queue-body" id="q-{{ msg.id }}-body">{{ msg.body }}</div>
+    {% if msg.channel == "linkedin_connect" %}
+    <p class="counter{{ ' over' if too_long }}">{{ msg.body|length }} / {{ LINKEDIN_CONNECT_LIMIT }} characters{% if too_long %}: too long for a LinkedIn connection note, shorten it before sending{% endif %}</p>
+    {% endif %}
+    <div class="btn-row">
+      {% if msg.status == "draft" %}
+      <form method="post" action="{{ base }}/messages/{{ msg.id }}">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm" type="submit" name="action" value="approve">{{ m.icon("check", 14) }}Approve</button></form>
+      {% endif %}
+      {% if msg.status in ("draft", "approved") %}
+      <form method="post" action="{{ base }}/messages/{{ msg.id }}">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button></form>
+      {% endif %}
+      {{ m.copy_button("#q-" ~ msg.id ~ "-body") }}
+      {% if msg.direction == "outbound" %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{{ m.icon("edit", 14) }}Edit</a>
+      {% else %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#outreach">{{ m.icon("reply", 14) }}Answer</a>{% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<div class="card">
+  {% if tab == "drafts" %}
+    {% call m.empty("edit", "No drafts waiting for review") %}<p>Draft from any lead's page, switch the profile to auto-draft, or ask Claude: “Draft LinkedIn connection notes for all hot leads of company {{ company.id }} that have no message yet.”</p>{% endcall %}
+  {% elif tab == "approved" %}
+    {% call m.empty("check", "Nothing approved yet") %}<p>Approved messages wait here until you send them and mark them sent.</p>{% endcall %}
+  {% elif tab == "sent" %}
+    {% call m.empty("send", "Nothing sent yet") %}<p>Messages you mark as sent appear here and start the follow-up timer.</p>{% endcall %}
+  {% else %}
+    {% call m.empty("inbox", "No replies logged") %}<p>When a lead answers, paste the reply on their page with “Log a reply”.</p>{% endcall %}
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

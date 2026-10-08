@@ -1,0 +1,183 @@
+{
+  "exhaustive": {
+    "nbHits": true,
+    "typo": true
+  },
+  "exhaustiveNbHits": true,
+  "exhaustiveTypo": true,
+  "hits": [
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "hr_abudhabi"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "We are hiring an Executive Assistant in Abu Dhabi, email me."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_hr_abudhabi",
+        "story_45400001"
+      ],
+      "author": "hr_abudhabi",
+      "comment_text": "We are hiring an Executive Assistant in Abu Dhabi, email me.",
+      "created_at": "2026-10-03T10:00:00Z",
+      "created_at_i": 1791021600,
+      "objectID": "45401006",
+      "parent_id": 45400001,
+      "story_id": 45400001,
+      "story_title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-03T10:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "ghost"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "[deleted]"
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_ghost",
+        "story_45400001"
+      ],
+      "author": "ghost",
+      "comment_text": "[deleted]",
+      "created_at": "2026-10-02T12:00:00Z",
+      "created_at_i": 1790942400,
+      "objectID": "45401005",
+      "parent_id": 45400001,
+      "story_id": 45400001,
+      "story_title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-02T12:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "nw_cto"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Northwind Logistics | Senior Backend Engineer | London | Hybrid | <a href=\"https:&#x2F;&#x2F;jobs.lever.co&#x2F;northwind\" rel=\"nofollow\">https:&#x2F;&#x2F;jobs.lever.co&#x2F;northwind</a><p>Python, Postgres, Kafka. We will also hire an executive assistant for our COO later this year."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_nw_cto",
+        "story_45400001"
+      ],
+      "author": "nw_cto",
+      "comment_text": "Northwind Logistics | Senior Backend Engineer | London | Hybrid | <a href=\"https:&#x2F;&#x2F;jobs.lever.co&#x2F;northwind\" rel=\"nofollow\">https:&#x2F;&#x2F;jobs.lever.co&#x2F;northwind</a><p>Python, Postgres, Kafka. We will also hire an executive assistant for our COO later this year.",
+      "created_at": "2026-10-01T17:30:00Z",
+      "created_at_i": 1790875800,
+      "objectID": "45401003",
+      "parent_id": 45400001,
+      "story_id": 45400001,
+      "story_title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-01T17:30:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "curious_dev"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Is the Executive Assistant role open to remote candidates?"
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_curious_dev",
+        "story_45400001"
+      ],
+      "author": "curious_dev",
+      "comment_text": "Is the Executive Assistant role open to remote candidates?",
+      "created_at": "2026-10-01T16:20:00Z",
+      "created_at_i": 1790871600,
+      "objectID": "45401002",
+      "parent_id": 45401001,
+      "story_id": 45400001,
+      "story_title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-01T16:20:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "acmebank_ops"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Acme Bank (YC W20) | Executive Assistant to the CEO | Dubai, UAE | ONSITE | <a href=\"https:&#x2F;&#x2F;acmebank.example&#x2F;careers\" rel=\"nofollow\">https:&#x2F;&#x2F;acmebank.example&#x2F;careers</a><p>We&#x27;re a 120-person digital bank for SMEs in the Gulf. You&#x27;ll run the CEO&#x27;s calendar, board packs and travel across the GCC.<p>Apply: <a href=\"https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmebank&#x2F;jobs&#x2F;4711\" rel=\"nofollow\">https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmebank&#x2F;jobs&#x2F;4711</a>"
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_acmebank_ops",
+        "story_45400001"
+      ],
+      "author": "acmebank_ops",
+      "comment_text": "Acme Bank (YC W20) | Executive Assistant to the CEO | Dubai, UAE | ONSITE | <a href=\"https:&#x2F;&#x2F;acmebank.example&#x2F;careers\" rel=\"nofollow\">https:&#x2F;&#x2F;acmebank.example&#x2F;careers</a><p>We&#x27;re a 120-person digital bank for SMEs in the Gulf. You&#x27;ll run the CEO&#x27;s calendar, board packs and travel across the GCC.<p>Apply: <a href=\"https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmebank&#x2F;jobs&#x2F;4711\" rel=\"nofollow\">https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmebank&#x2F;jobs&#x2F;4711</a>",
+      "created_at": "2026-10-01T16:00:00Z",
+      "created_at_i": 1790870400,
+      "objectID": "45401001",
+      "parent_id": 45400001,
+      "story_id": 45400001,
+      "story_title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-01T16:00:00Z"
+    }
+  ],
+  "hitsPerPage": 50,
+  "nbHits": 5,
+  "nbPages": 1,
+  "page": 0,
+  "params": "query=Executive+Assistant&tags=comment%2Cstory_45400001&numericFilters=created_at_i%3E1790208000&hitsPerPage=100&advancedSyntax=true&analyticsTags=backend",
+  "processingTimeMS": 2,
+  "query": "Executive Assistant",
+  "serverTimeMS": 3
+}

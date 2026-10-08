@@ -1,0 +1,117 @@
+{
+  "exhaustive": {
+    "nbHits": true,
+    "typo": true
+  },
+  "exhaustiveNbHits": true,
+  "exhaustiveTypo": true,
+  "hits": [
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "initech_eng"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Initech | Software Engineer | NYC | Onsite<p>Some traveling required."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_initech_eng",
+        "story_45400001"
+      ],
+      "author": "initech_eng",
+      "comment_text": "Initech | Software Engineer | NYC | Onsite<p>Some traveling required.",
+      "created_at": "2026-10-04T09:00:00Z",
+      "created_at_i": 1791104400,
+      "objectID": "45401011",
+      "parent_id": 45400001,
+      "story_id": 45400001,
+      "story_title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-04T09:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "globex_people"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Globex | Travel Manager | Remote (EU) | Full-time | <a href=\"https:&#x2F;&#x2F;www.globex.example\" rel=\"nofollow\">https:&#x2F;&#x2F;www.globex.example</a><p>Own our corporate travel program for 900 employees."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_globex_people",
+        "story_45400001"
+      ],
+      "author": "globex_people",
+      "comment_text": "Globex | Travel Manager | Remote (EU) | Full-time | <a href=\"https:&#x2F;&#x2F;www.globex.example\" rel=\"nofollow\">https:&#x2F;&#x2F;www.globex.example</a><p>Own our corporate travel program for 900 employees.",
+      "created_at": "2026-10-02T08:00:00Z",
+      "created_at_i": 1790928000,
+      "objectID": "45401010",
+      "parent_id": 45400001,
+      "story_id": 45400001,
+      "story_title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-02T08:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "acmebank_ops"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Acme Bank (YC W20) | Executive Assistant to the CEO | Dubai, UAE | ONSITE | <a href=\"https:&#x2F;&#x2F;acmebank.example&#x2F;careers\" rel=\"nofollow\">https:&#x2F;&#x2F;acmebank.example&#x2F;careers</a><p>We&#x27;re a 120-person digital bank for SMEs in the Gulf. You&#x27;ll run the CEO&#x27;s calendar, board packs and travel across the GCC.<p>Apply: <a href=\"https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmebank&#x2F;jobs&#x2F;4711\" rel=\"nofollow\">https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmebank&#x2F;jobs&#x2F;4711</a>"
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_acmebank_ops",
+        "story_45400001"
+      ],
+      "author": "acmebank_ops",
+      "comment_text": "Acme Bank (YC W20) | Executive Assistant to the CEO | Dubai, UAE | ONSITE | <a href=\"https:&#x2F;&#x2F;acmebank.example&#x2F;careers\" rel=\"nofollow\">https:&#x2F;&#x2F;acmebank.example&#x2F;careers</a><p>We&#x27;re a 120-person digital bank for SMEs in the Gulf. You&#x27;ll run the CEO&#x27;s calendar, board packs and travel across the GCC.<p>Apply: <a href=\"https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmebank&#x2F;jobs&#x2F;4711\" rel=\"nofollow\">https:&#x2F;&#x2F;boards.greenhouse.io&#x2F;acmebank&#x2F;jobs&#x2F;4711</a>",
+      "created_at": "2026-10-01T16:00:00Z",
+      "created_at_i": 1790870400,
+      "objectID": "45401001",
+      "parent_id": 45400001,
+      "story_id": 45400001,
+      "story_title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-01T16:00:00Z"
+    }
+  ],
+  "hitsPerPage": 50,
+  "nbHits": 3,
+  "nbPages": 1,
+  "page": 0,
+  "params": "query=Travel&tags=comment%2Cstory_45400001&numericFilters=created_at_i%3E1790208000&hitsPerPage=100&advancedSyntax=true&analyticsTags=backend",
+  "processingTimeMS": 2,
+  "query": "Travel",
+  "serverTimeMS": 3
+}

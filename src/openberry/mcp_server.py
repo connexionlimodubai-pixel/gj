@@ -16,11 +16,10 @@ import inspect
 import itertools
 import logging
 import math
-import os
 import re
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import quote_plus, urlparse
 
@@ -28,7 +27,8 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError, ToolError
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp_types import ToolAnnotations
+from mcp.shared.exceptions import MCPError
+from mcp_types import INVALID_PARAMS, ToolAnnotations
 from pydantic import Field, ValidationError
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, Response
@@ -271,12 +271,18 @@ def _message_row(message: Message) -> dict[str, Any]:
     }
 
 
+WEBHOOK_FIELDS = ("slack_webhook_url", "discord_webhook_url")
+MASKED = "(set)"
+# Returned by get_company_profile but not editable; ignored when Claude sends the profile back.
+READ_ONLY_PROFILE_FIELDS = ("id", "created_at", "updated_at", "last_scan_at")
+
+
 def _profile(company: Company) -> dict[str, Any]:
     """The company profile with webhook URLs masked: they are credentials."""
     data = company.model_dump(mode="json")
-    for key in ("slack_webhook_url", "discord_webhook_url"):
+    for key in WEBHOOK_FIELDS:
         if data["notify"].get(key):
-            data["notify"][key] = "(set)"
+            data["notify"][key] = MASKED
     return data
 
 
@@ -319,6 +325,11 @@ def profile_gaps(company: Company) -> list[str]:
     return gaps
 
 
+# Unfilled template slots, including the ones in get_outreach_context's save_with example.
+_PLACEHOLDER = re.compile(r"\{\{?\s*[\w ]+\s*\}?\}|\[(?:first ?name|name|company|your name)\]"
+                          r"|<(?:subject|your message|first ?name|name|company)>", re.I)
+
+
 def _message_problems(company: Company, channel: str, subject: str, body: str) -> list[str]:
     """Reasons a draft can't be saved as written. Empty list = fine."""
     problems = []
@@ -332,7 +343,7 @@ def _message_problems(company: Company, channel: str, subject: str, body: str) -
     banned = find_terms(f"{subject}\n{body}", company.outreach.banned_words)
     if banned:
         problems.append(f"it uses banned words/phrases: {', '.join(banned)}. Rewrite without them")
-    placeholder = re.search(r"\{\{?\s*[\w ]+\s*\}?\}|\[(?:first ?name|name|company|your name)\]", body, re.I)
+    placeholder = _PLACEHOLDER.search(f"{subject}\n{body}")
     if placeholder:
         problems.append(f"it still contains the placeholder {placeholder.group(0)!r}; fill it in")
     return problems
@@ -615,10 +626,7 @@ def register_company(
         raise ToolError("name is required: pass name='Acme Ltd' or profile={'name': 'Acme Ltd', ...}")
     with _tool_errors():
         company_in = CompanyIn.model_validate(data)
-    duplicate = next((c for c in repo.list_companies() if c.name.casefold() == company_in.name.casefold()), None)
-    if duplicate is not None:
-        raise ToolError(f"a company named '{duplicate.name}' already exists (id {duplicate.id}); "
-                        "use update_company to change it")
+    _refuse_duplicate_name(company_in.name)
     company = repo.create_company(company_in)
     return {
         "company_id": company.id,
@@ -634,6 +642,30 @@ def register_company(
     }
 
 
+def _refuse_duplicate_name(name: str, company_id: int | None = None) -> None:
+    """Company names identify workspaces for the user and Claude, so keep them unique."""
+    wanted = name.strip().casefold()
+    duplicate = next((c for c in repo.list_companies() if c.id != company_id and c.name.casefold() == wanted), None)
+    if duplicate is not None:
+        raise ToolError(f"a company named '{duplicate.name}' already exists (id {duplicate.id}); "
+                        "use update_company to change it")
+
+
+def _without_unchangeable(changes: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Drop what get_company_profile returns but can't be written back: read-only fields and masked webhooks.
+
+    Returns (cleaned changes, ignored keys).
+    """
+    ignored = sorted(k for k in changes if k in READ_ONLY_PROFILE_FIELDS)
+    cleaned = {k: v for k, v in changes.items() if k not in READ_ONLY_PROFILE_FIELDS}
+    notify = cleaned.get("notify")
+    if isinstance(notify, dict):
+        masked = [k for k in WEBHOOK_FIELDS if notify.get(k) == MASKED]
+        cleaned["notify"] = {k: v for k, v in notify.items() if k not in masked}
+        ignored += [f"notify.{k}" for k in masked]
+    return cleaned, ignored
+
+
 _COMPANY_SECTIONS = {"icp": ICP, "signals": SignalConfig, "outreach": OutreachConfig, "notify": NotifyConfig}
 
 
@@ -644,9 +676,11 @@ def update_company(company_id: int, changes: dict[str, Any]) -> dict[str, Any]:
     {"icp": {"locations": ["UAE", "KSA"]}, "outreach": {"tone": "direct"}, "leads_per_week": 80}.
     Nested objects (icp, signals, outreach, notify) are merged key by key, but lists are replaced:
     to add one item, send the complete new list. Every lead is rescored after the change.
+    Read-only fields (id, timestamps) and webhook URLs shown as "(set)" are left unchanged.
     Returns the updated profile.
     """
     _get_company(company_id)
+    changes, ignored = _without_unchangeable(changes)
     if not changes:
         raise ToolError("changes is empty: pass the fields to change, e.g. {'icp': {'locations': ['UAE']}}")
     unknown = sorted(set(changes) - set(CompanyIn.model_fields))
@@ -659,10 +693,15 @@ def update_company(company_id: int, changes: dict[str, Any]) -> dict[str, Any]:
             if bad:
                 raise ToolError(f"unknown {section} field(s): {', '.join(bad)}. "
                                 f"Valid {section} fields: {', '.join(model.model_fields)}")
+    if isinstance(changes.get("name"), str) and changes["name"].strip():
+        _refuse_duplicate_name(changes["name"], company_id)
     with _tool_errors():
         company = repo.update_company(company_id, changes)
-    return {"profile": _profile(company), "changed": sorted(changes), "gaps": profile_gaps(company),
-            "links": _company_links(company_id)}
+    out: dict[str, Any] = {"profile": _profile(company), "changed": sorted(changes), "gaps": profile_gaps(company),
+                           "links": _company_links(company_id)}
+    if ignored:
+        out["unchanged"] = ignored
+    return out
 
 
 # --------------------------------------------------------------------------------------
@@ -671,6 +710,18 @@ def update_company(company_id: int, changes: dict[str, Any]) -> dict[str, Any]:
 
 # Scans that outlived the tool call keep running here (one per company).
 _scan_tasks: dict[int, asyncio.Task[dict[str, Any]]] = {}
+# A 'running' scan row older than this belongs to a scan that died with its process (as in web/scans.py).
+SCAN_STALE_AFTER = timedelta(minutes=15)
+
+
+def _scan_running_elsewhere(company_id: int) -> ScanRun | None:
+    """A scan another process started (dashboard, scheduler, CLI, another MCP server) that is still running."""
+    runs = repo.list_scan_runs(company_id, limit=1)
+    run = runs[0] if runs else None
+    if run is None or run.status != "running":
+        return None
+    started = run.started_at if run.started_at.tzinfo else run.started_at.replace(tzinfo=timezone.utc)
+    return run if datetime.now(timezone.utc) - started < SCAN_STALE_AFTER else None
 
 
 def _forget_scan(company_id: int, task: asyncio.Task[dict[str, Any]]) -> None:
@@ -740,6 +791,16 @@ async def run_signal_scan(company_id: int, sources: ScanSources = None,
             raise ToolError(f"unknown source(s): {', '.join(unknown)}; available: {', '.join(COLLECTORS)}")
     task = _scan_tasks.get(company_id)
     already_running = task is not None and not task.done()
+    if not already_running and (other := _scan_running_elsewhere(company_id)) is not None:
+        # Two scans at once would spend the free APIs' rate limits twice and send duplicate alerts.
+        return {
+            "status": "running",
+            "message": f"A scan started from {other.trigger} at {_iso(other.started_at)} is still running, so no "
+                       "new scan was started.",
+            "next_steps": [f"Wait a minute, then call pipeline_report({company_id}) or "
+                           f"list_leads({company_id}, sort='recent')."],
+            "links": _company_links(company_id),
+        }
     if not already_running:
         task = asyncio.ensure_future(services.run_scan(company_id, trigger="claude", sources=sources or None))
         _scan_tasks[company_id] = task

@@ -343,8 +343,9 @@ class RedditCollector(Collector):
     name = "reddit"
     label = "Reddit"
     signal_types = ("competitor_engagement", "keyword_mention")
-    requires = ("Reddit API app credentials (REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET; commercial use needs "
-                "Reddit's agreement) plus keywords or competitors (optionally subreddits)")
+    # Wording avoids the env var names: profile dumps are checked for leaked "SECRET" strings.
+    requires = ("Reddit API app credentials set by the server admin (commercial use needs Reddit's agreement) "
+                "plus keywords or competitors (optionally subreddits)")
 
     def __init__(self) -> None:
         # (client id, secret) -> (access token, monotonic expiry)

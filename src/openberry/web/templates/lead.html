@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% set base = "/c/" ~ company.id %}
+{% set lead_url = base ~ "/leads/" ~ lead.id %}
+<nav class="breadcrumbs" aria-label="Breadcrumb"><a href="{{ base }}/leads">Leads</a><span aria-hidden="true">/</span><span aria-current="page">{{ m.lead_title(lead) }}</span></nav>
+
+<section class="card lead-hero">
+  <div class="lead-hero-main">
+    {{ m.avatar(lead.full_name, lead.kind, "xl") }}
+    <div class="min0">
+      <h1>{{ m.lead_title(lead) }}</h1>
+      <p class="lead-hero-sub">
+        {% if lead.kind == "account" %}Account-level lead: the company is showing intent, the right person isn't known yet.
+        {% else %}{{ lead.title or "Title unknown" }}{% if lead.lead_company %} <span class="muted">at</span> {{ lead.lead_company }}{% endif %}{% endif %}
+      </p>
+      <p class="meta-inline">
+        {% if lead.location %}<span>{{ m.icon("pin", 14) }}{{ lead.location }}</span>{% endif %}
+        {% if lead.industry %}<span>{{ m.icon("target", 14) }}{{ lead.industry }}</span>{% endif %}
+        {% if lead.company_size %}<span>{{ m.icon("users", 14) }}{{ lead.company_size }}</span>{% endif %}
+        <span>{{ m.icon("zap", 14) }}Source: {{ lead.source|source_label }}</span>
+        <span>{{ m.icon("clock", 14) }}Added {{ m.when(lead.created_at) }}</span>
+      </p>
+      <p class="link-row">
+        {% if lead.linkedin_url|safe_url %}<a class="btn btn-sm" href="{{ lead.linkedin_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("linkedin", 14) }}LinkedIn</a>{% endif %}
+        {% if lead.profile_url|safe_url %}<a class="btn btn-sm" href="{{ lead.profile_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("external", 14) }}Profile</a>{% endif %}
+        {% if lead.website|safe_url %}<a class="btn btn-sm" href="{{ lead.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("globe", 14) }}Website</a>{% endif %}
+        {% if lead.email|mailto %}<a class="btn btn-sm" href="{{ lead.email|mailto }}">{{ m.icon("mail", 14) }}{{ lead.email }}</a>{% endif %}
+        {% if lead.phone %}<span class="btn btn-sm btn-static">{{ m.icon("phone", 14) }}{{ lead.phone }}</span>{% endif %}
+        {% if lead.github_username %}<a class="btn btn-sm" href="https://github.com/{{ lead.github_username|urlencode }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("github", 14) }}{{ lead.github_username }}</a>{% endif %}
+      </p>
+      {% if lead.tags %}<p class="tags">{% for t in lead.tags %}<span class="tag">{{ t }}</span>{% endfor %}</p>{% endif %}
+    </div>
+  </div>
+  <div class="lead-hero-score">
+    <div class="ring ring-{{ lead.tier }}" role="img" aria-label="Score {{ lead.score }} of 100, {{ lead.tier }}">
+      <svg viewBox="0 0 80 80" width="88" height="88" aria-hidden="true" focusable="false">
+        <circle class="ring-track" cx="40" cy="40" r="34" fill="none" stroke-width="7"/>
+        {% if lead.score > 0 %}<circle class="ring-fill" cx="40" cy="40" r="34" fill="none" stroke-width="7" stroke-linecap="round" stroke-dasharray="{{ '%.2f'|format(lead.score / 100 * 213.63) }} 213.63" transform="rotate(-90 40 40)"/>{% endif %}
+      </svg>
+      <span class="ring-num">{{ lead.score }}</span>
+    </div>
+    {{ m.tier_badge(lead.tier) }}
+    {{ m.status_pill(lead.status) }}
+  </div>
+</section>
+
+<div class="lead-layout">
+  <div class="lead-main">
+    <section class="card" id="why" aria-labelledby="why-title">
+      <header class="card-head"><div><h2 id="why-title">Why this score</h2><p class="card-sub">{{ "50% ICP fit + 50% intent" if lead.ai_score is none else "35% ICP fit + 35% intent + 30% Claude's assessment" }}</p></div></header>
+      <div class="subscores">
+        {% for label, value in [("ICP fit", lead.icp_score), ("Intent", lead.intent_score), ("AI assessment", lead.ai_score)] %}
+        <div class="subscore">
+          <span class="subscore-label">{{ label }}</span>
+          <span class="subscore-num">{{ value if value is not none else "—" }}</span>
+          <span class="meter meter-series" aria-hidden="true"><span class="meter-fill" style="width: {{ value or 0 }}%"></span></span>
+        </div>
+        {% endfor %}
+      </div>
+      {% if lead.score_reasons %}
+      <ul class="reasons">
+        {% for r in lead.score_reasons %}<li>{{ m.reason(r|reason_parts) }}</li>{% endfor %}
+      </ul>
+      {% endif %}
+      {% if lead.ai_rationale %}
+      <div class="ai-note"><p class="label-sm">{{ m.icon("sparkles", 14) }}Claude's rationale</p><p>{{ lead.ai_rationale }}</p></div>
+      {% endif %}
+    </section>
+
+    <section class="card" id="signals" aria-labelledby="signals-title">
+      <header class="card-head"><div><h2 id="signals-title">Signals</h2><p class="card-sub">{{ signal_total|plural("signal") }}{% if lead.kind == "person" and lead.lead_company %}, including company-level signals at {{ lead.lead_company }}{% endif %}</p></div></header>
+      {% if signals %}
+      <ol class="timeline">
+        {% for s in signals %}
+        <li class="tl-item">
+          <span class="tl-dot">{{ m.icon("zap", 12) }}</span>
+          <div class="tl-body min0">
+            <p class="tl-head"><span class="sig-type">{{ s.label }}</span>{% if s.lead_id != lead.id %} <span class="pill pill-muted">Company-level</span>{% endif %}
+              <span class="muted">· {{ s.source|source_label }} · {{ m.when(s.occurred_at) }}</span></p>
+            {% if s.title %}<p class="tl-title">{% if s.url|safe_url %}<a href="{{ s.url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ s.title }}{{ m.icon("external", 12) }}</a>{% else %}{{ s.title }}{% endif %}</p>
+            {% elif s.url|safe_url %}<p class="tl-title"><a href="{{ s.url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ s.url|host }}{{ m.icon("external", 12) }}</a></p>{% endif %}
+            {% if s.summary %}<p class="tl-summary">{{ s.summary|truncate(320) }}</p>{% endif %}
+          </div>
+        </li>
+        {% endfor %}
+      </ol>
+      {% else %}
+        {% call m.empty("zap", "No signals for this lead yet") %}<p>Signals from scans attach here automatically. You can also add one by hand below.</p>{% endcall %}
+      {% endif %}
+      <details class="inline-details">
+        <summary>{{ m.icon("plus", 14) }}Add a signal by hand</summary>
+        <form method="post" action="{{ lead_url }}/signals" class="stack">
+          {{ m.csrf() }}
+          <div class="grid-3">
+            {{ m.select("signal_type", "Signal type", SIGNAL_OPTIONS) }}
+            {{ m.input("signal_date", "When", type="date") }}
+            {{ m.input("signal_strength", "Strength (0-100)", type="number", attrs={"min": "0", "max": "100"}) }}
+          </div>
+          <div class="grid-2">
+            {{ m.input("signal_title", "What happened") }}
+            {{ m.input("signal_url", "Link") }}
+          </div>
+          <div><button class="btn btn-sm btn-primary" type="submit">Add signal</button></div>
+        </form>
+      </details>
+    </section>
+
+    <section class="card" id="outreach" aria-labelledby="outreach-title">
+      <header class="card-head"><div><h2 id="outreach-title">Outreach</h2><p class="card-sub">Drafts are never sent automatically. Approve, copy, send it yourself, then mark it sent.</p></div></header>
+      {% if messages %}
+      <div class="chat">
+        {% for msg in messages %}
+        {% set connect = msg.channel == "linkedin_connect" %}
+        {% if msg.direction == "inbound" %}
+        <article class="bubble bubble-in" id="msg-{{ msg.id }}">
+          <header class="bubble-head">{{ m.icon("reply", 14) }}<strong>{{ lead.full_name or "Lead" }} replied</strong><span class="muted">· {{ msg.channel|channel_label }} · {{ m.when(msg.sent_at or msg.created_at) }}</span></header>
+          <div class="bubble-body">{{ msg.body }}</div>
+        </article>
+        {% elif msg.status in ("draft", "approved") %}
+        <article class="bubble bubble-out bubble-edit" id="msg-{{ msg.id }}">
+          <form method="post" action="{{ base }}/messages/{{ msg.id }}">
+            {{ m.csrf() }}
+            <input type="hidden" name="next" value="{{ lead_url }}#msg-{{ msg.id }}">
+            <header class="bubble-head">{{ m.msg_pill(msg.status) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ msg.generated_by }} · {{ m.when(msg.created_at) }}</span></header>
+            {% if msg.channel == "email" %}
+            <label class="sr-only" for="msg-{{ msg.id }}-subject">Subject</label>
+            <input class="input" id="msg-{{ msg.id }}-subject" name="subject" value="{{ msg.subject }}" placeholder="Subject">
+            {% endif %}
+            <label class="sr-only" for="msg-{{ msg.id }}-body">Message</label>
+            <textarea class="input" id="msg-{{ msg.id }}-body" name="body" rows="{{ 4 if connect else 7 }}"{% if connect %} data-maxlen="{{ LINKEDIN_CONNECT_LIMIT }}" data-counter="msg-{{ msg.id }}-count"{% endif %}>{{ msg.body }}</textarea>
+            {% if connect %}<p class="counter{{ ' over' if msg.body|length > LINKEDIN_CONNECT_LIMIT }}" id="msg-{{ msg.id }}-count" aria-live="polite">{{ msg.body|length }} / {{ LINKEDIN_CONNECT_LIMIT }}{% if msg.body|length > LINKEDIN_CONNECT_LIMIT %}: too long for a connection note{% endif %}</p>{% endif %}
+            <div class="btn-row">
+              <button class="btn btn-sm" type="submit" name="action" value="save">Save</button>
+              {% if msg.status == "draft" %}<button class="btn btn-sm" type="submit" name="action" value="approve">{{ m.icon("check", 14) }}Approve</button>{% endif %}
+              <button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button>
+              {{ m.copy_button("#msg-" ~ msg.id ~ "-body") }}
+              <span class="spacer"></span>
+              <button class="btn btn-sm btn-ghost" type="submit" name="action" value="skip">Skip</button>
+              <button class="btn btn-sm btn-ghost btn-danger-text" type="submit" name="action" value="delete" data-confirm="Delete this draft?">{{ m.icon("trash", 14) }}<span class="sr-only">Delete</span></button>
+            </div>
+          </form>
+        </article>
+        {% else %}
+        <article class="bubble bubble-out" id="msg-{{ msg.id }}">
+          <header class="bubble-head">{{ m.msg_pill(msg.status) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ m.when(msg.sent_at or msg.updated_at) }}</span></header>
+          {% if msg.subject %}<p class="bubble-subject">{{ msg.subject }}</p>{% endif %}
+          <div class="bubble-body" id="msg-{{ msg.id }}-text">{{ msg.body }}</div>
+          <div class="btn-row">
+            {{ m.copy_button("#msg-" ~ msg.id ~ "-text", "Copy", "btn btn-sm btn-ghost") }}
+            {% if msg.status == "skipped" %}
+            <form method="post" action="{{ base }}/messages/{{ msg.id }}">{{ m.csrf() }}<input type="hidden" name="next" value="{{ lead_url }}#msg-{{ msg.id }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="draft">Back to drafts</button></form>
+            {% endif %}
+          </div>
+        </article>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% else %}
+        {% call m.empty("message", "No messages yet") %}<p>Draft the first message below, or ask Claude to write it.</p>{% endcall %}
+      {% endif %}
+
+      <div class="outreach-tools">
+        <form method="post" action="{{ lead_url }}/draft" class="tool-card">
+          {{ m.csrf() }}
+          <h3>{{ m.icon("edit", 15) }}Draft a message</h3>
+          <div class="grid-3">
+            <div class="field"><label for="draft-channel">Channel</label>
+              <select class="input" id="draft-channel" name="channel">{% for value, label in CHANNEL_OPTIONS %}<option value="{{ value }}"{% if value == default_channel %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+            <div class="field"><label for="draft-step">Step</label>
+              <input class="input" id="draft-step" name="step" type="number" min="1" max="10" value="{{ next_step }}"></div>
+            <div class="field"><label for="draft-engine">Writer</label>
+              <select class="input" id="draft-engine" name="engine"><option value="template">Template</option>{% if ollama_enabled %}<option value="ollama" selected>Local AI (Ollama)</option>{% endif %}</select></div>
+          </div>
+          <button class="btn btn-primary btn-sm" type="submit">{{ m.icon("wand", 14) }}Create draft</button>
+        </form>
+        <div class="tool-card">
+          <h3>{{ m.icon("sparkles", 15) }}Ask Claude</h3>
+          <p class="small muted">Best quality: Claude reads the full context and saves the draft here.</p>
+          <div class="prompt"><p id="claude-lead-prompt">{{ claude_prompt }}</p>{{ m.copy_button("#claude-lead-prompt", "Copy", "btn btn-sm btn-ghost") }}</div>
+        </div>
+        <form method="post" action="{{ lead_url }}/reply" class="tool-card">
+          {{ m.csrf() }}
+          <h3>{{ m.icon("reply", 15) }}Log a reply</h3>
+          <div class="field"><label for="reply-body">Their reply</label>
+            <textarea class="input" id="reply-body" name="body" rows="3" placeholder="Paste what they wrote back" required></textarea></div>
+          <div class="input-row">
+            <label class="sr-only" for="reply-channel">Channel</label>
+            <select class="input" id="reply-channel" name="channel">{% for value, label in CHANNEL_OPTIONS if value != "linkedin_connect" %}<option value="{{ value }}"{% if value == "linkedin_dm" %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+            <button class="btn btn-sm" type="submit">Log reply</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <aside class="lead-side">
+    <section class="card" aria-labelledby="pipeline-title">
+      <h2 id="pipeline-title" class="card-title">Pipeline</h2>
+      <form method="post" action="{{ lead_url }}/update" class="stack">
+        {{ m.csrf() }}
+        <div class="field"><label for="lead-status">Status</label>
+          <select class="input" id="lead-status" name="status">{% for value, label in STATUS_OPTIONS %}<option value="{{ value }}"{% if lead.status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+        <div class="field"><label for="lead-notes">Notes</label>
+          <textarea class="input" id="lead-notes" name="notes" rows="4">{{ lead.notes }}</textarea></div>
+        <div class="field"><label for="lead-tags">Tags</label>
+          <input class="input" id="lead-tags" name="tags" value="{{ lead.tags|join(', ') }}" aria-describedby="lead-tags-help">
+          <p class="help" id="lead-tags-help">Comma-separated.</p></div>
+        <button class="btn btn-primary btn-block" type="submit">Save</button>
+      </form>
+    </section>
+
+    {% if lead.kind == "account" %}
+    <section class="card" aria-labelledby="contacts-title">
+      <h2 id="contacts-title" class="card-title">Known contacts</h2>
+      {% if contacts %}
+      <ul class="list">{% for c in contacts %}<li class="list-item">{{ m.avatar(c.full_name) }}<div class="min0 grow"><a class="lead-name" href="{{ base }}/leads/{{ c.id }}">{{ c.full_name }}</a><span class="sub">{{ c.title or "Title unknown" }}</span></div>{{ m.score(c.score, c.tier) }}</li>{% endfor %}</ul>
+      {% else %}<p class="muted small">Nobody at {{ lead.lead_company or "this company" }} is known yet.</p>{% endif %}
+      <div class="hint">
+        <p class="small">{{ m.icon("sparkles", 14) }}Ask Claude to find the decision-maker:</p>
+        <div class="prompt"><p id="dm-prompt">{{ decision_maker_prompt }}</p>{{ m.copy_button("#dm-prompt", "Copy", "btn btn-sm btn-ghost") }}</div>
+      </div>
+    </section>
+    {% elif contacts %}
+    <section class="card" aria-labelledby="colleagues-title">
+      <h2 id="colleagues-title" class="card-title">Colleagues at {{ lead.lead_company }}</h2>
+      <ul class="list">{% for c in contacts %}<li class="list-item">{{ m.avatar(c.full_name) }}<div class="min0 grow"><a class="lead-name" href="{{ base }}/leads/{{ c.id }}">{{ c.full_name }}</a><span class="sub">{{ c.title or "Title unknown" }}</span></div>{{ m.score(c.score, c.tier) }}</li>{% endfor %}</ul>
+    </section>
+    {% endif %}
+
+    <section class="card">
+      <details class="profile-edit">
+        <summary><span class="card-title">Edit profile</span>{{ m.icon("chevron-down", 16, "chev") }}</summary>
+        <form method="post" action="{{ lead_url }}/profile" class="stack">
+          {{ m.csrf() }}
+          {% for name, label in [("full_name", "Full name"), ("title", "Job title"), ("lead_company", "Company"), ("company_domain", "Company domain"), ("industry", "Industry"), ("company_size", "Company size"), ("location", "Location"), ("linkedin_url", "LinkedIn URL"), ("email", "Email"), ("phone", "Phone"), ("website", "Website"), ("github_username", "GitHub username"), ("twitter", "X / Twitter"), ("profile_url", "Other profile URL")] %}
+          <div class="field"><label for="p-{{ name }}">{{ label }}</label><input class="input" id="p-{{ name }}" name="{{ name }}" value="{{ lead[name] }}"></div>
+          {% endfor %}
+          <div class="field"><label for="p-bio">Bio</label><textarea class="input" id="p-bio" name="bio" rows="3">{{ lead.bio }}</textarea></div>
+          <button class="btn btn-primary btn-block" type="submit">Save profile</button>
+        </form>
+      </details>
+    </section>
+
+    <section class="card">
+      <form method="post" action="{{ lead_url }}/delete">
+        {{ m.csrf() }}
+        <button class="btn btn-ghost btn-danger-text btn-block" type="submit" data-confirm="Delete this lead with its signals and messages?">{{ m.icon("trash") }}Delete lead</button>
+      </form>
+    </section>
+  </aside>
+</div>
+{% endblock %}

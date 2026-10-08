@@ -1,0 +1,695 @@
+"""MCP server: every tool over the in-memory client, resources, prompts, HTTP mount and stdio smoke test."""
+
+import asyncio
+import json
+import os
+import queue
+import socket
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import httpx
+import httpx2
+import pytest
+import uvicorn
+from fastapi import FastAPI
+from mcp.client import Client
+from mcp.client.streamable_http import streamable_http_client
+
+from openberry import db, mcp_server, repo, services
+from openberry.config import Settings
+from openberry.mcp_server import build_prospecting_plan, build_server, mount_http, transport_security
+from openberry.models import CompanyIn, LeadIn, SignalIn
+from openberry.seed import seed_demo
+
+EXPECTED_TOOLS = {
+    "list_companies", "get_company_profile", "register_company", "update_company", "run_signal_scan",
+    "list_leads", "get_lead", "add_leads", "add_signal", "update_lead", "assess_lead", "get_outreach_context",
+    "save_outreach_message", "list_outreach", "update_message", "log_reply", "followups_due", "pipeline_report",
+    "get_prospecting_plan", "export_leads_csv", "delete_lead",
+}
+
+INIT_REQUEST = {
+    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+    "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+               "clientInfo": {"name": "test", "version": "0"}},
+}
+
+
+@pytest.fixture
+def demo_id() -> int:
+    return seed_demo()
+
+
+@asynccontextmanager
+async def mcp_client() -> AsyncIterator[Client]:
+    async with Client(build_server()) as client:
+        yield client
+
+
+async def ok(client: Client, tool: str, **args: Any) -> dict[str, Any]:
+    result = await client.call_tool(tool, args)
+    assert not result.is_error, result.content[0].text
+    return result.structured_content
+
+
+async def error_text(client: Client, tool: str, **args: Any) -> str:
+    result = await client.call_tool(tool, args)
+    assert result.is_error, f"{tool} unexpectedly succeeded: {result.structured_content}"
+    return result.content[0].text
+
+
+# --------------------------------------------------------------------------------------
+# Tool catalogue
+# --------------------------------------------------------------------------------------
+
+
+async def test_lists_all_tools_with_annotations():
+    async with mcp_client() as c:
+        tools = {t.name: t for t in (await c.list_tools()).tools}
+    assert set(tools) == EXPECTED_TOOLS
+    for tool in tools.values():
+        assert tool.description and len(tool.description) > 80, tool.name
+        assert tool.annotations is not None and tool.annotations.title, tool.name
+    assert tools["delete_lead"].annotations.destructive_hint is True
+    assert tools["list_leads"].annotations.read_only_hint is True
+    assert tools["run_signal_scan"].annotations.open_world_hint is True
+    assert tools["add_leads"].annotations.read_only_hint is False
+    assert tools["add_leads"].annotations.destructive_hint is False
+    # Rich schemas: nested registration profile and lead/signal shape are advertised.
+    assert "CompanyProfile" in json.dumps(tools["register_company"].input_schema)
+    assert "SignalIn" in json.dumps(tools["add_leads"].input_schema)
+    assert tools["list_leads"].input_schema["properties"]["status"]["anyOf"][0]["enum"][0] == "new"
+
+
+def test_literal_vocabularies_match_models():
+    from typing import get_args
+
+    from openberry import models
+
+    assert set(get_args(mcp_server.Tier)) == set(models.TIERS)
+    assert set(get_args(mcp_server.LeadStatus)) == set(models.LEAD_STATUSES)
+    assert set(get_args(mcp_server.Channel)) == set(models.MESSAGE_CHANNELS)
+    assert set(get_args(mcp_server.MessageStatus)) == set(models.MESSAGE_STATUSES)
+
+
+async def test_server_identity_and_instructions():
+    server = build_server()
+    assert server.name == "openberry"
+    assert "never" in server.instructions.lower() and "add_leads" in server.instructions
+    assert "list_companies" in server.instructions and "human" in server.instructions
+
+
+# --------------------------------------------------------------------------------------
+# Companies
+# --------------------------------------------------------------------------------------
+
+
+async def test_company_tools(demo_id, settings):
+    async with mcp_client() as c:
+        data = await ok(c, "list_companies")
+        [row] = data["companies"]
+        assert row["id"] == demo_id and row["leads"] > 10 and row["hot_leads"] >= 1
+        assert row["link"] == f"{settings.base_url}/c/{demo_id}"
+
+        profile = await ok(c, "get_company_profile", company_id=demo_id)
+        assert profile["profile"]["icp"]["locations"] == ["UAE"]
+        assert {col["name"] for col in profile["collectors"]} >= {"hackernews", "reddit"}
+        assert profile["stats"]["leads_total"] == row["leads"]
+
+        created = await ok(c, "register_company", name="Gulf Freight", profile={
+            "website": "https://gulf-freight.example",
+            "description": "Freight forwarding for e-commerce brands",
+            "icp": {"job_titles": "Head of Logistics, COO", "locations": ["UAE", "KSA"]},
+            "signals": {"keywords": ["freight forwarding"], "job_boards": ["greenhouse:noon:Noon"]},
+            "outreach": {"sender_name": "Rana", "banned_words": ["synergy"]},
+        })
+        new_id = created["company_id"]
+        stored = repo.get_company(new_id)
+        assert stored.name == "Gulf Freight" and stored.icp.job_titles == ["Head of Logistics", "COO"]
+        assert stored.signals.job_boards[0].token == "noon"
+        assert isinstance(created["collectors_ready"], list)
+        assert any("competitors" in gap for gap in created["gaps"])
+
+        assert "already exists" in await error_text(c, "register_company", name="gulf freight")
+        assert "name is required" in await error_text(c, "register_company", profile={"website": "x.example"})
+
+        updated = await ok(c, "update_company", company_id=new_id,
+                           changes={"icp": {"locations": ["Qatar"]}, "leads_per_week": 80})
+        assert updated["profile"]["icp"]["locations"] == ["Qatar"]
+        assert updated["profile"]["icp"]["job_titles"] == ["Head of Logistics", "COO"]
+        assert updated["profile"]["leads_per_week"] == 80
+        assert "unknown field(s): colour" in await error_text(c, "update_company", company_id=new_id,
+                                                              changes={"colour": "red"})
+        assert "unknown icp field(s): job_title" in await error_text(
+            c, "update_company", company_id=new_id, changes={"icp": {"job_title": ["CEO"]}})
+        assert "leads_per_week" in await error_text(c, "update_company", company_id=new_id,
+                                                    changes={"leads_per_week": 0})
+
+        text = await error_text(c, "get_company_profile", company_id=999)
+        assert "company 999 not found" in text and "list_companies" in text
+
+
+async def test_profile_masks_webhooks(company):
+    repo.update_company(company.id, {"notify": {"slack_webhook_url": "https://hooks.slack.com/services/SECRET"}})
+    async with mcp_client() as c:
+        profile = await ok(c, "get_company_profile", company_id=company.id)
+    assert profile["profile"]["notify"]["slack_webhook_url"] == "(set)"
+    assert "SECRET" not in json.dumps(profile)
+
+
+# --------------------------------------------------------------------------------------
+# Leads and signals
+# --------------------------------------------------------------------------------------
+
+
+async def test_list_leads_shape_and_filters(demo_id):
+    async with mcp_client() as c:
+        page = await ok(c, "list_leads", company_id=demo_id, limit=5)
+        assert set(page) >= {"company_id", "total", "offset", "count", "next_offset", "leads", "link"}
+        assert page["count"] == 5 and page["total"] > 5 and page["next_offset"] == 5
+        row = page["leads"][0]
+        assert set(row) >= {"id", "kind", "name", "title", "company", "location", "score", "tier", "status",
+                            "reasons", "last_signal_at", "links"}
+        assert len(row["reasons"]) <= 3 and row["links"]["dashboard"].endswith(f"/c/{demo_id}/leads/{row['id']}")
+        scores = [r["score"] for r in page["leads"]]
+        assert scores == sorted(scores, reverse=True)
+
+        hot = await ok(c, "list_leads", company_id=demo_id, tier="hot")
+        assert hot["leads"] and all(r["tier"] == "hot" for r in hot["leads"])
+        accounts = await ok(c, "list_leads", company_id=demo_id, kind="account")
+        assert accounts["total"] == 3 and all(r["kind"] == "account" for r in accounts["leads"])
+        found = await ok(c, "list_leads", company_id=demo_id, search="Aisha")
+        assert [r["name"] for r in found["leads"]] == ["Aisha Rahman"]
+
+        assert "Input should be 'new'" in await error_text(c, "list_leads", company_id=demo_id, status="pending")
+        assert "list_companies" in await error_text(c, "list_leads", company_id=404)
+
+
+async def test_get_add_update_assess_delete_lead(company):
+    payload = [
+        {"full_name": "Layla Haddad", "title": "Travel Manager", "lead_company": "Northwind Consulting",
+         "industry": "Consulting", "company_size": "201-1000", "location": "Dubai, UAE",
+         "linkedin_url": "https://www.linkedin.com/in/layla-haddad-test",
+         "signals": [{"type": "competitor_engagement", "title": "Commented on Blacklane's post",
+                      "url": "https://www.linkedin.com/posts/blacklane-1", "occurred_at": "2026-10-05",
+                      "strength": 70}]},
+        {"lead_company": "Harbor Lane Bank",
+         "signals": [{"type": "hiring", "title": "Hiring: Travel Manager", "url": "https://jobs.example/1"}]},
+        {"title": "CEO"},
+    ]
+    async with mcp_client() as c:
+        added = await ok(c, "add_leads", company_id=company.id, leads=payload)
+        assert added["created"] == 2 and added["failed"] == 1
+        assert added["errors"][0]["index"] == 2 and "full_name or a lead_company" in added["errors"][0]["error"]
+        person = added["results"][0]
+        assert person["created"] and person["score"] > 0 and person["link"].endswith(f"/leads/{person['id']}")
+        stored = repo.get_lead(person["id"])
+        assert stored.source == "claude"
+
+        again = await ok(c, "add_leads", company_id=company.id, leads=[
+            {"full_name": "Layla H.", "linkedin_url": "linkedin.com/in/Layla-Haddad-Test/", "email": "layla@nw.example",
+             "signals": [{"type": "competitor_engagement", "title": "Commented on Blacklane's post",
+                          "url": "https://www.linkedin.com/posts/blacklane-1", "occurred_at": "2026-10-05"}]}])
+        assert again["merged"] == 1 and again["results"][0]["id"] == person["id"]
+        assert repo.get_lead(person["id"]).email == "layla@nw.example"
+
+        assert "at most 100" in await error_text(c, "add_leads", company_id=company.id,
+                                                 leads=[{"full_name": f"P{i}"} for i in range(101)])
+        assert "leads is empty" in await error_text(c, "add_leads", company_id=company.id, leads=[])
+
+        detail = await ok(c, "get_lead", lead_id=person["id"])
+        assert detail["lead"]["full_name"] == "Layla Haddad"
+        assert detail["signals"][0]["type"] == "competitor_engagement"
+        assert detail["signals_total"] == 1 and detail["messages"] == []
+        assert detail["link"].endswith(f"/c/{company.id}/leads/{person['id']}")
+        account = await ok(c, "get_lead", lead_id=added["results"][1]["id"])
+        assert account["lead"]["kind"] == "account" and "decision-maker" in account["next_step"]
+
+        sig = await ok(c, "add_signal", company_id=company.id, lead_id=person["id"], type="job_change",
+                       title="Promoted to Head of Travel", occurred_at="2026-10-06", strength=60)
+        assert sig["created"] and sig["signal"]["type"] == "job_change"
+        assert sig["lead"]["score"] >= person["score"]
+        dup = await ok(c, "add_signal", company_id=company.id, lead_id=person["id"], type="job_change",
+                       title="Promoted to Head of Travel", occurred_at="2026-10-06")
+        assert not dup["created"] and "duplicate" in dup["note"]
+        assert "add_leads" in await error_text(c, "add_signal", company_id=company.id, type="hiring", title="x")
+        assert "unknown signal type 'tweet'" in await error_text(
+            c, "add_signal", company_id=company.id, lead_id=person["id"], type="tweet", title="x")
+        other = repo.create_company(CompanyIn(name="Other Co"))
+        assert f"not found in company {other.id}" in await error_text(
+            c, "add_signal", company_id=other.id, lead_id=person["id"], type="hiring", title="x")
+
+        upd = await ok(c, "update_lead", lead_id=person["id"], changes={"status": "qualified", "tags": ["vip"]})
+        assert upd["lead"]["status"] == "qualified" and repo.get_lead(person["id"]).tags == ["vip"]
+        assert "status must be one of" in await error_text(c, "update_lead", lead_id=person["id"],
+                                                           changes={"status": "maybe"})
+        assert "Editable fields" in await error_text(c, "update_lead", lead_id=person["id"],
+                                                     changes={"favourite_colour": "red"})
+        assert "use assess_lead" in await error_text(c, "update_lead", lead_id=person["id"], changes={"score": 99})
+
+        assessed = await ok(c, "assess_lead", lead_id=person["id"], fit_score=95,
+                            rationale="Travel manager at a target consulting firm, engaging with a competitor")
+        assert assessed["ai_score"] == 95 and assessed["score_before"] != assessed["score"]
+        assert any(r.startswith("AI 95") for r in assessed["reasons"])
+        assert "less than or equal to 100" in await error_text(c, "assess_lead", lead_id=person["id"],
+                                                               fit_score=101, rationale="x")
+        assert "rationale is required" in await error_text(c, "assess_lead", lead_id=person["id"],
+                                                           fit_score=50, rationale="  ")
+
+        deleted = await ok(c, "delete_lead", lead_id=added["results"][1]["id"])
+        assert deleted["deleted"] and repo.find_lead(added["results"][1]["id"]) is None
+        text = await error_text(c, "delete_lead", lead_id=added["results"][1]["id"])
+        assert "not found" in text and "list_leads" in text
+
+
+# --------------------------------------------------------------------------------------
+# Outreach
+# --------------------------------------------------------------------------------------
+
+
+async def test_outreach_flow(company):
+    repo.update_company(company.id, {"outreach": {"banned_words": ["synergy", "game changer"]}})
+    lead, _ = repo.upsert_lead(company.id, LeadIn(
+        full_name="Omar Haddad", title="Travel Manager", lead_company="Northwind", location="Dubai, UAE",
+        linkedin_url="https://www.linkedin.com/in/omar-test",
+        signals=[SignalIn(type="keyword_mention", title="Looking for a chauffeur service in Dubai")]))
+    async with mcp_client() as c:
+        ctx = await ok(c, "get_outreach_context", lead_id=lead.id)
+        assert ctx["channel"] == "linkedin_connect" and ctx["step"] == 1
+        assert ctx["limits"]["max_chars"] == 300 and ctx["template_draft"]["body"]
+        assert ctx["lead"]["name"] == "Omar Haddad" and ctx["signals"][0]["type"] == "keyword_mention"
+        assert ctx["style"]["banned_words"] == ["synergy", "game changer"]
+        assert ctx["save_with"]["arguments"]["lead_id"] == lead.id
+
+        too_long = "x" * 301
+        assert "limited to 300 characters; this one has 301" in await error_text(
+            c, "save_outreach_message", lead_id=lead.id, body=too_long)
+        text = await error_text(c, "save_outreach_message", lead_id=lead.id,
+                                body="Hi Omar, real Synergy here. A game changer!")
+        assert "banned words" in text and "synergy" in text and "game changer" in text
+        assert "subject" in await error_text(c, "save_outreach_message", lead_id=lead.id, channel="email",
+                                             body="Hi Omar")
+        assert "placeholder" in await error_text(c, "save_outreach_message", lead_id=lead.id,
+                                                 body="Hi {first_name}, saw your post.")
+
+        first = await ok(c, "save_outreach_message", lead_id=lead.id,
+                         body="Hi Omar, saw your post about chauffeurs in Dubai. Happy to connect!")
+        assert first["status"] == "draft" and first["superseded_draft_ids"] == []
+        assert "draft only" in first["reminder"] and "sends it themselves" in first["reminder"]
+        second = await ok(c, "save_outreach_message", lead_id=lead.id,
+                          body="Hi Omar, your Dubai chauffeur question caught my eye. Would love to connect.")
+        assert second["superseded_draft_ids"] == [first["message_id"]]
+        assert repo.get_message(first["message_id"]).status == "skipped"
+        assert repo.get_message(second["message_id"]).generated_by == "claude"
+
+        drafts = await ok(c, "list_outreach", company_id=company.id, status="draft")
+        assert [m["id"] for m in drafts["messages"]] == [second["message_id"]]
+        assert drafts["messages"][0]["lead_name"] == "Omar Haddad"
+
+        assert "limited to 300" in await error_text(c, "update_message", message_id=second["message_id"],
+                                                    body="y" * 400)
+        assert "nothing to change" in await error_text(c, "update_message", message_id=second["message_id"])
+        sent = await ok(c, "update_message", message_id=second["message_id"], status="sent")
+        assert sent["message"]["status"] == "sent" and sent["lead_status"] == "contacted"
+
+        # The follow-up becomes due once followup_days have passed since sending.
+        assert (await ok(c, "followups_due", company_id=company.id))["count"] == 0
+        with db.connect() as conn:
+            conn.execute("UPDATE messages SET sent_at = ? WHERE id = ?",
+                         (repo.iso(repo.utcnow() - timedelta(days=5)), second["message_id"]))
+        due = await ok(c, "followups_due", company_id=company.id)
+        assert due["count"] == 1 and due["followups"][0]["next_step"] == 2
+        assert due["followups"][0]["last_channel"] == "linkedin_connect"
+        ctx2 = await ok(c, "get_outreach_context", lead_id=lead.id, channel="linkedin_dm")
+        assert ctx2["step"] == 2 and "follow-up" in ctx2["channel_guidance"]
+
+        draft = await ok(c, "save_outreach_message", lead_id=lead.id, channel="linkedin_dm", step=2,
+                         body="Hi Omar, one more thought: we handle airport pickups with monthly invoicing.")
+        reply = await ok(c, "log_reply", lead_id=lead.id, body="Thanks, send me your rates.")
+        assert reply["lead"]["status"] == "replied" and reply["skipped_draft_ids"] == [draft["message_id"]]
+        ctx3 = await ok(c, "get_outreach_context", lead_id=lead.id, channel="linkedin_dm")
+        assert any("replied" in w for w in ctx3["warnings"])
+        assert "list_leads" in await error_text(c, "get_outreach_context", lead_id=9999)
+        assert "list_outreach" in await error_text(c, "update_message", message_id=9999, status="sent")
+
+
+# --------------------------------------------------------------------------------------
+# Reports, plan, export
+# --------------------------------------------------------------------------------------
+
+
+async def test_report_plan_and_export(demo_id):
+    async with mcp_client() as c:
+        report = await ok(c, "pipeline_report", company_id=demo_id)
+        assert report["company"]["id"] == demo_id and report["stats"]["leads_total"] > 10
+        assert report["top_hot_leads"] and report["hot_leads_total"] >= len(report["top_hot_leads"])
+        assert report["signal_mix"]["by_type"]
+        suggestions = " ".join(report["suggestions"])
+        assert "draft(s) are waiting" in suggestions and "not set up" in suggestions
+
+        plan = await ok(c, "get_prospecting_plan", company_id=demo_id)
+        assert plan["company_id"] == demo_id and plan["linkedin_people_searches"]
+        assert plan["add_leads_example"]["company_id"] == demo_id
+
+        csv_result = await c.call_tool("export_leads_csv", {"company_id": demo_id, "tier": "hot"})
+        assert not csv_result.is_error
+        csv_text = csv_result.content[0].text
+        lines = csv_text.strip().splitlines()
+        assert lines[0].startswith("id,full_name,title") and len(lines) - 1 == report["hot_leads_total"]
+
+
+def test_build_prospecting_plan(company):
+    company = repo.update_company(company.id, {
+        "best_customers": ["Falcon Capital"],
+        "signals": {"events": ["GITEX Global"], "influencers": ["https://www.linkedin.com/in/some-influencer"]},
+        "icp": {"exclude_companies": ["Acme Bank"]},
+    })
+    plan = build_prospecting_plan(company, now=datetime(2026, 10, 8, tzinfo=timezone.utc))
+    searches = plan["linkedin_people_searches"]
+    assert 0 < len(searches) <= 10
+    assert {s["title"] for s in searches} == {"Executive Assistant", "Travel Manager"}
+    assert searches[0]["url"].startswith("https://www.linkedin.com/search/results/people/?keywords=")
+    assert any(d["query"].startswith('site:linkedin.com/in "Executive Assistant" "UAE"')
+               for d in plan["search_engine_dorks"])
+    assert any(d.get("signal_type") == "keyword_mention" for d in plan["search_engine_dorks"])
+    assert any(d.get("signal_type") == "competitor_engagement" for d in plan["search_engine_dorks"])
+    assert [c["competitor"] for c in plan["competitor_engagers"]] == ["Blacklane", "Careem Business"]
+    assert plan["influencer_engagers"][0]["signal_type"] == "influencer_engagement"
+    assert '"GITEX Global" 2026 speakers' in plan["events"][0]["queries"]
+    assert plan["lookalikes_of_best_customers"][0]["seed"] == "Falcon Capital"
+    assert plan["hiring_searches"]["searches"][0]["keyword"] == "Executive Assistant"
+    assert plan["exclude"]["never_contact_companies"] == ["Acme Bank"]
+    servers = json.dumps(plan["companion_mcp_servers"])
+    assert "stickerdaniel/linkedin-mcp-server" in servers and "playwright" in servers.lower()
+    assert "User Agreement" in servers
+    # The example payload is a valid add_leads input.
+    example = plan["add_leads_example"]["leads"]
+    assert all(LeadIn.model_validate(lead).signals for lead in example)
+    assert plan["target"] == {"leads_per_week": 50, "leads_per_day": 10}
+
+    bare = repo.create_company(CompanyIn(name="Bare", icp={"seniorities": ["founder", "vp"]}))
+    bare_plan = build_prospecting_plan(bare)
+    assert {s["title"] for s in bare_plan["linkedin_people_searches"]} == {"Founder", "VP"}
+    assert any(g.startswith("icp.job_titles") for g in bare_plan["gaps"])
+    assert bare_plan["events"] == [] and bare_plan["competitor_engagers"] == []
+
+
+# --------------------------------------------------------------------------------------
+# Signal scans
+# --------------------------------------------------------------------------------------
+
+
+async def test_run_signal_scan_reports_new_hot_leads(company, monkeypatch):
+    hot, _ = repo.upsert_lead(company.id, LeadIn(full_name="Hot Lead", title="Travel Manager"))
+    calls = []
+
+    async def fake_run_scan(company_id, *, trigger="manual", sources=None, client=None):
+        calls.append((company_id, trigger, sources))
+        return {"status": "ok", "run_id": 7, "collectors": {"hackernews": {"found": 3, "warnings": []},
+                                                             "reddit": {"found": 0, "error": "HTTPError: 429"}},
+                "skipped": ["github"], "signals_new": 3, "signals_duplicate": 1, "leads_new": 2,
+                "leads_updated": 1, "newly_hot": [hot.id], "notified": [], "drafted": 0, "errors": []}
+
+    monkeypatch.setattr(services, "run_scan", fake_run_scan)
+    async with mcp_client() as c:
+        result = await ok(c, "run_signal_scan", company_id=company.id, sources=["hackernews", "reddit"])
+        assert calls == [(company.id, "claude", ["hackernews", "reddit"])]
+        assert result["signals_new"] == 3 and result["newly_hot_count"] == 1
+        assert result["top_new_hot_leads"][0]["id"] == hot.id
+        assert result["collectors"]["reddit"]["error"] == "HTTPError: 429"
+        assert "unknown source(s): twitter" in await error_text(c, "run_signal_scan", company_id=company.id,
+                                                                sources=["twitter"])
+        assert "list_companies" in await error_text(c, "run_signal_scan", company_id=12345)
+
+
+async def test_run_signal_scan_unconfigured_company_is_quick():
+    company = repo.create_company(CompanyIn(name="Quiet Co"))
+    async with mcp_client() as c:
+        started = time.monotonic()
+        result = await ok(c, "run_signal_scan", company_id=company.id)
+    assert time.monotonic() - started < 10
+    assert result["status"] == "ok" and result["collectors"] == {}
+    assert "No collector is configured" in result["hint"]
+    assert repo.get_company(company.id).last_scan_at is not None
+
+
+async def test_slow_scan_continues_in_background(company, monkeypatch):
+    finished = asyncio.Event()
+
+    async def slow_run_scan(company_id, *, trigger="manual", sources=None, client=None):
+        await finished.wait()
+        return {"status": "ok", "collectors": {}, "skipped": [], "newly_hot": []}
+
+    monkeypatch.setattr(services, "run_scan", slow_run_scan)
+    async with mcp_client() as c:
+        first = await ok(c, "run_signal_scan", company_id=company.id, wait_seconds=1)
+        assert first["status"] == "running"
+        second = await ok(c, "run_signal_scan", company_id=company.id, wait_seconds=1)
+        assert "already in progress" in second["message"]
+        assert len(mcp_server._scan_tasks) == 1
+        finished.set()
+        await asyncio.gather(*mcp_server._scan_tasks.values())
+    assert mcp_server._scan_tasks == {}
+
+
+# --------------------------------------------------------------------------------------
+# Resources and prompts
+# --------------------------------------------------------------------------------------
+
+
+async def test_resources(demo_id):
+    async with mcp_client() as c:
+        resources = {str(r.uri) for r in (await c.list_resources()).resources}
+        templates = {t.uri_template for t in (await c.list_resource_templates()).resource_templates}
+        assert "openberry://companies" in resources
+        assert templates == {"openberry://company/{company_id}/profile", "openberry://company/{company_id}/hot-leads"}
+
+        companies = json.loads((await c.read_resource("openberry://companies")).contents[0].text)
+        assert companies["companies"][0]["id"] == demo_id
+        profile = await c.read_resource(f"openberry://company/{demo_id}/profile")
+        assert profile.contents[0].mime_type == "application/json"
+        assert json.loads(profile.contents[0].text)["name"].startswith("Demo")
+        hot = json.loads((await c.read_resource(f"openberry://company/{demo_id}/hot-leads")).contents[0].text)
+        assert hot["leads"] and all(r["tier"] == "hot" for r in hot["leads"])
+        with pytest.raises(Exception, match="not found"):
+            await c.read_resource("openberry://company/999/profile")
+
+
+async def test_prompts(demo_id):
+    async with mcp_client() as c:
+        prompts = {p.name: p for p in (await c.list_prompts()).prompts}
+        assert set(prompts) == {"onboard_company", "daily_lead_hunt", "write_outreach", "weekly_report"}
+        assert [a.name for a in prompts["daily_lead_hunt"].arguments] == ["company_id"]
+
+        onboard = await c.get_prompt("onboard_company", {})
+        assert "register_company" in onboard.messages[0].content.text
+        hunt = (await c.get_prompt("daily_lead_hunt", {"company_id": str(demo_id)})).messages[0].content.text
+        assert "Desert Line" in hunt and "add_leads" in hunt and f"run_signal_scan({demo_id})" in hunt
+        write = (await c.get_prompt("write_outreach", {"lead_id": "3", "channel": "email"})).messages[0].content.text
+        assert 'channel="email"' in write and "save_outreach_message" in write
+        report = (await c.get_prompt("weekly_report", {"company_id": str(demo_id)})).messages[0].content.text
+        assert f"pipeline_report({demo_id})" in report
+
+
+# --------------------------------------------------------------------------------------
+# Streamable HTTP on the dashboard
+# --------------------------------------------------------------------------------------
+
+
+def make_app(settings: Settings) -> FastAPI:
+    """A minimal stand-in for the dashboard: a lifespan that enters app.state.lifespan_hooks."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        async with AsyncExitStack() as stack:
+            for hook in getattr(app.state, "lifespan_hooks", []):
+                await stack.enter_async_context(hook())
+            yield
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"ok": "yes"}
+
+    mount_http(app, settings)
+    return app
+
+
+@contextmanager
+def serve_in_thread(app: FastAPI) -> Iterator[str]:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "uvicorn did not start"
+        time.sleep(0.02)
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(10)
+        sock.close()
+
+
+async def test_http_round_trip_with_bearer_token(settings, company):
+    settings.api_token = "s3cret-token"
+    settings.password = "dashboard-password"
+    app = make_app(settings)
+    with serve_in_thread(app) as base:
+        async with httpx.AsyncClient() as raw:
+            denied = await raw.post(f"{base}/mcp", json=INIT_REQUEST,
+                                    headers={"Accept": "application/json, text/event-stream"})
+            assert denied.status_code == 401 and "Bearer" in denied.json()["message"]
+            assert denied.headers["www-authenticate"].startswith("Bearer")
+            wrong = await raw.post(f"{base}/mcp", json=INIT_REQUEST, headers={"Authorization": "Bearer nope"})
+            assert wrong.status_code == 401
+            assert (await raw.get(f"{base}/health")).json() == {"ok": "yes"}
+
+        headers = {"Authorization": "Bearer s3cret-token"}
+        for path, mode in (("/mcp", "legacy"), ("/mcp/", "auto")):
+            async with httpx2.AsyncClient(headers=headers) as http:
+                async with Client(streamable_http_client(f"{base}{path}", http_client=http), mode=mode) as c:
+                    tools = {t.name for t in (await c.list_tools()).tools}
+                    assert tools == EXPECTED_TOOLS
+                    result = await c.call_tool("list_companies", {})
+                    assert not result.is_error
+                    assert result.structured_content["companies"][0]["name"] == "Acme Chauffeurs"
+                    # A proxy/Docker Host header is fine when a token protects the endpoint.
+        async with httpx.AsyncClient() as raw:
+            proxied = await raw.post(f"{base}/mcp", json=INIT_REQUEST, headers={
+                **headers, "Host": "leads.example.com", "Accept": "application/json, text/event-stream"})
+            assert proxied.status_code == 200
+            assert proxied.json()["result"]["serverInfo"]["name"] == "openberry"
+
+
+@asynccontextmanager
+async def asgi_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    async with AsyncExitStack() as stack:
+        for hook in app.state.lifespan_hooks:
+            await stack.enter_async_context(hook())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
+            yield client
+
+
+async def test_http_auth_modes(settings, monkeypatch):
+    accept = {"Accept": "application/json, text/event-stream"}
+
+    # Server mode without an API token: refuse and explain.
+    settings.password = "pw"
+    async with asgi_client(make_app(settings)) as client:
+        refused = await client.post("/mcp", json=INIT_REQUEST, headers=accept)
+        assert refused.status_code == 403 and "OPENBERRY_API_TOKEN" in refused.json()["message"]
+
+    # Local mode: open, but only for local / configured hosts (DNS-rebinding protection).
+    settings.password = ""
+    monkeypatch.setenv("OPENBERRY_ALLOWED_HOSTS", "crm.internal:8443")
+    async with asgi_client(make_app(settings)) as client:
+        opened = await client.post("/mcp/", json=INIT_REQUEST, headers=accept)
+        assert opened.status_code == 200 and opened.json()["result"]["protocolVersion"] == "2025-06-18"
+        rebind = await client.post("/mcp", json=INIT_REQUEST, headers={**accept, "Host": "evil.example"})
+        assert rebind.status_code == 421
+        allowed = await client.post("/mcp", json=INIT_REQUEST, headers={**accept, "Host": "crm.internal:8443"})
+        assert allowed.status_code == 200
+
+
+def test_transport_security_settings(settings, monkeypatch):
+    settings.base_url = "https://leads.example.com"
+    sec = transport_security(settings)
+    assert sec.enable_dns_rebinding_protection
+    assert {"localhost:*", "127.0.0.1", "[::1]:*", "leads.example.com"} <= set(sec.allowed_hosts)
+    assert "https://leads.example.com" in sec.allowed_origins
+    monkeypatch.setenv("OPENBERRY_ALLOWED_HOSTS", "*")
+    assert not transport_security(settings).enable_dns_rebinding_protection
+    monkeypatch.delenv("OPENBERRY_ALLOWED_HOSTS")
+    settings.api_token = "t"
+    assert not transport_security(settings).enable_dns_rebinding_protection
+
+
+async def test_endpoint_without_lifespan_is_unavailable(settings):
+    app = make_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        response = await client.post("/mcp", json=INIT_REQUEST)
+    assert response.status_code == 503 and "lifespan" in response.json()["message"]
+
+
+def test_mount_http_registers_lifespan_hook(settings):
+    app = FastAPI()
+    app.state.lifespan_hooks = [object]
+    mount_http(app, settings)
+    assert len(app.state.lifespan_hooks) == 2
+    assert {getattr(r, "path", None) for r in app.router.routes} >= {"/mcp", "/mcp/"}
+
+
+# --------------------------------------------------------------------------------------
+# stdio: what Claude Desktop launches
+# --------------------------------------------------------------------------------------
+
+
+def test_stdio_subprocess_smoke(tmp_path: Path):
+    env = {**os.environ, "OPENBERRY_DB": str(tmp_path / "stdio.db"),
+           "OPENBERRY_ENV_FILE": str(tmp_path / "missing.env"), "PYTHONUNBUFFERED": "1"}
+    proc = subprocess.Popen([sys.executable, "-m", "openberry", "mcp"], cwd=tmp_path, env=env, text=True,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    lines: queue.Queue[str | None] = queue.Queue()
+    stderr: list[str] = []
+
+    def pump_stdout() -> None:
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=pump_stdout, daemon=True).start()
+    threading.Thread(target=lambda: stderr.extend(proc.stderr), daemon=True).start()
+    seen: list[dict[str, Any]] = []
+
+    def send(message: dict[str, Any]) -> None:
+        proc.stdin.write(json.dumps(message) + "\n")
+        proc.stdin.flush()
+
+    def response(request_id: int) -> dict[str, Any]:
+        while True:
+            line = lines.get(timeout=30)
+            assert line is not None, f"server exited early; stderr: {''.join(stderr)[-2000:]}"
+            message = json.loads(line)  # anything that isn't JSON-RPC on stdout breaks Claude Desktop
+            assert message["jsonrpc"] == "2.0"
+            seen.append(message)
+            if message.get("id") == request_id:
+                return message
+
+    try:
+        send(INIT_REQUEST)
+        init = response(1)
+        assert init["result"]["protocolVersion"] == "2025-06-18"
+        assert init["result"]["serverInfo"]["name"] == "openberry"
+        assert "add_leads" in init["result"]["instructions"]
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        assert {t["name"] for t in response(2)["result"]["tools"]} == EXPECTED_TOOLS
+        send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+              "params": {"name": "list_companies", "arguments": {}}})
+        called = response(3)["result"]
+        assert called["isError"] is False and called["structuredContent"]["companies"] == []
+        proc.stdin.close()
+        proc.wait(timeout=20)
+        while (line := lines.get(timeout=10)) is not None:
+            assert json.loads(line)["jsonrpc"] == "2.0"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert (tmp_path / "stdio.db").exists()

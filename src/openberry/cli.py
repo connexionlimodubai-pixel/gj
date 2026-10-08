@@ -20,13 +20,33 @@ def _serve(args: argparse.Namespace) -> None:
 
 
 def _mcp(args: argparse.Namespace) -> None:
-    from .mcp_server import build_server
+    if not args.http:
+        from .mcp_server import build_server
 
-    server = build_server()
-    if args.http:
-        server.run("streamable-http", host=args.host, port=args.port)
-    else:
-        server.run()  # stdio: what Claude Desktop / Claude Code launch
+        build_server().run()  # stdio: what Claude Desktop / Claude Code launch
+        return
+
+    # Standalone HTTP endpoint with the same bearer-token and Host checks as the dashboard's /mcp.
+    from contextlib import AsyncExitStack, asynccontextmanager
+
+    import uvicorn
+    from fastapi import FastAPI
+
+    from .config import get_settings
+    from .mcp_server import mount_http
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with AsyncExitStack() as stack:
+            for hook in app.state.lifespan_hooks:
+                await stack.enter_async_context(hook())
+            yield
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.lifespan_hooks = []
+    mount_http(app, get_settings())
+    print(f"MCP endpoint: http://{args.host}:{args.port}/mcp", file=sys.stderr)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 def _scan(args: argparse.Namespace) -> None:

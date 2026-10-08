@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block container_class %} narrow{% endblock %}
+{% block content %}
+<section class="card center-card">
+  <p class="error-code">{{ status_code }}</p>
+  <h1>{{ title }}</h1>
+  {% if message %}<p class="lede">{{ message }}</p>{% endif %}
+  <p class="btn-row center"><a class="btn btn-primary" href="/">Go to the dashboard</a>{% if logged_in %}<a class="btn" href="/companies">Registration board</a>{% endif %}</p>
+</section>
+{% endblock %}

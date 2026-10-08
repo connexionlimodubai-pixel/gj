@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block body_class %} page-register{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    {% if not public_mode %}<p class="eyebrow"><a href="/companies">Registration board</a></p>{% endif %}
+    <h1>{{ "Register your company" if public_mode else "Register a company" }}</h1>
+    <p class="lede">Tell OpenBerry what you sell, who buys it and what you need. Only the company name is required; every extra detail sharpens lead scoring and messages.</p>
+  </div>
+</div>
+{% set form_action = "/register" %}
+{% set wizard = true %}
+{% set submit_label = "Submit registration" if public_mode else "Register company" %}
+{% include "_company_form.html" %}
+{% endblock %}

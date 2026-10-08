@@ -21,6 +21,11 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+# Fixed per-user home so the dashboard and Claude Desktop (which starts `openberry mcp` from an
+# unpredictable working directory) always share the same database and .env file.
+OPENBERRY_HOME = Path(os.environ.get("OPENBERRY_HOME", "~/.openberry")).expanduser()
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -38,7 +43,7 @@ def _int(name: str, default: int) -> int:
 
 @dataclass
 class Settings:
-    db_path: Path = field(default_factory=lambda: Path("data/openberry.db"))
+    db_path: Path = field(default_factory=lambda: OPENBERRY_HOME / "openberry.db")
     # Public URL of the dashboard, used for links in MCP replies and alerts.
     base_url: str = "http://127.0.0.1:8000"
     # Dashboard login. Empty = no login (fine on localhost, NOT for a public server).
@@ -67,12 +72,19 @@ class Settings:
     contact_email: str = ""
     user_agent: str = "OpenBerry/0.1 (+https://github.com/connexionlimodubai-pixel/gj)"
     http_timeout: float = 20.0
+    # Extra Host names accepted by the HTTP MCP endpoint (besides localhost and base_url's host).
+    allowed_hosts: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "Settings":
-        _load_dotenv(Path(os.environ.get("OPENBERRY_ENV_FILE", ".env")))
+        if env_file := os.environ.get("OPENBERRY_ENV_FILE"):
+            _load_dotenv(Path(env_file).expanduser())
+        else:
+            _load_dotenv(Path(".env"))
+            _load_dotenv(OPENBERRY_HOME / ".env")
+        db = os.environ.get("OPENBERRY_DB")
         s = cls(
-            db_path=Path(os.environ.get("OPENBERRY_DB", "data/openberry.db")).expanduser(),
+            db_path=Path(db).expanduser().resolve() if db else OPENBERRY_HOME / "openberry.db",
             base_url=os.environ.get("OPENBERRY_BASE_URL", "http://127.0.0.1:8000").rstrip("/"),
             password=os.environ.get("OPENBERRY_PASSWORD", ""),
             secret_key=os.environ.get("OPENBERRY_SECRET_KEY", ""),
@@ -87,6 +99,7 @@ class Settings:
             reddit_client_id=os.environ.get("REDDIT_CLIENT_ID", ""),
             reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
             contact_email=os.environ.get("OPENBERRY_CONTACT_EMAIL", ""),
+            allowed_hosts=[h.strip() for h in os.environ.get("OPENBERRY_ALLOWED_HOSTS", "").split(",") if h.strip()],
         )
         if not s.secret_key:
             # Sessions won't survive restarts without a fixed key; that's acceptable locally.

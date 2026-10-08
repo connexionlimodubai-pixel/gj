@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "openberry": {
+      "command": "uv",
+      "args": ["--directory", "/ABSOLUTE/PATH/TO/gj", "run", "openberry", "mcp"]
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  }
+}

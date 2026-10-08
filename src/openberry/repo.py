@@ -247,6 +247,8 @@ _LEAD_PROFILE_FIELDS = (
     "linkedin_url", "email", "phone", "website", "github_username", "twitter", "profile_url", "bio",
 )
 _LEAD_EDITABLE = (*_LEAD_PROFILE_FIELDS, "status", "notes", "tags", "kind")
+LEAD_PROFILE_FIELDS = _LEAD_PROFILE_FIELDS
+LEAD_EDITABLE_FIELDS = _LEAD_EDITABLE
 
 
 def _lead_from_row(row: sqlite3.Row) -> Lead:

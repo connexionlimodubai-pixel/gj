@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block container_class %} narrow{% endblock %}
+{% block content %}
+<section class="card center-card login-card">
+  <h1>Log in to OpenBerry</h1>
+  <p class="muted">This dashboard is password protected.</p>
+  <form method="post" action="/login" class="stack">
+    {{ m.csrf() }}
+    <input type="hidden" name="next" value="{{ next }}">
+    <div class="field{% if error %} has-error{% endif %}">
+      <label for="password">Password</label>
+      <input class="input" id="password" name="password" type="password" autocomplete="current-password" required autofocus{% if error %} aria-invalid="true" aria-describedby="password-err"{% endif %}>
+      {% if error %}<p class="field-error" id="password-err">{{ m.icon("alert", 14) }}<span>{{ error }}</span></p>{% endif %}
+    </div>
+    <button class="btn btn-primary btn-block" type="submit">Log in</button>
+  </form>
+  {% if public_registration %}<p class="small muted">New client? <a href="/register">Register your company</a>.</p>{% endif %}
+</section>
+{% endblock %}

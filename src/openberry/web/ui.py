@@ -211,6 +211,13 @@ def _build_env() -> jinja2.Environment:
         LEAD_SOURCES=LEAD_SOURCES, SIGNAL_SOURCES=SIGNAL_SOURCES, CHANNEL_LABELS=CHANNEL_LABELS,
         LINKEDIN_CONNECT_LIMIT=LINKEDIN_CONNECT_LIMIT, query_with=query_with, version=__version__,
         DOCS_URL=DOCS_URL, ICONS=ICONS, LOGO=LOGO,
+        SIZE_OPTIONS=[(s, f"{s} employees") for s in COMPANY_SIZES],
+        SIZE_CHIPS=[(s, s) for s in COMPANY_SIZES],
+        COMPANY_TYPE_OPTIONS=[(t, t.capitalize()) for t in COMPANY_TYPES],
+        TONE_OPTIONS=[(t, t.capitalize()) for t in TONES],
+        SIGNAL_OPTIONS=[(k, label) for k, (label, _) in SIGNAL_TYPES.items()],
+        CHANNEL_OPTIONS=list(CHANNEL_LABELS.items()),
+        STATUS_OPTIONS=[(s, STATUS_LABELS[s]) for s in LEAD_STATUSES],
     )
     return env
 

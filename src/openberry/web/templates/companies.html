@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Registration board</h1>
+    <p class="lede">Every company registered on this OpenBerry. Each one has its own profile, signals, leads and outreach queue.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn btn-primary" href="/register">{{ m.icon("plus") }}Register a company</a>
+  </div>
+</div>
+
+{% if cards %}
+<ul class="company-grid">
+  {% for card in cards %}
+  {% set c = card.company %}
+  <li class="card company-card">
+    <div class="company-head">
+      <span class="avatar avatar-lg" aria-hidden="true">{{ c.name|initials }}</span>
+      <div class="min0">
+        <h2 class="company-name"><a href="/c/{{ c.id }}">{{ c.name }}</a></h2>
+        {% if c.website|safe_url %}
+        <a class="muted-link small" href="{{ c.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ c.website|host or c.website }}</a>
+        {% else %}<span class="muted small">No website</span>{% endif %}
+      </div>
+      <span class="pill pill-company-{{ c.status }}">{{ "Active" if c.status == "active" else "Paused" }}</span>
+    </div>
+    <p class="company-meta">
+      {% if c.industry %}<span>{{ m.icon("target", 14) }}{{ c.industry }}</span>{% endif %}
+      {% if c.location %}<span>{{ m.icon("pin", 14) }}{{ c.location }}</span>{% endif %}
+      {% if not c.industry and not c.location %}<span class="muted">Industry and location not set</span>{% endif %}
+    </p>
+    <dl class="mini-stats">
+      <div><dt>Leads</dt><dd>{{ card.leads|compact }}</dd></div>
+      <div><dt>Hot</dt><dd>{{ card.hot|compact }}</dd></div>
+      <div><dt>Last scan</dt><dd>{{ m.when(c.last_scan_at) }}</dd></div>
+    </dl>
+    <div class="requirements">
+      <p class="label-sm">Requirements</p>
+      {% if c.requirements %}<p class="excerpt">{{ c.requirements|truncate(170) }}</p>
+      {% else %}<p class="excerpt muted">No requirements written yet.</p>{% endif %}
+    </div>
+    <div class="company-foot">
+      <span class="contact">{{ m.icon("user", 14) }}{% if c.contact_name %}{{ c.contact_name }}{% else %}<span class="muted">No contact person</span>{% endif %}{% if c.contact_email %}<span class="muted"> · {{ c.contact_email }}</span>{% endif %}</span>
+      <span class="btn-row">
+        <a class="btn btn-sm btn-ghost" href="/c/{{ c.id }}/settings">Edit</a>
+        <a class="btn btn-sm" href="/c/{{ c.id }}">Open{{ m.icon("chevron-right", 14) }}</a>
+      </span>
+    </div>
+  </li>
+  {% endfor %}
+  <li class="company-card add-card">
+    <a href="/register">{{ m.icon("plus", 20) }}<span>Register a company</span></a>
+  </li>
+</ul>
+{% else %}
+<div class="card">
+  {% call m.empty("board", "No companies registered yet") %}
+  <p>Register your company to start collecting intent signals, or load the demo to look around first.</p>
+  <div class="btn-row center">
+    <a class="btn btn-primary" href="/register">{{ m.icon("plus") }}Register a company</a>
+    <form method="post" action="/demo">{{ m.csrf() }}<button class="btn" type="submit">{{ m.icon("sparkles") }}Load demo data</button></form>
+  </div>
+  {% endcall %}
+</div>
+{% endif %}
+{% endblock %}

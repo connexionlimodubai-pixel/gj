@@ -832,9 +832,9 @@ def get_lead(lead_id: int) -> dict[str, Any]:
         "link": lead_url(lead.company_id, lead.id),
     }
     if lead.kind == "account":
-        out["next_step"] = (f"This is company-level intent at {lead.lead_company or 'this company'} with no contact yet. "
-                            "Find the decision-maker (ICP job titles) there and add them with add_leads using the same "
-                            "lead_company; they inherit this account's signals.")
+        out["next_step"] = (f"This is company-level intent at {lead.lead_company or 'this company'} with no contact "
+                            "yet. Find the decision-maker (ICP job titles) there and add them with add_leads using the "
+                            "same lead_company; they inherit this account's signals.")
     return out
 
 
@@ -873,6 +873,9 @@ def add_leads(
                                "score": lead.score, "tier": lead.tier, "link": lead_url(company_id, lead.id)}
         if not lead_in.signals:
             row["note"] = "no signal attached: scored on ICP fit only (add one with add_signal)"
+        excluded = next((r for r in lead.score_reasons if r.startswith("!")), None)
+        if excluded:
+            row["warning"] = f"excluded by the ICP ({excluded[2:]}): do not contact"
         results.append(row)
     created_count = sum(1 for r in results if r["created"])
     return {

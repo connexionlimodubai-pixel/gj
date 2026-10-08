@@ -39,6 +39,8 @@ def _int(name: str, default: int) -> int:
 @dataclass
 class Settings:
     db_path: Path = field(default_factory=lambda: Path("data/openberry.db"))
+    # Public URL of the dashboard, used for links in MCP replies and alerts.
+    base_url: str = "http://127.0.0.1:8000"
     # Dashboard login. Empty = no login (fine on localhost, NOT for a public server).
     password: str = ""
     secret_key: str = ""
@@ -65,6 +67,7 @@ class Settings:
         _load_dotenv(Path(os.environ.get("OPENBERRY_ENV_FILE", ".env")))
         s = cls(
             db_path=Path(os.environ.get("OPENBERRY_DB", "data/openberry.db")).expanduser(),
+            base_url=os.environ.get("OPENBERRY_BASE_URL", "http://127.0.0.1:8000").rstrip("/"),
             password=os.environ.get("OPENBERRY_PASSWORD", ""),
             secret_key=os.environ.get("OPENBERRY_SECRET_KEY", ""),
             api_token=os.environ.get("OPENBERRY_API_TOKEN", ""),

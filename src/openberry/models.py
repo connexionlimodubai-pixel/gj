@@ -19,7 +19,7 @@ SIGNAL_TYPES: dict[str, tuple[str, int]] = {
     "hiring": ("Hiring for a relevant role", 25),
     "funding": ("Raised funding", 30),
     "job_change": ("New job or promotion", 30),
-    "github_star": ("Starred a relevant GitHub repo", 20),
+    "github_star": ("Starred or forked a relevant GitHub repo", 20),
     "influencer_engagement": ("Engaged with a niche influencer", 20),
     "profile_visit": ("Visited your profile or website", 35),
     "event": ("Attending a relevant event", 15),
@@ -29,7 +29,7 @@ SIGNAL_TYPES: dict[str, tuple[str, int]] = {
 
 SIGNAL_SOURCES = (
     "hackernews", "reddit", "github", "greenhouse", "lever", "ashby",
-    "google_news", "rss", "linkedin", "web", "manual", "claude", "csv",
+    "google_news", "rss", "sec_edgar", "linkedin", "web", "manual", "claude", "csv",
 )
 
 SENIORITIES: dict[str, str] = {
@@ -147,11 +147,12 @@ class SignalConfig(_Model):
     enabled_types: StrList = Field(default_factory=lambda: list(SIGNAL_TYPES), description="Signal types to track")
     keywords: StrList = Field(default_factory=list, description="Topics to monitor on HN/Reddit/news, e.g. 'corporate chauffeur'")
     subreddits: StrList = Field(default_factory=list, description="Subreddits to watch (without r/)")
-    github_repos: StrList = Field(default_factory=list, description="owner/repo of competitor or related repos; stargazers become leads")
+    github_repos: StrList = Field(default_factory=list, description="owner/repo of competitor or related repos: issue authors and forkers become leads (stargazers only for repos you admin, with GITHUB_TOKEN)")
     job_boards: Annotated[list[JobBoard], BeforeValidator(parse_job_boards)] = Field(default_factory=list)
     hiring_keywords: StrList = Field(default_factory=list, description="Job titles at target accounts that signal need, e.g. 'SDR', 'Travel Manager'")
     news_queries: StrList = Field(default_factory=list, description="Google News queries, e.g. 'raises Series A fintech'")
     rss_feeds: StrList = Field(default_factory=list, description="Any RSS/Atom feed URLs to scan for keywords")
+    sec_queries: StrList = Field(default_factory=list, description="SEC EDGAR full-text queries (US companies): new Form D funding filings and 8-K executive changes, e.g. 'logistics software'")
     influencers: StrList = Field(default_factory=list, description="LinkedIn profile URLs whose post engagers Claude should check")
     competitor_pages: StrList = Field(default_factory=list, description="Competitor LinkedIn/company pages whose engagers Claude should check")
     events: StrList = Field(default_factory=list, description="Events/webinars whose attendees are good leads")

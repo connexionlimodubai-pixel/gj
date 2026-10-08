@@ -59,6 +59,12 @@ class Settings:
     ollama_model: str = "llama3.1"
     # Optional GitHub token: raises the API limit from 60 to 5000 requests/hour.
     github_token: str = ""
+    # Optional Reddit API app credentials (Reddit blocks unauthenticated access since 2026;
+    # commercial use needs Reddit's agreement). The Reddit source stays off without them.
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+    # Contact e-mail sent in the User-Agent where APIs require one (SEC EDGAR fair-access policy).
+    contact_email: str = ""
     user_agent: str = "OpenBerry/0.1 (+https://github.com/connexionlimodubai-pixel/gj)"
     http_timeout: float = 20.0
 
@@ -78,6 +84,9 @@ class Settings:
             ollama_url=os.environ.get("OPENBERRY_OLLAMA_URL", "").rstrip("/"),
             ollama_model=os.environ.get("OPENBERRY_OLLAMA_MODEL", "llama3.1"),
             github_token=os.environ.get("GITHUB_TOKEN", os.environ.get("OPENBERRY_GITHUB_TOKEN", "")),
+            reddit_client_id=os.environ.get("REDDIT_CLIENT_ID", ""),
+            reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
+            contact_email=os.environ.get("OPENBERRY_CONTACT_EMAIL", ""),
         )
         if not s.secret_key:
             # Sessions won't survive restarts without a fixed key; that's acceptable locally.

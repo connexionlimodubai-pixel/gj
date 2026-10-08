@@ -1007,10 +1007,14 @@ def update_lead(lead_id: int, changes: dict[str, Any]) -> dict[str, Any]:
     computed = sorted(set(changes) & {"score", "tier", "icp_score", "intent_score", "ai_score", "ai_rationale"})
     if computed:
         raise ToolError(f"{', '.join(computed)} cannot be set directly: scores are computed; use assess_lead")
+    if "notes" in changes:  # the column is NOT NULL TEXT: null clears the notes
+        if changes["notes"] is not None and not isinstance(changes["notes"], str):
+            raise ToolError("notes must be text")
+        changes = {**changes, "notes": changes["notes"] or ""}
     try:
         lead = repo.update_lead(lead_id, changes)
     except ValueError as exc:
-        hint = f". Editable fields: {', '.join(repo._LEAD_EDITABLE)}" if "cannot update" in str(exc) else ""
+        hint = f". Editable fields: {', '.join(repo.LEAD_EDITABLE_FIELDS)}" if "cannot update" in str(exc) else ""
         raise ToolError(f"{exc}{hint}") from exc
     return {"lead": _lead_row(lead), "changed": sorted(changes)}
 
@@ -1093,6 +1097,12 @@ def get_outreach_context(
         warnings.append("This lead is disqualified or excluded by the ICP; confirm with the user before writing.")
     if any(m.direction == "inbound" for m in previous):
         warnings.append("The lead has replied: answer their latest reply instead of pitching again.")
+    if channel == "email" and not lead.email:
+        warnings.append("No email address is known for this lead: find a public one and save it with update_lead, "
+                        "or write for LinkedIn instead.")
+    if channel.startswith("linkedin") and lead.kind == "person" and not lead.linkedin_url:
+        warnings.append("No LinkedIn profile is known for this lead: find it and save linkedin_url with update_lead, "
+                        "or write an email instead.")
     pending = [m.id for m in previous if m.direction == "outbound" and m.status == "draft"
                and m.channel == channel and m.step == step]
     if pending:
@@ -1412,6 +1422,14 @@ CompanyIdArg = Annotated[int, Field(description="Company id from list_companies"
 LeadIdArg = Annotated[int, Field(description="Lead id from list_leads")]
 
 
+def _prompt_company(company_id: int) -> Company:
+    """Prompt arguments come from a client UI; an unknown id is the caller's error, not ours."""
+    company = repo.find_company(company_id)
+    if company is None:
+        raise MCPError(INVALID_PARAMS, f"company {company_id} not found{_not_found_hint('company')}")
+    return company
+
+
 def onboard_company() -> str:
     """Interview the user and register their company on the OpenBerry registration board."""
     return """\
@@ -1442,7 +1460,7 @@ Afterwards, show me the gaps it reports, call get_prospecting_plan, and offer to
 
 def daily_lead_hunt(company_id: CompanyIdArg) -> str:
     """Today's lead hunt: scan signals, prospect with companion tools, save, qualify and draft."""
-    company = repo.get_company(company_id)
+    company = _prompt_company(company_id)
     per_day = math.ceil(company.leads_per_week / 5)
     return f"""\
 Run today's lead hunt for {company.name} (OpenBerry company {company_id}). Target: about {per_day} new qualified
@@ -1484,7 +1502,7 @@ Write a {channel} message for OpenBerry lead {lead_id}.
 
 def weekly_report(company_id: CompanyIdArg) -> str:
     """A weekly pipeline report with recommendations."""
-    company = repo.get_company(company_id)
+    company = _prompt_company(company_id)
     return f"""\
 Prepare this week's lead generation report for {company.name} (OpenBerry company {company_id}).
 
@@ -1545,10 +1563,10 @@ def transport_security(settings: Settings) -> TransportSecuritySettings:
 
     With a bearer token the token already defeats DNS rebinding, so any Host is accepted and the
     endpoint works behind docker and reverse proxies without configuration. Without one (local
-    mode) only localhost, the host of OPENBERRY_BASE_URL and OPENBERRY_ALLOWED_HOSTS (comma
-    separated; '*' turns the check off) are accepted.
+    mode) only localhost, the host of OPENBERRY_BASE_URL and settings.allowed_hosts
+    (OPENBERRY_ALLOWED_HOSTS, comma separated; '*' turns the check off) are accepted.
     """
-    extra = split_list(os.environ.get("OPENBERRY_ALLOWED_HOSTS", ""))
+    extra = split_list(settings.allowed_hosts)
     if settings.api_token or "*" in extra:
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     names = [*_LOCAL_HOSTS, _hostname(settings.base_url), *(_hostname(e) for e in extra)]

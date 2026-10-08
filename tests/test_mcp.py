@@ -22,6 +22,8 @@ import uvicorn
 from fastapi import FastAPI
 from mcp.client import Client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError
+from mcp_types import INVALID_PARAMS
 
 from openberry import db, mcp_server, repo, services
 from openberry.config import Settings
@@ -46,6 +48,14 @@ INIT_REQUEST = {
 @pytest.fixture
 def demo_id() -> int:
     return seed_demo()
+
+
+@pytest.fixture(autouse=True)
+def no_leftover_scans() -> Iterator[None]:
+    """Each test has its own event loop: a scan task left by a failed test must not leak into the next."""
+    mcp_server._scan_tasks.clear()
+    yield
+    mcp_server._scan_tasks.clear()
 
 
 @asynccontextmanager
@@ -165,6 +175,40 @@ async def test_profile_masks_webhooks(company):
     assert "SECRET" not in json.dumps(profile)
 
 
+async def test_update_company_accepts_its_own_profile_output(company):
+    """Claude edits the profile it was given: masked webhooks and read-only fields must round-trip."""
+    hook = "https://hooks.slack.com/services/SECRET"
+    repo.update_company(company.id, {"notify": {"slack_webhook_url": hook}})
+    async with mcp_client() as c:
+        profile = (await ok(c, "get_company_profile", company_id=company.id))["profile"]
+        profile["notify"]["min_score"] = 80
+        profile["icp"]["locations"] = ["UAE", "KSA"]
+        updated = await ok(c, "update_company", company_id=company.id, changes=profile)
+        assert updated["profile"]["notify"] == {"slack_webhook_url": "(set)", "discord_webhook_url": "",
+                                                "min_score": 80}
+        assert set(updated["unchanged"]) == {"id", "created_at", "updated_at", "last_scan_at",
+                                             "notify.slack_webhook_url"}
+        stored = repo.get_company(company.id)
+        assert stored.notify.slack_webhook_url == hook and stored.icp.locations == ["UAE", "KSA"]
+
+        # A real new URL still replaces the old one; "(set)" alone changes nothing.
+        await ok(c, "update_company", company_id=company.id,
+                 changes={"notify": {"slack_webhook_url": "https://hooks.slack.com/services/NEW"}})
+        assert repo.get_company(company.id).notify.slack_webhook_url.endswith("/NEW")
+        assert "changes is empty" in await error_text(c, "update_company", company_id=company.id,
+                                                      changes={"id": 5, "updated_at": "2026-01-01"})
+
+
+async def test_company_names_stay_unique(company):
+    other = repo.create_company(CompanyIn(name="Gulf Freight"))
+    async with mcp_client() as c:
+        text = await error_text(c, "update_company", company_id=other.id, changes={"name": " acme chauffeurs "})
+        assert f"already exists (id {company.id})" in text
+        assert repo.get_company(other.id).name == "Gulf Freight"
+        renamed = await ok(c, "update_company", company_id=company.id, changes={"name": "ACME Chauffeurs"})
+        assert renamed["profile"]["name"] == "ACME Chauffeurs"  # a company may change its own spelling
+
+
 # --------------------------------------------------------------------------------------
 # Leads and signals
 # --------------------------------------------------------------------------------------
@@ -264,6 +308,13 @@ async def test_get_add_update_assess_delete_lead(company):
         assert "rationale is required" in await error_text(c, "assess_lead", lead_id=person["id"],
                                                            fit_score=50, rationale="  ")
 
+        # The notes column is NOT NULL: null clears it instead of failing with a database error.
+        repo.update_lead(person["id"], {"notes": "met at GITEX"})
+        cleared = await ok(c, "update_lead", lead_id=person["id"], changes={"notes": None})
+        assert cleared["changed"] == ["notes"] and repo.get_lead(person["id"]).notes == ""
+        assert "notes must be text" in await error_text(c, "update_lead", lead_id=person["id"],
+                                                        changes={"notes": ["a", "b"]})
+
         deleted = await ok(c, "delete_lead", lead_id=added["results"][1]["id"])
         assert deleted["deleted"] and repo.find_lead(added["results"][1]["id"]) is None
         text = await error_text(c, "delete_lead", lead_id=added["results"][1]["id"])
@@ -284,6 +335,10 @@ async def test_outreach_flow(company):
     async with mcp_client() as c:
         ctx = await ok(c, "get_outreach_context", lead_id=lead.id)
         assert ctx["channel"] == "linkedin_connect" and ctx["step"] == 1
+        assert not any("No LinkedIn profile" in w for w in ctx["warnings"])
+        no_profile, _ = repo.upsert_lead(company.id, LeadIn(full_name="Nadia Noprofile", email="nadia@x.example"))
+        warnings = (await ok(c, "get_outreach_context", lead_id=no_profile.id))["warnings"]
+        assert any("No LinkedIn profile" in w for w in warnings)
         assert ctx["limits"]["max_chars"] == 300 and ctx["template_draft"]["body"]
         assert ctx["lead"]["name"] == "Omar Haddad" and ctx["signals"][0]["type"] == "keyword_mention"
         assert ctx["style"]["banned_words"] == ["synergy", "game changer"]
@@ -299,6 +354,15 @@ async def test_outreach_flow(company):
                                              body="Hi Omar")
         assert "placeholder" in await error_text(c, "save_outreach_message", lead_id=lead.id,
                                                  body="Hi {first_name}, saw your post.")
+        # The save_with example's own slots, in the subject as well as the body.
+        email_ctx = await ok(c, "get_outreach_context", lead_id=lead.id, channel="email")
+        assert any("No email address" in w for w in email_ctx["warnings"])
+        example = email_ctx["save_with"]["arguments"]
+        assert "'<subject>'" in await error_text(c, "save_outreach_message", **{**example, "body": "Hi Omar, quick idea."})
+        assert "'<your message>'" in await error_text(c, "save_outreach_message",
+                                                      **{**example, "subject": "Dubai roadshows"})
+        assert "'[First Name]'" in await error_text(c, "save_outreach_message", lead_id=lead.id, channel="email",
+                                                    subject="[First Name], quick idea", body="Hi there.")
 
         first = await ok(c, "save_outreach_message", lead_id=lead.id,
                          body="Hi Omar, saw your post about chauffeurs in Dubai. Happy to connect!")
@@ -443,6 +507,30 @@ async def test_run_signal_scan_unconfigured_company_is_quick():
     assert repo.get_company(company.id).last_scan_at is not None
 
 
+async def test_scan_running_in_another_process_is_not_duplicated(company, monkeypatch):
+    """The dashboard, scheduler and CLI record a 'running' scan row; a second scan would double API use and alerts."""
+    calls = []
+
+    async def fake_run_scan(company_id, *, trigger="manual", sources=None, client=None):
+        calls.append(company_id)
+        return {"status": "ok", "collectors": {}, "skipped": [], "newly_hot": []}
+
+    monkeypatch.setattr(services, "run_scan", fake_run_scan)
+    run_id = repo.start_scan_run(company.id, "dashboard")
+    async with mcp_client() as c:
+        busy = await ok(c, "run_signal_scan", company_id=company.id)
+        assert busy["status"] == "running" and "started from dashboard" in busy["message"] and calls == []
+
+        # A 'running' row from a process that died long ago doesn't block new scans.
+        with db.connect() as conn:
+            conn.execute("UPDATE scan_runs SET started_at = ? WHERE id = ?",
+                         (repo.iso(repo.utcnow() - timedelta(hours=1)), run_id))
+        assert (await ok(c, "run_signal_scan", company_id=company.id))["status"] == "ok"
+        repo.finish_scan_run(run_id, "ok", {})
+        assert (await ok(c, "run_signal_scan", company_id=company.id))["status"] == "ok"
+    assert calls == [company.id, company.id]
+
+
 async def test_slow_scan_continues_in_background(company, monkeypatch):
     finished = asyncio.Event()
 
@@ -499,6 +587,12 @@ async def test_prompts(demo_id):
         assert 'channel="email"' in write and "save_outreach_message" in write
         report = (await c.get_prompt("weekly_report", {"company_id": str(demo_id)})).messages[0].content.text
         assert f"pipeline_report({demo_id})" in report
+
+        # An unknown company is an invalid argument with a way forward, not an internal server error.
+        for name in ("daily_lead_hunt", "weekly_report"):
+            with pytest.raises(MCPError, match="company 999 not found — call list_companies") as info:
+                await c.get_prompt(name, {"company_id": "999"})
+            assert info.value.code == INVALID_PARAMS
 
 
 # --------------------------------------------------------------------------------------
@@ -587,7 +681,7 @@ async def asgi_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
             yield client
 
 
-async def test_http_auth_modes(settings, monkeypatch):
+async def test_http_auth_modes(settings):
     accept = {"Accept": "application/json, text/event-stream"}
 
     # Server mode without an API token: refuse and explain.
@@ -598,7 +692,7 @@ async def test_http_auth_modes(settings, monkeypatch):
 
     # Local mode: open, but only for local / configured hosts (DNS-rebinding protection).
     settings.password = ""
-    monkeypatch.setenv("OPENBERRY_ALLOWED_HOSTS", "crm.internal:8443")
+    settings.allowed_hosts = ["crm.internal:8443"]
     async with asgi_client(make_app(settings)) as client:
         opened = await client.post("/mcp/", json=INIT_REQUEST, headers=accept)
         assert opened.status_code == 200 and opened.json()["result"]["protocolVersion"] == "2025-06-18"
@@ -614,9 +708,15 @@ def test_transport_security_settings(settings, monkeypatch):
     assert sec.enable_dns_rebinding_protection
     assert {"localhost:*", "127.0.0.1", "[::1]:*", "leads.example.com"} <= set(sec.allowed_hosts)
     assert "https://leads.example.com" in sec.allowed_origins
+    # Only the settings count: an env var the Settings object didn't read is ignored.
     monkeypatch.setenv("OPENBERRY_ALLOWED_HOSTS", "*")
+    assert transport_security(settings).enable_dns_rebinding_protection
+    settings.allowed_hosts = ["crm.internal", "https://[fd00::1]:8443"]
+    hosts = set(transport_security(settings).allowed_hosts)
+    assert {"crm.internal", "crm.internal:*", "[fd00::1]:*"} <= hosts
+    settings.allowed_hosts = ["*"]
     assert not transport_security(settings).enable_dns_rebinding_protection
-    monkeypatch.delenv("OPENBERRY_ALLOWED_HOSTS")
+    settings.allowed_hosts = []
     settings.api_token = "t"
     assert not transport_security(settings).enable_dns_rebinding_protection
 

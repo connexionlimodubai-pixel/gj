@@ -19,9 +19,8 @@ What it emits
     hiring  one account-level signal per open posting whose title matches signals.hiring_keywords
             (or icp.job_titles when no hiring keywords are set). account = the board's company name
             (else Greenhouse's company_name, else the token), lead = None: people later found at
-            that company inherit the intent. account_domain stays empty on purpose: account identity
-            is the domain when one is given and the name otherwise, so adding a domain here would
-            split an account the user (or another board) already created by name.
+            that company inherit the intent. account_domain stays empty: ATS boards rarely state
+            the employer's own domain, and accounts are matched by name first.
     Titles are matched with scoring.phrase_in (every word of the keyword appears as a whole word,
     in any order) rather than base.find_terms (contiguous phrase): ATS titles often invert word
     order ("Manager, Travel", "Engineer, Data"), and it is the same rule ICP title scoring uses.

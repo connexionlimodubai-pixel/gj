@@ -15,7 +15,7 @@ A Python app stores everything, collects free public signals, scores leads, and 
 │  web/ FastAPI + Jinja dashboard: registration board, leads, signals, outreach, settings       │
 │  mcp_server.py   tools/resources/prompts over the same data                                    │
 │  services.py     run_scan → collectors → ingest → scoring → alerts (+ auto-draft)              │
-│  collectors/     Hacker News, Reddit, GitHub stargazers, Greenhouse/Lever/Ashby, News, RSS     │
+│  collectors/     Hacker News, Reddit, GitHub, Greenhouse/Lever/Ashby, News/RSS, SEC EDGAR      │
 │  scoring.py      ICP fit + time-decayed intent + signal stacking + optional Claude score       │
 │  outreach.py     template / Ollama drafting, outreach context for Claude                       │
 │  repo.py + db.py SQLite (WAL) – companies, leads, lead_keys, signals, messages, scan_runs      │

@@ -390,7 +390,7 @@ def _join(*parts: str) -> str:
     return " ".join(p for p in parts if p)
 
 
-def add_leads_example(company_id: int, signal_type: str = "competitor_engagement") -> dict[str, Any]:
+def add_leads_example(company_id: int, occurred_at: str) -> dict[str, Any]:
     """The exact add_leads payload shape, with placeholder values."""
     return {
         "company_id": company_id,
@@ -407,11 +407,11 @@ def add_leads_example(company_id: int, signal_type: str = "competitor_engagement
             "bio": "Headline or About snippet that shows fit",
             "source": "linkedin",
             "signals": [{
-                "type": signal_type,
+                "type": "competitor_engagement",
                 "title": "Commented on a competitor's post about <topic>",
                 "url": "https://www.linkedin.com/posts/<post-id>",
                 "summary": "What they said or did, in one or two sentences",
-                "occurred_at": "2026-01-31",
+                "occurred_at": occurred_at,
                 "strength": 60,
             }],
         }],
@@ -519,7 +519,7 @@ def build_prospecting_plan(company: Company, now: datetime | None = None) -> dic
         },
         "signal_types": {k: label for k, (label, _) in SIGNAL_TYPES.items()},
         "companion_mcp_servers": COMPANION_SERVERS,
-        "add_leads_example": add_leads_example(company.id),
+        "add_leads_example": add_leads_example(company.id, now.date().isoformat()),
         "workflow": [
             "run_signal_scan first: it covers the free public sources configured in the profile.",
             "Work through linkedin_people_searches and search_engine_dorks with your companion tools.",
@@ -707,30 +707,31 @@ def _scan_result(company_id: int, stats: dict[str, Any]) -> dict[str, Any]:
         "links": _company_links(company_id),
     }
     if not collectors:
-        out["hint"] = ("No collector is configured for this company. Add signals.keywords, subreddits, github_repos, "
-                       "job_boards, news_queries or rss_feeds with update_company, and find people directly with "
-                       "get_prospecting_plan + add_leads.")
+        out["hint"] = ("No collector is configured for this company: get_company_profile -> collectors shows what each "
+                       "one needs (set it with update_company). Meanwhile find people with get_prospecting_plan "
+                       "and add_leads.")
     else:
         out["next_steps"] = [f"list_leads({company_id}, tier='hot') to review the best leads",
                              "assess_lead the promising ones, then draft messages with get_outreach_context"]
     return out
 
 
-async def run_signal_scan(
-    company_id: int,
-    sources: Annotated[list[str] | None, Field(
-        description=f"Only these collectors (default: all configured). Available: {', '.join(COLLECTORS)}")] = None,
-    wait_seconds: Annotated[int, Field(
-        description="How long to wait for the result before letting the scan finish in the background")]
-    = DEFAULT_SCAN_WAIT_SECONDS,
-) -> dict[str, Any]:
+ScanSources = Annotated[list[str] | None, Field(
+    description=f"Only these collectors (default: every configured one). Available: {', '.join(COLLECTORS)}")]
+ScanWait = Annotated[int, Field(
+    description="Seconds to wait for the result before letting the scan finish in the background")]
+
+
+async def run_signal_scan(company_id: int, sources: ScanSources = None,
+                          wait_seconds: ScanWait = DEFAULT_SCAN_WAIT_SECONDS) -> dict[str, Any]:
     """Collect fresh intent signals for a company from free public sources and score the leads.
 
     Sources include Hacker News, Reddit, GitHub, company job boards, news and RSS feeds, each used
-    only when the profile configures it (see get_company_profile -> collectors for what runs and
-    what each one needs). Usually takes 10-60 seconds. Returns counts of new signals and leads, per-collector results and
-    errors, and the top 5 leads that just became hot. If the scan takes longer than wait_seconds it
-    keeps running in the background: check list_leads or pipeline_report a minute later.
+    only when the profile configures it (get_company_profile -> collectors shows what runs and what
+    each one needs). Usually takes 10-60 seconds. Returns counts of new signals and leads,
+    per-collector results and errors, and the top 5 leads that just became hot. If the scan takes
+    longer than wait_seconds it keeps running in the background: check list_leads or
+    pipeline_report a minute later.
     """
     _get_company(company_id)
     if sources:
@@ -768,15 +769,19 @@ async def run_signal_scan(
 # --------------------------------------------------------------------------------------
 
 
+LeadSearch = Annotated[str | None, Field(
+    description="Text matched against name, title, company, location, email, bio and notes")]
+LeadKindFilter = Annotated[LeadKind | None, Field(
+    description="person, or account (company-level intent with no contact yet)")]
+
+
 def list_leads(
     company_id: int,
     tier: Tier | None = None,
     status: LeadStatus | None = None,
     min_score: int | None = None,
-    search: Annotated[str | None, Field(description="Text matched against name, title, company, location, "
-                                                    "email, bio and notes")] = None,
-    kind: Annotated[LeadKind | None, Field(description="person, or account (company-level intent, no contact yet)")]
-    = None,
+    search: LeadSearch = None,
+    kind: LeadKindFilter = None,
     sort: LeadSort = "score",
     limit: Annotated[int, Field(description="1-100")] = 20,
     offset: int = 0,
@@ -1196,9 +1201,6 @@ def _suggestions(company: Company, stats: dict[str, Any], hot: list[Lead]) -> li
         out.append(f"No scan yet: run_signal_scan({company.id}).")
     elif age_days >= 3:
         out.append(f"Last scan was {age_days} days ago: run_signal_scan({company.id}).")
-    for collector in services.collector_overview(company):
-        if not collector["configured"]:
-            out.append(f"{collector['label']} is not set up: needs {collector['requires']}.")
     drafts = stats["messages"].get("draft", 0) + stats["messages"].get("approved", 0)
     if drafts:
         out.append(f"{drafts} draft(s) are waiting for the user to review and send: {outreach_url(company.id)}")
@@ -1218,6 +1220,10 @@ def _suggestions(company: Company, stats: dict[str, Any], hot: list[Lead]) -> li
     no_contact = [a.lead_company for a in accounts if not repo.contacts_at_account(a)]
     if no_contact:
         out.append(f"Accounts with intent but no contact yet: {', '.join(no_contact)}. Find the decision-makers.")
+    collectors = services.collector_overview(company)
+    idle = [f"{c['label']} (needs {c['requires']})" for c in collectors if not c["configured"]]
+    if idle and len(idle) < len(collectors):  # when none is configured, profile_gaps says so
+        out.append(f"Optional sources not set up yet: {'; '.join(idle)}.")
     out += [f"Profile gap: {gap}" for gap in profile_gaps(company)]
     return out
 

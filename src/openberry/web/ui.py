@@ -29,6 +29,7 @@ from ..models import (
     Lead,
 )
 from ..outreach import LINKEDIN_CONNECT_LIMIT
+from .icons import ICONS, LOGO
 from .session import csrf_token, is_logged_in, pop_flashes
 
 WEB_DIR = Path(__file__).parent
@@ -209,7 +210,7 @@ def _build_env() -> jinja2.Environment:
         TONES=TONES, LEAD_STATUSES=LEAD_STATUSES, MESSAGE_CHANNELS=MESSAGE_CHANNELS, TIERS=TIERS,
         LEAD_SOURCES=LEAD_SOURCES, SIGNAL_SOURCES=SIGNAL_SOURCES, CHANNEL_LABELS=CHANNEL_LABELS,
         LINKEDIN_CONNECT_LIMIT=LINKEDIN_CONNECT_LIMIT, query_with=query_with, version=__version__,
-        DOCS_URL=DOCS_URL,
+        DOCS_URL=DOCS_URL, ICONS=ICONS, LOGO=LOGO,
     )
     return env
 

@@ -353,7 +353,9 @@ async def test_report_plan_and_export(demo_id):
         assert report["top_hot_leads"] and report["hot_leads_total"] >= len(report["top_hot_leads"])
         assert report["signal_mix"]["by_type"]
         suggestions = " ".join(report["suggestions"])
-        assert "draft(s) are waiting" in suggestions and "not set up" in suggestions
+        assert "draft(s) are waiting" in suggestions and "hot lead(s) are not assessed" in suggestions
+        # Either some sources still need setup, or (no collector configured) the profile gap says so.
+        assert "not set up" in suggestions or "nothing for the automatic scan" in suggestions
 
         plan = await ok(c, "get_prospecting_plan", company_id=demo_id)
         assert plan["company_id"] == demo_id and plan["linkedin_people_searches"]

@@ -39,7 +39,7 @@
   <div class="field"><label for="f-status">Status</label>
     <select class="input" id="f-status" name="status" data-autosubmit><option value="">Any status</option>{% for value, label in STATUS_OPTIONS %}<option value="{{ value }}"{% if filters.status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
   <div class="field"><label for="f-kind">Kind</label>
-    <select class="input" id="f-kind" name="kind" data-autosubmit><option value="">People &amp; accounts</option><option value="person"{% if filters.kind == "person" %} selected{% endif %}>People</option><option value="account"{% if filters.kind == "account" %} selected{% endif %}>Accounts</option></select></div>
+    <select class="input" id="f-kind" name="kind" data-autosubmit><option value="">All kinds</option><option value="person"{% if filters.kind == "person" %} selected{% endif %}>People</option><option value="account"{% if filters.kind == "account" %} selected{% endif %}>Accounts</option></select></div>
   <div class="field"><label for="f-source">Source</label>
     <select class="input" id="f-source" name="source" data-autosubmit><option value="">Any source</option>{% for s in LEAD_SOURCES %}<option value="{{ s }}"{% if filters.source == s %} selected{% endif %}>{{ s|source_label }}</option>{% endfor %}</select></div>
   <div class="field"><label for="f-sort">Sort by</label>
@@ -55,19 +55,18 @@
   <div class="table-wrap">
     <table class="table leads-table">
       <thead><tr>
-        <th scope="col">Lead</th><th scope="col" class="hide-sm">Company</th><th scope="col" class="hide-md">Location</th>
-        <th scope="col">Score</th><th scope="col" class="hide-md">Why</th><th scope="col" class="hide-sm">Last signal</th><th scope="col">Status</th>
+        <th scope="col">Lead</th><th scope="col" class="hide-md">Location</th>
+        <th scope="col">Score</th><th scope="col" class="hide-md">Why</th><th scope="col" class="hide-sm">Last signal</th><th scope="col" class="hide-sm">Status</th>
       </tr></thead>
       <tbody>
         {% for lead in items %}
         <tr>
-          <td><div class="lead-cell">{{ m.avatar(lead.full_name, lead.kind) }}<div class="min0"><a class="lead-name" href="{{ base }}/leads/{{ lead.id }}">{{ m.lead_title(lead) }}</a><span class="sub">{{ m.lead_sub(lead) }}</span></div></div></td>
-          <td class="hide-sm">{{ lead.lead_company or "—" }}</td>
-          <td class="hide-md">{{ lead.location or "—" }}</td>
+          <td><div class="lead-cell">{{ m.avatar(lead.full_name, lead.kind) }}<div class="min0"><a class="lead-name" href="{{ base }}/leads/{{ lead.id }}">{{ m.lead_title(lead) }}</a><span class="sub">{{ m.lead_sub(lead) }}{% if lead.lead_company and lead.kind == "person" %} · {{ lead.lead_company }}{% endif %}</span></div></div></td>
+          <td class="hide-md loc-cell">{{ lead.location or "—" }}</td>
           <td><div class="score-cell">{{ m.score(lead.score, lead.tier) }}{{ m.tier_badge(lead.tier) }}</div></td>
           <td class="hide-md why-cell">{% set r = lead|top_reason %}{% if r %}{{ m.reason(r) }}{% else %}<span class="muted">—</span>{% endif %}</td>
           <td class="hide-sm nowrap">{{ m.when(lead.last_signal_at, "—") }}</td>
-          <td>{{ m.status_pill(lead.status) }}</td>
+          <td class="hide-sm">{{ m.status_pill(lead.status) }}</td>
         </tr>
         {% endfor %}
       </tbody>

@@ -61,8 +61,14 @@ Excluded keywords and never-contact companies cap the score at 15.
 
 ## Security model
 
-- Local mode (no `OPENBERRY_PASSWORD`): no login, intended for `127.0.0.1`.
-- Server mode: set `OPENBERRY_PASSWORD` and `OPENBERRY_SECRET_KEY`. The dashboard then requires login. The JSON API and `/mcp` require `Authorization: Bearer $OPENBERRY_API_TOKEN`.
-- `OPENBERRY_PUBLIC_REGISTRATION=true` lets anyone submit the registration form (agency intake). It cannot read data.
-- Outbound fetches of user-supplied URLs (website auto-fill) only go to public IPs.
+- **Local mode** (no `OPENBERRY_PASSWORD`): there is no login, and it is meant for `127.0.0.1`. The dashboard, `/api` and `/mcp` only answer to
+  `localhost`, IP addresses, the host of `OPENBERRY_BASE_URL` and `OPENBERRY_ALLOWED_HOSTS`, which blocks DNS-rebinding attacks.
+  Browser requests that change data must carry the dashboard's CSRF token, so other websites can't drive the API.
+- **Server mode:** set `OPENBERRY_PASSWORD` and `OPENBERRY_SECRET_KEY`. The dashboard then requires login and every form is CSRF-protected.
+  The JSON API and `/mcp` require `Authorization: Bearer $OPENBERRY_API_TOKEN`. Session cookies are `Secure` when `OPENBERRY_BASE_URL` is https.
+- `OPENBERRY_PUBLIC_REGISTRATION=true` lets anyone submit the registration form (agency intake). Such visitors can't read any data.
+- Request bodies are capped at 8 MB.
+- Outbound requests to user-supplied URLs (website auto-fill, RSS feeds, alert webhooks) only go to public IP addresses.
+  Through MCP, Claude can only point alert webhooks at Slack or Discord.
+- Claude is told to treat text from leads and public posts as data, never as instructions.
 - Nothing is ever sent to LinkedIn or by email automatically. OpenBerry drafts, and a human sends.

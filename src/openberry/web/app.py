@@ -33,7 +33,7 @@ LifespanHook = Callable[[], AbstractAsyncContextManager[Any]]
 
 ERROR_TITLES = {
     400: "That didn't work", 401: "Please log in", 403: "Not allowed", 404: "Page not found",
-    405: "Not allowed", 422: "Check your input", 500: "Something went wrong",
+    405: "Not allowed", 413: "That upload is too large", 422: "Check your input", 500: "Something went wrong",
 }
 
 
@@ -77,9 +77,14 @@ def _http_error(request: Request, exc: StarletteHTTPException) -> Response:
     return _error_page(request, exc.status_code, detail)
 
 
+def _json_errors(errors: Any) -> list[dict[str, Any]]:
+    """type/loc/msg of each validation error; the raw input (bytes) and context (exceptions) may not be JSON."""
+    return [{key: err[key] for key in ("type", "loc", "msg") if key in err} for err in errors]
+
+
 def _request_validation_error(request: Request, exc: RequestValidationError) -> Response:
     if not _wants_html(request):
-        return JSONResponse({"detail": exc.errors()}, status_code=422)
+        return JSONResponse({"detail": _json_errors(exc.errors())}, status_code=422)
     return _error_page(request, 404, "There's no page at this address.")
 
 
@@ -123,9 +128,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     hooks: list[LifespanHook] = []  # entered in _lifespan; mcp_server.mount_http appends to it
     app.state.lifespan_hooks = hooks
 
+    # Innermost first: refusals from the host guard and the body limit still get the security headers.
+    app.add_middleware(auth.BodySizeLimitMiddleware)
+    app.add_middleware(auth.LocalHostGuardMiddleware)
     app.add_middleware(auth.SecurityHeadersMiddleware)
     app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie=SESSION_COOKIE,
-                       max_age=SESSION_MAX_AGE, same_site="lax", https_only=False)
+                       max_age=SESSION_MAX_AGE, same_site="lax",
+                       https_only=settings.base_url.lower().startswith("https://"))
 
     app.add_exception_handler(auth.LoginRequired, _login_required)
     app.add_exception_handler(repo.NotFound, _not_found)

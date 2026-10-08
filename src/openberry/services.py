@@ -87,9 +87,20 @@ async def run_scan(company_id: int, *, trigger: str = "manual", sources: list[st
     Returns a stats dict (also stored on the scan run) with per-collector counts and errors.
     """
     company = repo.get_company(company_id)
-    settings = get_settings()
     collectors = [c for c in get_collectors(sources) if c.enabled_for(company)]
     run_id = repo.start_scan_run(company_id, trigger)
+    try:
+        return await _scan(company, run_id, collectors, sources, client)
+    except BaseException as exc:  # includes cancellation: never leave a run stuck in "running"
+        reason = "Interrupted" if isinstance(exc, asyncio.CancelledError) else f"{type(exc).__name__}: {exc}"
+        repo.finish_scan_run(run_id, "failed", {"error": reason})
+        raise
+
+
+async def _scan(company: Company, run_id: int, collectors: list, sources: list[str] | None,
+                client: httpx.AsyncClient | None) -> dict[str, Any]:
+    company_id = company.id
+    settings = get_settings()
     since = repo.utcnow() - timedelta(days=company.signals.lookback_days)
     hot_before = _hot_ids(company_id)
 

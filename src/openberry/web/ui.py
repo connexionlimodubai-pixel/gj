@@ -47,6 +47,7 @@ SOURCE_LABELS = {
     "hackernews": "Hacker News", "reddit": "Reddit", "github": "GitHub", "greenhouse": "Greenhouse",
     "lever": "Lever", "ashby": "Ashby", "google_news": "Google News", "rss": "RSS", "linkedin": "LinkedIn",
     "web": "Web", "manual": "Manual", "claude": "Claude", "csv": "CSV import", "demo": "Demo",
+    "sec_edgar": "SEC EDGAR",
 }
 LEAD_SOURCES = (*SIGNAL_SOURCES, "demo")
 STATUS_LABELS = {s: s.replace("_", " ").capitalize() for s in LEAD_STATUSES}
@@ -157,9 +158,10 @@ def reason_parts(reason: str) -> tuple[str, str]:
 def top_reason(lead: Lead) -> tuple[str, str] | None:
     """The single most telling reason for a table row: newest strong signal, else best ICP match."""
     reasons = [reason_parts(r) for r in lead.score_reasons]
+    concrete = [(k, t) for k, t in reasons if not t.startswith(("+", "Signal stacking"))]
     for wanted in ("block", "signal", "match"):
-        for kind, text in reasons:
-            if kind == wanted and not text.startswith("+"):
+        for kind, text in concrete:
+            if kind == wanted:
                 return kind, text
     return reasons[0] if reasons else None
 
@@ -175,6 +177,33 @@ def plural(n: int, word: str, many: str | None = None) -> str:
 
 def signal_label(signal_type: str) -> str:
     return SIGNAL_TYPES.get(signal_type, SIGNAL_TYPES["custom"])[0]
+
+
+def select_options(options: Any, current: Any) -> list[tuple[str, str, bool]]:
+    """(value, label, selected) for a <select>.
+
+    A stored value that is not one of the options (set through the API or by Claude) is kept as
+    an extra selected option; otherwise the browser would submit the first option and saving the
+    form would silently replace it. Case differences select the matching option.
+    """
+    opts = [(str(v), str(t)) for v, t in options]
+    current = str(current or "")
+    match = next((v for v, _ in opts if v == current), None)
+    if match is None:
+        match = next((v for v, _ in opts if v.lower() == current.lower()), None) if current else None
+    out = [(v, t, v == match) for v, t in opts]
+    if current and match is None:
+        out.append((current, current, True))
+    return out
+
+
+def check_options(options: Any, chosen: Any) -> list[tuple[str, str, bool]]:
+    """(value, label, checked) for a checkbox group; chosen values that aren't options stay as extra boxes."""
+    chosen = [str(c) for c in chosen or []]
+    picked = {c.lower() for c in chosen}
+    opts = [(str(v), str(t)) for v, t in options]
+    known = {v.lower() for v, _ in opts}
+    return [(v, t, v.lower() in picked) for v, t in opts] + [(c, c, True) for c in chosen if c.lower() not in known]
 
 
 def query_with(request: Request, **overrides: Any) -> str:
@@ -210,10 +239,11 @@ def _build_env() -> jinja2.Environment:
         TONES=TONES, LEAD_STATUSES=LEAD_STATUSES, MESSAGE_CHANNELS=MESSAGE_CHANNELS, TIERS=TIERS,
         LEAD_SOURCES=LEAD_SOURCES, SIGNAL_SOURCES=SIGNAL_SOURCES, CHANNEL_LABELS=CHANNEL_LABELS,
         LINKEDIN_CONNECT_LIMIT=LINKEDIN_CONNECT_LIMIT, query_with=query_with, version=__version__,
+        select_options=select_options, check_options=check_options,
         DOCS_URL=DOCS_URL, ICONS=ICONS, LOGO=LOGO,
         SIZE_OPTIONS=[(s, f"{s} employees") for s in COMPANY_SIZES],
         SIZE_CHIPS=[(s, s) for s in COMPANY_SIZES],
-        COMPANY_TYPE_OPTIONS=[(t, t.capitalize()) for t in COMPANY_TYPES],
+        COMPANY_TYPE_OPTIONS=[(t, "SMB" if t == "smb" else t.capitalize()) for t in COMPANY_TYPES],
         TONE_OPTIONS=[(t, t.capitalize()) for t in TONES],
         SIGNAL_OPTIONS=[(k, label) for k, (label, _) in SIGNAL_TYPES.items()],
         CHANNEL_OPTIONS=list(CHANNEL_LABELS.items()),

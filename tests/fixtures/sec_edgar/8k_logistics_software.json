@@ -1,0 +1,143 @@
+{
+  "took": 61,
+  "timed_out": false,
+  "_shards": {"total": 50, "successful": 50, "skipped": 0, "failed": 0},
+  "hits": {
+    "total": {"value": 5, "relation": "eq"},
+    "max_score": 24.216896,
+    "hits": [
+      {
+        "_index": "edgar_file",
+        "_id": "0001193125-26-212345:d812345d8k.htm",
+        "_score": 24.216896,
+        "_source": {
+          "ciks": ["0001843714"],
+          "period_ending": "2026-09-28",
+          "file_num": ["001-41218"],
+          "display_names": ["Routelogic Holdings Inc. (RTLG, RTLGW) (CIK 0001843714)"],
+          "xsl": null,
+          "sequence": 1,
+          "root_forms": ["8-K"],
+          "file_date": "2026-09-30",
+          "biz_states": ["MA"],
+          "sics": ["7372"],
+          "form": "8-K",
+          "adsh": "0001193125-26-212345",
+          "film_num": ["261298765"],
+          "biz_locations": ["Boston, MA"],
+          "file_type": "8-K",
+          "file_description": "8-K",
+          "inc_states": ["DE"],
+          "items": ["5.02", "9.01"]
+        }
+      },
+      {
+        "_index": "edgar_file",
+        "_id": "0001193125-26-212345:d812345dex991.htm",
+        "_score": 20.1,
+        "_source": {
+          "ciks": ["0001843714"],
+          "period_ending": "2026-09-28",
+          "file_num": ["001-41218"],
+          "display_names": ["Routelogic Holdings Inc. (RTLG, RTLGW) (CIK 0001843714)"],
+          "xsl": null,
+          "sequence": 2,
+          "root_forms": ["8-K"],
+          "file_date": "2026-09-30",
+          "biz_states": ["MA"],
+          "sics": ["7372"],
+          "form": "8-K",
+          "adsh": "0001193125-26-212345",
+          "film_num": ["261298765"],
+          "biz_locations": ["Boston, MA"],
+          "file_type": "EX-99.1",
+          "file_description": "EX-99.1",
+          "inc_states": ["DE"],
+          "items": ["5.02", "9.01"]
+        }
+      },
+      {
+        "_index": "edgar_file",
+        "_id": "0000912345-26-000044:crgl-20261001.htm",
+        "_score": 18.0,
+        "_source": {
+          "ciks": ["0000912345"],
+          "period_ending": "2026-10-01",
+          "file_num": ["001-13579"],
+          "display_names": ["Cargoline Corp (CRGL) (CIK 0000912345)"],
+          "xsl": null,
+          "sequence": 1,
+          "root_forms": ["8-K"],
+          "file_date": "2026-10-01",
+          "biz_states": ["TN"],
+          "sics": ["4731"],
+          "form": "8-K",
+          "adsh": "0000912345-26-000044",
+          "film_num": ["261301122"],
+          "biz_locations": ["Memphis, TN"],
+          "file_type": "8-K",
+          "file_description": null,
+          "inc_states": ["DE"],
+          "items": ["2.02", "9.01"]
+        }
+      },
+      {
+        "_index": "edgar_file",
+        "_id": "0001555000-26-000031:shpn-8ka.htm",
+        "_score": 15.5,
+        "_source": {
+          "ciks": ["0001555000"],
+          "period_ending": "2026-09-15",
+          "file_num": ["001-35555"],
+          "display_names": ["Shipnet Inc. (SHPN) (CIK 0001555000)"],
+          "xsl": null,
+          "sequence": 1,
+          "root_forms": ["8-K"],
+          "file_date": "2026-10-02",
+          "biz_states": ["CA"],
+          "sics": ["7372"],
+          "form": "8-K/A",
+          "adsh": "0001555000-26-000031",
+          "film_num": ["261305555"],
+          "biz_locations": ["San Jose, CA"],
+          "file_type": "8-K/A",
+          "file_description": "AMENDMENT NO. 1",
+          "inc_states": ["DE"],
+          "items": ["5.02"]
+        }
+      },
+      {
+        "_index": "edgar_file",
+        "_id": "0000923456-26-000017:fwlc-ex991.htm",
+        "_score": 12.8,
+        "_source": {
+          "ciks": ["0000923456"],
+          "period_ending": "2026-10-03",
+          "file_num": ["001-14444"],
+          "display_names": ["Freightwise Logistics Corp /DE/ (FWLC) (CIK 0000923456)"],
+          "xsl": null,
+          "sequence": 2,
+          "root_forms": ["8-K"],
+          "file_date": "2026-10-05",
+          "biz_states": ["TX"],
+          "sics": ["4731"],
+          "form": "8-K",
+          "adsh": "0000923456-26-000017",
+          "film_num": ["261309876"],
+          "biz_locations": ["Dallas, TX"],
+          "file_type": "EX-99.1",
+          "file_description": "PRESS RELEASE",
+          "inc_states": ["DE"],
+          "items": ["5.02", "7.01", "9.01"]
+        }
+      }
+    ]
+  },
+  "aggregations": {
+    "entity_filter": {"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0, "buckets": []},
+    "sic_filter": {"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0, "buckets": [{"key": "7372", "doc_count": 3}, {"key": "4731", "doc_count": 2}]},
+    "biz_states_filter": {"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0, "buckets": []},
+    "form_filter": {"doc_count_error_upper_bound": 0, "sum_other_doc_count": 0, "buckets": [{"key": "8-K", "doc_count": 4}, {"key": "8-K/A", "doc_count": 1}]}
+  },
+  "query": {"query": {"bool": {"must": [{"match_phrase": {"doc_text": "logistics software"}}], "filter": [{"terms": {"root_forms": ["8-K"]}}, {"range": {"file_date": {"gte": "2026-09-24", "lte": "2026-10-08"}}}]}}, "from": 0, "size": 100}
+}

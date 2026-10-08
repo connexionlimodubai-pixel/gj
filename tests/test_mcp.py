@@ -199,6 +199,31 @@ async def test_update_company_accepts_its_own_profile_output(company):
                                                       changes={"id": 5, "updated_at": "2026-01-01"})
 
 
+async def test_webhooks_set_by_claude_must_be_slack_or_discord(company):
+    """Alerts carry lead data: injected text must not be able to point them at another server."""
+    async with mcp_client() as c:
+        for url in ("https://evil.example/collect", "https://hooks.slack.com.evil.example/services/x",
+                    "https://10.0.0.5/hook"):
+            text = await error_text(c, "update_company", company_id=company.id,
+                                    changes={"notify": {"slack_webhook_url": url}})
+            assert "must be an https://hooks.slack.com/" in text and "dashboard" in text
+        assert "discord.com" in await error_text(c, "update_company", company_id=company.id, changes={
+            "notify": {"discord_webhook_url": "https://hooks.slack.com/services/x"}})
+        assert "hooks.slack.com" in await error_text(c, "register_company", name="Leaky Co", profile={
+            "notify": {"slack_webhook_url": "https://evil.example/hook"}})
+        assert repo.get_company(company.id).notify.slack_webhook_url == ""
+        assert [co.name for co in repo.list_companies()] == ["Acme Chauffeurs"]
+
+        await ok(c, "update_company", company_id=company.id, changes={"notify": {
+            "slack_webhook_url": "https://hooks.slack.com/services/T0/B0/x",
+            "discord_webhook_url": "https://discord.com/api/webhooks/1/abc"}})
+        created = await ok(c, "register_company", name="Alerts Co", profile={
+            "notify": {"discord_webhook_url": "https://discordapp.com/api/webhooks/2/def"}})
+        assert repo.get_company(created["company_id"]).notify.discord_webhook_url.startswith("https://discordapp.com/")
+    # The dashboard (not MCP) can still set other hosts, e.g. a self-hosted Slack-compatible chat.
+    repo.update_company(company.id, {"notify": {"slack_webhook_url": "https://chat.internal.example/hooks/x"}})
+
+
 async def test_company_names_stay_unique(company):
     other = repo.create_company(CompanyIn(name="Gulf Freight"))
     async with mcp_client() as c:
@@ -264,6 +289,13 @@ async def test_get_add_update_assess_delete_lead(company):
                           "url": "https://www.linkedin.com/posts/blacklane-1", "occurred_at": "2026-10-05"}]}])
         assert again["merged"] == 1 and again["results"][0]["id"] == person["id"]
         assert repo.get_lead(person["id"]).email == "layla@nw.example"
+
+        # "No signal" is only said of leads that really have none (own, merged or inherited from the account).
+        notes = await ok(c, "add_leads", company_id=company.id, leads=[
+            {"full_name": "Layla Haddad", "linkedin_url": "https://www.linkedin.com/in/layla-haddad-test"},
+            {"full_name": "Rami Saleh", "title": "Travel Manager", "lead_company": "Harbor Lane Bank"},
+            {"full_name": "Nobody Yet", "lead_company": "Quiet LLC"}])
+        assert ["note" in r for r in notes["results"]] == [False, False, True]
 
         assert "at most 100" in await error_text(c, "add_leads", company_id=company.id,
                                                  leads=[{"full_name": f"P{i}"} for i in range(101)])
@@ -358,7 +390,8 @@ async def test_outreach_flow(company):
         email_ctx = await ok(c, "get_outreach_context", lead_id=lead.id, channel="email")
         assert any("No email address" in w for w in email_ctx["warnings"])
         example = email_ctx["save_with"]["arguments"]
-        assert "'<subject>'" in await error_text(c, "save_outreach_message", **{**example, "body": "Hi Omar, quick idea."})
+        assert "'<subject>'" in await error_text(c, "save_outreach_message",
+                                                 **{**example, "body": "Hi Omar, quick idea."})
         assert "'<your message>'" in await error_text(c, "save_outreach_message",
                                                       **{**example, "subject": "Dubai roadshows"})
         assert "'[First Name]'" in await error_text(c, "save_outreach_message", lead_id=lead.id, channel="email",
@@ -395,8 +428,10 @@ async def test_outreach_flow(company):
         ctx2 = await ok(c, "get_outreach_context", lead_id=lead.id, channel="linkedin_dm")
         assert ctx2["step"] == 2 and "follow-up" in ctx2["channel_guidance"]
 
-        draft = await ok(c, "save_outreach_message", lead_id=lead.id, channel="linkedin_dm", step=2,
+        # Without step, a follow-up is numbered like get_outreach_context does (followups_due relies on it).
+        draft = await ok(c, "save_outreach_message", lead_id=lead.id, channel="linkedin_dm",
                          body="Hi Omar, one more thought: we handle airport pickups with monthly invoicing.")
+        assert draft["step"] == 2 and repo.get_message(draft["message_id"]).step == 2
         reply = await ok(c, "log_reply", lead_id=lead.id, body="Thanks, send me your rates.")
         assert reply["lead"]["status"] == "replied" and reply["skipped_draft_ids"] == [draft["message_id"]]
         ctx3 = await ok(c, "get_outreach_context", lead_id=lead.id, channel="linkedin_dm")
@@ -529,6 +564,27 @@ async def test_scan_running_in_another_process_is_not_duplicated(company, monkey
         repo.finish_scan_run(run_id, "ok", {})
         assert (await ok(c, "run_signal_scan", company_id=company.id))["status"] == "ok"
     assert calls == [company.id, company.id]
+
+
+async def test_crashed_scan_does_not_block_the_next_one(company, monkeypatch):
+    """run_scan leaves its row 'running' when it raises; Claude must still be able to retry right away."""
+    attempts = []
+
+    async def flaky_run_scan(company_id, *, trigger="manual", sources=None, client=None):
+        attempts.append(trigger)
+        repo.start_scan_run(company_id, trigger)
+        if len(attempts) == 1:
+            raise RuntimeError("collector blew up")
+        return {"status": "ok", "collectors": {}, "skipped": [], "newly_hot": []}
+
+    monkeypatch.setattr(services, "run_scan", flaky_run_scan)
+    async with mcp_client() as c:
+        text = await error_text(c, "run_signal_scan", company_id=company.id)
+        assert "scan failed: RuntimeError: collector blew up" in text
+        failed = repo.list_scan_runs(company.id, limit=1)[0]
+        assert failed.status == "failed" and "collector blew up" in failed.stats["error"]
+        assert (await ok(c, "run_signal_scan", company_id=company.id))["status"] == "ok"
+    assert attempts == ["claude", "claude"]
 
 
 async def test_slow_scan_continues_in_background(company, monkeypatch):

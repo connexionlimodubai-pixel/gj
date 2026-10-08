@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from .. import repo, services
@@ -42,7 +42,23 @@ def status(company_id: int) -> dict[str, Any]:
     }
 
 
+def _close_interrupted(company_id: int, trigger: str, since: datetime) -> None:
+    """Mark the run a cancelled scan left 'running' as failed.
+
+    Otherwise, after a restart mid-scan, the dashboard would show 'Scanning…' and refuse new
+    scans until the row goes stale.
+    """
+    try:
+        for run in repo.list_scan_runs(company_id, limit=3):
+            if run.status == "running" and run.trigger == trigger and as_utc(run.started_at) >= since:
+                repo.finish_scan_run(run.id, "failed", {
+                    **run.stats, "errors": ["Interrupted: the server stopped during the scan."]})
+    except Exception:  # shutting down: never let bookkeeping mask the cancellation
+        log.exception("could not close the interrupted scan of company %s", company_id)
+
+
 async def _run(company_id: int, trigger: str) -> None:
+    started = repo.utcnow()
     try:
         stats = await services.run_scan(company_id, trigger=trigger)
         _results[company_id] = {
@@ -52,6 +68,7 @@ async def _run(company_id: int, trigger: str) -> None:
             "leads_new": stats.get("leads_new", 0),
         }
     except asyncio.CancelledError:
+        _close_interrupted(company_id, trigger, started)
         raise
     except Exception as exc:  # report on the dashboard instead of crashing the task
         log.exception("dashboard scan failed for company %s", company_id)

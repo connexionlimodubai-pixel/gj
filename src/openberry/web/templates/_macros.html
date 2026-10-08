@@ -117,24 +117,22 @@
 {%- endmacro %}
 
 {% macro select(name, label, options, help="", blank=none, cls="") -%}
-{% set current = values.get(name, "")|string %}
 <div class="field{% if cls %} {{ cls }}{% endif %}{% if errors.get(name) %} has-error{% endif %}" data-label="{{ label }}">
 {{ label_for(name, label) }}
 <select class="input" id="{{ fid(name) }}" name="{{ name }}"{{ aria(name, help) }}>
 {% if blank is not none %}<option value="">{{ blank }}</option>{% endif %}
-{% for value, text in options %}<option value="{{ value }}"{% if current == value|string %} selected{% endif %}>{{ text }}</option>{% endfor %}
+{% for value, text, selected in select_options(options, values.get(name, "")) %}<option value="{{ value }}"{% if selected %} selected{% endif %}>{{ text }}</option>{% endfor %}
 </select>
 {{ help_err(name, help) }}
 </div>
 {%- endmacro %}
 
 {% macro checks(name, label, options, help="", cls="") -%}
-{% set chosen = values.get(name, []) %}
 <fieldset class="field checks-field{% if cls %} {{ cls }}{% endif %}{% if errors.get(name) %} has-error{% endif %}" data-label="{{ label }}"{{ aria(name, help) }}>
 <legend>{{ label }}</legend>
 <div class="chips">
-{% for value, text in options %}
-<label class="chip"><input type="checkbox" name="{{ name }}" value="{{ value }}"{% if value in chosen %} checked{% endif %}><span class="chip-box" aria-hidden="true">{{ icon("check", 12) }}</span><span>{{ text }}</span></label>
+{% for value, text, checked in check_options(options, values.get(name, [])) %}
+<label class="chip"><input type="checkbox" name="{{ name }}" value="{{ value }}"{% if checked %} checked{% endif %}><span class="chip-box" aria-hidden="true">{{ icon("check", 12) }}</span><span>{{ text }}</span></label>
 {% endfor %}
 </div>
 {{ help_err(name, help) }}

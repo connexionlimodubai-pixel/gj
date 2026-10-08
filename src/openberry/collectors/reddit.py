@@ -11,13 +11,16 @@ How it works
        ``GET https://oauth.reddit.com/r/{subreddit}/search`` with ``restrict_sr=1`` when the
        company lists subreddits, with ``q``, ``sort=new``, ``t`` (day/week/month/year from the
        lookback), ``type=link``, ``limit=50``, ``raw_json=1``, ``Authorization: bearer <token>``
-       and a Reddit-style User-Agent (``python:openberry:<version> (...)``).
+       and a Reddit-style User-Agent (``python:openberry:<version> (by /u/<name>; +<project url>)``;
+       the ``by /u/`` part needs REDDIT_USERNAME, which Reddit's API rules ask for as contact).
 
     Site-wide, every competitor and keyword gets its own query (packed into OR-queries only when
     there are more terms than the request cap). Inside subreddits, all terms are OR-ed into one
     query per subreddit. Each post (``Listing.data.children[].data``, kind ``t3``) becomes one
     signal whose lead is the author, identified by ``https://www.reddit.com/user/<name>`` so the
-    same person merges across scans. ``[deleted]``, AutoModerator and NSFW posts are skipped.
+    same person merges across scans. ``[deleted]``, AutoModerator, stickied/moderator and NSFW posts
+    are skipped, and so are posts where no term is visible in the title, body, link or subreddit
+    name (Reddit also matches on author names and metadata, which says nothing about intent).
 
 Terms of service -- read before enabling
     * Reddit has blocked unauthenticated ``.json`` access (HTTP 403 with an HTML page) since
@@ -28,21 +31,21 @@ Terms of service -- read before enabling
       lead generation is commercial use. Running this collector for a business without that
       agreement may breach Reddit's terms. That decision and its risk belong to the operator.
     * Reddit announced on 2026-09-30 that it accepts no new public API access requests after
-      2026-10-31 and will close the remaining public Data API access in phases through March
-      2027. Expect this source to stop working. Hacker News, job boards and SEC filings are the
-      durable free sources.
+      2026-10-31, starts removing access for unregistered apps on 2027-01-12 and will close the
+      remaining public Data API access in phases through March 2027. Expect this source to stop
+      working. Hacker News, job boards and SEC filings are the durable free sources.
 
 Limits and politeness
     The free OAuth tier allows 100 queries a minute per client id, reported in the
     X-Ratelimit-Used / -Remaining / -Reset headers. Each scan sends at most one token request plus
     MAX_REQUESTS searches, one at a time. It stops when X-Ratelimit-Remaining reaches 0, on HTTP 429,
     on 401 or a blocking 403, or after MAX_CONSECUTIVE_FAILURES failed requests in a row. It only
-    asks for a further page when a page is full and still inside the lookback window. Search covers
-    posts, not comments.
+    asks for a further page when a page is full and still inside the lookback window, and sends no new
+    request after TIME_BUDGET_SECONDS (services.run_scan cancels a collector at 120 s and would drop
+    everything found so far). Search covers posts, not comments.
 
 Strength (SignalIn.strength, 50 = typical)
-    35  search hit, but none of the terms is visible in the post (stemming, author or URL match)
-    50  a keyword or competitor is mentioned
+    50  a keyword or competitor is mentioned (or the post is in a subreddit named after one)
     60  ... in a post whose title is a question
     75  a buying-intent phrase ("looking for", "recommend", "alternative to", "anyone use", ...)
     85  a churn phrase next to a competitor mention ("switching from", "frustrated with", "cancel", ...)
@@ -51,6 +54,8 @@ Strength (SignalIn.strength, 50 = typical)
 
 from __future__ import annotations
 
+import html
+import os
 import re
 import time
 from collections import deque
@@ -63,7 +68,7 @@ import httpx
 from .. import __version__
 from ..config import Settings, get_settings
 from ..models import Company, LeadIn, SignalIn
-from .base import CollectContext, Collector, RawSignal, parse_time, strip_html, truncate
+from .base import CollectContext, Collector, RawSignal, parse_time, truncate
 
 TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 API_BASE = "https://oauth.reddit.com"
@@ -73,6 +78,7 @@ MAX_REQUESTS = 10             # search requests per scan (plus at most one token
 PAGE_SIZE = 50
 MAX_QUERY_CHARS = 512         # Reddit's limit for `q`
 MAX_CONSECUTIVE_FAILURES = 3
+TIME_BUDGET_SECONDS = 90.0    # no new request after this; services.run_scan cancels at 120 s
 TOKEN_EXPIRY_MARGIN = 60      # seconds: renew the cached token a little before Reddit expires it
 
 COMPETITOR, KEYWORD = "competitor", "keyword"
@@ -80,6 +86,11 @@ SKIP_AUTHORS = frozenset({"[deleted]", "[removed]", "automoderator"})
 REMOVED_BODIES = frozenset({"[deleted]", "[removed]"})
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{2,30}$")
 _SUBREDDIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]{1,20}$")
+_POST_ID_RE = re.compile(r"^[A-Za-z0-9]{1,16}$")  # base36 id, also used in URLs and external ids
+# Only things that look like real HTML tags. base.strip_html's `<[^>]+>` would also eat the text
+# between "<10 people" and "> 2 cars", which is common in Reddit's raw markdown.
+_TAG_LIKE_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
+_INVISIBLE_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")  # Reddit's &#x200B; paragraph spacers
 
 # Phrases that suggest someone is choosing a vendor (matched on lower-cased title + body).
 INTENT_PATTERNS: tuple[str, ...] = (
@@ -177,10 +188,18 @@ def _time_filter(since: datetime) -> str:
     return "all"
 
 
+def _reddit_username(settings: Settings) -> str:
+    """The operator's Reddit username for the User-Agent contact, if one is configured and valid."""
+    # Settings has no `reddit_username` field yet; until it does, read REDDIT_USERNAME directly
+    # (Settings.from_env has already loaded any .env file into os.environ).
+    raw = getattr(settings, "reddit_username", "") or os.environ.get("REDDIT_USERNAME", "")
+    name = str(raw).strip().removeprefix("/").removeprefix("u/")
+    return name if _USERNAME_RE.match(name) else ""  # also keeps CR/LF out of the header
+
+
 def user_agent(settings: Settings) -> str:
     """Reddit wants '<platform>:<app id>:<version> (by /u/<user>)' and never a spoofed browser UA."""
-    # `reddit_username` is optional and only used when a Settings field for it exists.
-    username = str(getattr(settings, "reddit_username", "") or "").strip().removeprefix("/").removeprefix("u/")
+    username = _reddit_username(settings)
     url = re.search(r"https?://[^\s);]+", settings.user_agent or "")
     details = "; ".join(p for p in (f"by /u/{username}" if username else "", f"+{url.group(0)}" if url else "") if p)
     return f"python:openberry:{__version__}" + (f" ({details})" if details else "")
@@ -194,13 +213,32 @@ def _has_credentials(settings: Settings) -> bool:
 # Post -> signal
 # --------------------------------------------------------------------------------------
 
+def _clean(value: Any) -> str:
+    """Reddit text (raw markdown with raw_json=1) as one plain line; None -> ''. Raises on non-text."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"expected text, got {type(value).__name__}")
+    text = html.unescape(_TAG_LIKE_RE.sub(" ", value))
+    return re.sub(r"\s+", " ", _INVISIBLE_RE.sub("", text)).strip()
+
+
+def _time(value: Any) -> datetime | None:
+    """base.parse_time, but None instead of OverflowError/ValueError for absurd timestamps."""
+    try:
+        return parse_time(value)
+    except (OverflowError, OSError, ValueError, TypeError):
+        return None
+
+
 def _mentions(text: str, terms: list[str]) -> list[str]:
-    """Whole-word, case-insensitive matches that also accept plurals/possessives ('chauffeurs')."""
+    """Whole-word, case-insensitive matches that also accept simple inflections ('chauffeurs',
+    "Blacklane's", 'chauffeured', 'chauffeuring'), the stems Reddit's own search matches on."""
     hay = text.lower()
     hits = []
     for term in terms:
         pattern = r"\s+".join(re.escape(w) for w in term.lower().split())
-        if pattern and re.search(r"(?<![a-z0-9])" + pattern + r"(?:'s|s|es)?(?![a-z0-9])", hay):
+        if pattern and re.search(r"(?<![a-z0-9])" + pattern + r"(?:'s|s|es|ed|ing)?(?![a-z0-9])", hay):
             hits.append(term)
     return hits
 
@@ -212,13 +250,11 @@ def _first_phrase(patterns: list[re.Pattern[str]], text: str) -> str:
     return ""
 
 
-def _strength(title: str, text: str, competitor_hit: bool, visible: bool, comments: int) -> tuple[int, str]:
+def _strength(title: str, text: str, competitor_hit: bool, comments: int) -> tuple[int, str]:
     """Return (strength, intent phrase found) following the rule in the module docstring."""
     hay = text.lower()
     phrase = ""
-    if not visible:
-        value = 35
-    elif competitor_hit and (phrase := _first_phrase(_CHURN_RE, hay)):
+    if competitor_hit and (phrase := _first_phrase(_CHURN_RE, hay)):
         value = 85
     elif phrase := _first_phrase(_INTENT_RE, hay):
         value = 75
@@ -234,48 +270,66 @@ def _strength(title: str, text: str, competitor_hit: bool, visible: bool, commen
 def _int(value: Any) -> int:
     try:
         return int(value or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _skip(post: dict[str, Any], author: str) -> bool:
+    """Deleted/bot/NSFW posts, and stickied or moderator-distinguished threads (megathreads,
+    announcements): none of them is a person showing buying intent."""
+    return (not author or author.lower() in SKIP_AUTHORS or not _USERNAME_RE.match(author)
+            or bool(post.get("over_18")) or bool(post.get("stickied"))
+            or post.get("distinguished") in ("moderator", "admin"))
 
 
 def _post_signal(post: dict[str, Any], terms: list[_Term], search: _Search, since: datetime) -> RawSignal | None:
     """Map one t3 post to a RawSignal, or None when it should be skipped. Raises on malformed data."""
     author = str(post.get("author") or "").strip()
-    if not author or author.lower() in SKIP_AUTHORS or post.get("over_18") or not _USERNAME_RE.match(author):
+    if _skip(post, author):
         return None
     post_id = str(post.get("id") or "").strip() or str(post.get("name") or "").removeprefix("t3_")
-    if not post_id:
-        raise ValueError("post without id")
-    occurred = parse_time(post.get("created_utc"))
+    if not _POST_ID_RE.match(post_id):
+        raise ValueError(f"post without a valid id ({post_id[:20]!r})")
+    occurred = _time(post.get("created_utc"))
     if occurred is None:
         raise ValueError(f"post {post_id} has no valid created_utc")
     if occurred <= since:
         return None
 
-    title = strip_html(post.get("title"))
-    body = strip_html(post.get("selftext"))
+    title = _clean(post.get("title"))
+    body = _clean(post.get("selftext"))
     if body in REMOVED_BODIES:
         body = ""
-    link = "" if post.get("is_self", True) else str(post.get("url") or "")
+    url = post.get("url")
+    is_link_post = not post.get("is_self", True)
+    link = url if is_link_post and isinstance(url, str) and url.startswith(("https://", "http://")) else ""
     subreddit = str(post.get("subreddit") or search.scope or "").strip()
+
     text = f"{title}\n{body}\n{link}"
-
-    competitors = _mentions(text, [t.text for t in terms if t.kind == COMPETITOR])
-    keywords = _mentions(text, [t.text for t in terms if t.kind == KEYWORD])
-    visible = bool(competitors or keywords)
-    if visible:
-        is_competitor = bool(competitors)
-    else:  # Reddit matched it for a reason we cannot see; attribute it to the query, weakly.
-        is_competitor = all(t.kind == COMPETITOR for t in search.terms)
+    competitor_terms = [t.text for t in terms if t.kind == COMPETITOR]
+    keyword_terms = [t.text for t in terms if t.kind == KEYWORD]
+    competitors = _mentions(text, competitor_terms)
+    keywords = _mentions(text, keyword_terms)
+    in_text = bool(competitors or keywords)
+    if not in_text:  # a post in r/<competitor> or r/<keyword> is about that topic too
+        competitors = _mentions(subreddit, competitor_terms)
+        keywords = _mentions(subreddit, keyword_terms)
+    if not (competitors or keywords):
+        # Reddit matched on the author name, metadata or fuzzy stemming: not a real mention.
+        return None
     comments = _int(post.get("num_comments"))
-    strength, phrase = _strength(title, f"{title}\n{body}", bool(competitors), visible, comments)
+    strength, phrase = _strength(title, f"{title}\n{body}", bool(competitors), comments)
 
-    permalink = str(post.get("permalink") or f"/comments/{post_id}/")
+    permalink = post.get("permalink")
+    if not (isinstance(permalink, str) and permalink.startswith("/")):
+        permalink = f"/comments/{post_id}/"  # Reddit's short link; never trust a non-relative value
+    flair = post.get("link_flair_text")
+    heading = title or f"Reddit post by u/{author}"
     signal = SignalIn(
-        type="competitor_engagement" if is_competitor else "keyword_mention",
-        title=truncate(f"r/{subreddit}: {title}" if title else f"Reddit post by u/{author}", 160),
+        type="competitor_engagement" if competitors else "keyword_mention",
+        title=truncate(f"r/{subreddit}: {heading}" if subreddit else heading, 160),
         summary=truncate(body or link or title, 500),
-        url=WEB_BASE + permalink if permalink.startswith("/") else permalink,
+        url=WEB_BASE + permalink,
         source="reddit",
         external_id=f"reddit:{post_id}",
         strength=strength,
@@ -287,10 +341,10 @@ def _post_signal(post: dict[str, Any], terms: list[_Term], search: _Search, sinc
             "score": _int(post.get("score")),
             "num_comments": comments,
             "matched_terms": competitors + keywords,
-            "matched_in_text": visible,
+            "matched_in_text": in_text,
             "intent_phrase": phrase,
             "query": search.query,
-            "flair": post.get("link_flair_text") or "",
+            "flair": flair if isinstance(flair, str) else "",
             "link_url": link,
         },
     )
@@ -350,6 +404,7 @@ class RedditCollector(Collector):
     def __init__(self) -> None:
         # (client id, secret) -> (access token, monotonic expiry)
         self._tokens: dict[tuple[str, str], tuple[str, float]] = {}
+        self.time_budget = TIME_BUDGET_SECONDS  # tests lower it
 
     def is_configured(self, company: Company) -> bool:
         return _has_credentials(get_settings()) and bool(company.signals.keywords or company.competitors)
@@ -359,8 +414,9 @@ class RedditCollector(Collector):
             ctx.warn("Reddit: REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET are not set; skipped.")
             return []
         terms = _company_terms(company)
-        if not terms:
+        if not terms or ctx.max_items <= 0:
             return []
+        deadline = time.monotonic() + self.time_budget
         subreddits = self._valid_subreddits(company.signals.subreddits, ctx)
         if company.signals.subreddits and not subreddits:
             return []
@@ -386,6 +442,10 @@ class RedditCollector(Collector):
             search = queue.popleft()
             if search.scope in dead_scopes:
                 continue
+            if time.monotonic() >= deadline:
+                ctx.warn(f"Reddit: time budget of {self.time_budget:.0f} s used up; stopped for this scan "
+                         "with what was found so far.")
+                break
             sent += 1
             page = await self._fetch(ctx, search, headers, window)
             if page.outcome == STOP:
@@ -433,7 +493,7 @@ class RedditCollector(Collector):
         """Ask for the next page only when this one was full and still inside the lookback window."""
         if not page.after or page.count < PAGE_SIZE:
             return False
-        times = [t for t in (parse_time(p.get("created_utc")) for p in page.posts) if t is not None]
+        times = [t for t in (_time(p.get("created_utc")) for p in page.posts) if t is not None]
         return bool(times) and min(times) > since
 
     async def _access_token(self, ctx: CollectContext) -> str | None:

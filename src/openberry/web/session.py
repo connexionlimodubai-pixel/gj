@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 
 from fastapi import Request
@@ -15,6 +16,11 @@ AUTH_KEY = "auth"
 FLASH_KEY = "flashes"
 COMPANY_KEY = "company_id"
 MAX_FLASHES = 5
+# The session lives in a signed cookie and browsers silently drop cookies over 4 KB, which would
+# log the user out and break every form's CSRF token. Flashes can quote user data (lead names,
+# file names, import errors), so they are bounded per message and in total (JSON-encoded size).
+MAX_FLASH_CHARS = 240
+MAX_FLASH_BYTES = 1500
 
 
 def password_fingerprint() -> str:
@@ -54,9 +60,12 @@ def csrf_valid(request: Request, token: object) -> bool:
 
 def flash(request: Request, message: str, category: str = "success") -> None:
     """Queue a message for the next rendered page. Categories: success, error, info, warning."""
-    flashes = list(request.session.get(FLASH_KEY, []))
-    flashes.append([category, message])
-    request.session[FLASH_KEY] = flashes[-MAX_FLASHES:]
+    if len(message) > MAX_FLASH_CHARS:
+        message = message[: MAX_FLASH_CHARS - 1].rstrip() + "…"
+    flashes = [*request.session.get(FLASH_KEY, []), [category, message]][-MAX_FLASHES:]
+    while len(flashes) > 1 and len(json.dumps(flashes)) > MAX_FLASH_BYTES:
+        flashes.pop(0)
+    request.session[FLASH_KEY] = flashes
 
 
 def pop_flashes(request: Request) -> list[tuple[str, str]]:

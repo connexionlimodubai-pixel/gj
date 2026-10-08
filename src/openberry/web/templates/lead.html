@@ -161,6 +161,11 @@
       {% endif %}
 
       <div class="outreach-tools">
+        <div class="tool-card tool-wide">
+          <h3>{{ m.icon("sparkles", 15) }}Ask Claude</h3>
+          <p class="small muted">Best quality: Claude reads the full context and saves the draft here.</p>
+          <div class="prompt"><p id="claude-lead-prompt">{{ claude_prompt }}</p>{{ m.copy_button("#claude-lead-prompt", "Copy", "btn btn-sm btn-ghost") }}</div>
+        </div>
         <form method="post" action="{{ lead_url }}/draft" class="tool-card">
           {{ m.csrf() }}
           <h3>{{ m.icon("edit", 15) }}Draft a message</h3>
@@ -174,17 +179,12 @@
           </div>
           <button class="btn btn-primary btn-sm" type="submit">{{ m.icon("wand", 14) }}Create draft</button>
         </form>
-        <div class="tool-card">
-          <h3>{{ m.icon("sparkles", 15) }}Ask Claude</h3>
-          <p class="small muted">Best quality: Claude reads the full context and saves the draft here.</p>
-          <div class="prompt"><p id="claude-lead-prompt">{{ claude_prompt }}</p>{{ m.copy_button("#claude-lead-prompt", "Copy", "btn btn-sm btn-ghost") }}</div>
-        </div>
         <form method="post" action="{{ lead_url }}/reply" class="tool-card">
           {{ m.csrf() }}
           <h3>{{ m.icon("reply", 15) }}Log a reply</h3>
           <div class="field"><label for="reply-body">Their reply</label>
             <textarea class="input" id="reply-body" name="body" rows="3" placeholder="Paste what they wrote back" required></textarea></div>
-          <div class="input-row">
+          <div class="input-row reply-row">
             <label class="sr-only" for="reply-channel">Channel</label>
             <select class="input" id="reply-channel" name="channel">{% for value, label in CHANNEL_OPTIONS if value != "linkedin_connect" %}<option value="{{ value }}"{% if value == "linkedin_dm" %} selected{% endif %}>{{ label }}</option>{% endfor %}</select>
             <button class="btn btn-sm" type="submit">Log reply</button>
@@ -216,6 +216,7 @@
       {% if contacts %}
       <ul class="list">{% for c in contacts %}<li class="list-item">{{ m.avatar(c.full_name) }}<div class="min0 grow"><a class="lead-name" href="{{ base }}/leads/{{ c.id }}">{{ c.full_name }}</a><span class="sub">{{ c.title or "Title unknown" }}</span></div>{{ m.score(c.score, c.tier) }}</li>{% endfor %}</ul>
       {% else %}<p class="muted small">Nobody at {{ lead.lead_company or "this company" }} is known yet.</p>{% endif %}
+      <p><a class="btn btn-sm" href="{{ base }}/leads/new?lead_company={{ lead.lead_company|urlencode }}&amp;company_domain={{ lead.company_domain|urlencode }}">{{ m.icon("plus", 14) }}Add a person here</a></p>
       <div class="hint">
         <p class="small">{{ m.icon("sparkles", 14) }}Ask Claude to find the decision-maker:</p>
         <div class="prompt"><p id="dm-prompt">{{ decision_maker_prompt }}</p>{{ m.copy_button("#dm-prompt", "Copy", "btn btn-sm btn-ghost") }}</div>
@@ -233,7 +234,9 @@
         <summary><span class="card-title">Edit profile</span>{{ m.icon("chevron-down", 16, "chev") }}</summary>
         <form method="post" action="{{ lead_url }}/profile" class="stack">
           {{ m.csrf() }}
-          {% for name, label in [("full_name", "Full name"), ("title", "Job title"), ("lead_company", "Company"), ("company_domain", "Company domain"), ("industry", "Industry"), ("company_size", "Company size"), ("location", "Location"), ("linkedin_url", "LinkedIn URL"), ("email", "Email"), ("phone", "Phone"), ("website", "Website"), ("github_username", "GitHub username"), ("twitter", "X / Twitter"), ("profile_url", "Other profile URL")] %}
+          {# An account lead stands for a company: a person's name or job title typed here would be stored
+             but never shown, so people at the account are added as their own leads ("Add a person here"). #}
+          {% for name, label in [("full_name", "Full name"), ("title", "Job title"), ("lead_company", "Company"), ("company_domain", "Company domain"), ("industry", "Industry"), ("company_size", "Company size"), ("location", "Location"), ("linkedin_url", "LinkedIn URL"), ("email", "Email"), ("phone", "Phone"), ("website", "Website"), ("github_username", "GitHub username"), ("twitter", "X / Twitter"), ("profile_url", "Other profile URL")] if lead.kind == "person" or name not in ("full_name", "title") %}
           <div class="field"><label for="p-{{ name }}">{{ label }}</label><input class="input" id="p-{{ name }}" name="{{ name }}" value="{{ lead[name] }}"></div>
           {% endfor %}
           <div class="field"><label for="p-bio">Bio</label><textarea class="input" id="p-bio" name="bio" rows="3">{{ lead.bio }}</textarea></div>

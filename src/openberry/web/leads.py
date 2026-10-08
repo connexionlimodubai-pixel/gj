@@ -108,11 +108,13 @@ def leads_import(request: Request, company_id: int, form: FormData = Depends(che
 
 
 @router.get("/c/{company_id}/leads/new")
-def lead_new_page(request: Request, company_id: int) -> Response:
+def lead_new_page(request: Request, company_id: int, lead_company: str = "", company_domain: str = "") -> Response:
+    """Add-lead form; ?lead_company=&company_domain= pre-fill it (e.g. a person at an account lead)."""
     company = repo.get_company(company_id)
     return render(request, "lead_new.html", {
         "company": company, "active": "leads", "title": "Add lead",
-        "values": {"signal_type": "custom", "signal_strength": "50", "signal_date": date.today().isoformat()},
+        "values": {"signal_type": "custom", "signal_strength": "50", "signal_date": date.today().isoformat(),
+                   "lead_company": lead_company.strip()[:200], "company_domain": company_domain.strip()[:200]},
     })
 
 
@@ -223,7 +225,7 @@ async def lead_draft(request: Request, company_id: int, lead_id: int,
         context = outreach.outreach_context(company, lead, signals, previous, channel, step)
         try:
             subject, body = await outreach.draft_with_ollama(get_settings(), context)
-        except RuntimeError as exc:
+        except Exception as exc:  # external service: a bad URL or a non-JSON reply must not cost the page
             flash(request, f"Local AI draft failed: {exc}", "error")
             return redirect(back)
     else:

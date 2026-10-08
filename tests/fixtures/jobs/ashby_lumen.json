@@ -1,0 +1,62 @@
+{
+  "apiVersion": "1",
+  "jobs": [
+    {
+      "id": "7458d4e9-da2e-47bd-98cb-adfda43d42b2",
+      "title": "  Executive Assistant  ",
+      "department": "G&A",
+      "team": "Office of the CEO",
+      "employmentType": "FullTime",
+      "location": "Dubai",
+      "secondaryLocations": [
+        {"location": "Remote - UAE", "address": {"postalAddress": {"addressLocality": "", "addressRegion": "", "addressCountry": "United Arab Emirates"}}},
+        {"location": "Dubai", "address": null}
+      ],
+      "publishedAt": "2026-10-06T10:20:00.000+00:00",
+      "isListed": true,
+      "isRemote": false,
+      "workplaceType": "Hybrid",
+      "address": {"postalAddress": {"addressLocality": "Dubai", "addressRegion": "", "addressCountry": "United Arab Emirates"}},
+      "jobUrl": "https://jobs.ashbyhq.com/lumen/7458d4e9-da2e-47bd-98cb-adfda43d42b2",
+      "applyUrl": "https://jobs.ashbyhq.com/lumen/7458d4e9-da2e-47bd-98cb-adfda43d42b2/application",
+      "descriptionHtml": "<p>We are looking for an Executive Assistant to keep our founders on track.</p>",
+      "descriptionPlain": "We are looking for an Executive Assistant to keep our founders on track."
+    },
+    {
+      "id": "0b7e6f53-5d6c-4f0e-8a1b-2c3d4e5f6a7b",
+      "title": "Head of Travel",
+      "department": "Operations",
+      "team": "Travel",
+      "employmentType": "FullTime",
+      "location": "Dubai",
+      "secondaryLocations": [],
+      "publishedAt": "2026-10-05T08:00:00.000+00:00",
+      "isListed": false,
+      "isRemote": null,
+      "workplaceType": null,
+      "address": null,
+      "jobUrl": "https://jobs.ashbyhq.com/lumen/0b7e6f53-5d6c-4f0e-8a1b-2c3d4e5f6a7b",
+      "applyUrl": "https://jobs.ashbyhq.com/lumen/0b7e6f53-5d6c-4f0e-8a1b-2c3d4e5f6a7b/application",
+      "descriptionHtml": "<p>Confidential search.</p>",
+      "descriptionPlain": "Confidential search."
+    },
+    {
+      "id": "c1d2e3f4-a5b6-47c8-9d0e-1f2a3b4c5d6e",
+      "title": "Engineering Manager, EU",
+      "department": "Engineering",
+      "team": "EMEA Engineering",
+      "employmentType": "FullTime",
+      "location": "Remote - European Union",
+      "secondaryLocations": [{"location": "Spain", "address": {"postalAddress": {"addressLocality": "", "addressRegion": "", "addressCountry": "Spain"}}}],
+      "publishedAt": "2026-10-01T14:29:08.532+00:00",
+      "isListed": true,
+      "isRemote": true,
+      "workplaceType": "Remote",
+      "address": null,
+      "jobUrl": "https://jobs.ashbyhq.com/lumen/c1d2e3f4-a5b6-47c8-9d0e-1f2a3b4c5d6e",
+      "applyUrl": "https://jobs.ashbyhq.com/lumen/c1d2e3f4-a5b6-47c8-9d0e-1f2a3b4c5d6e/application",
+      "descriptionHtml": "<p>We are looking for an Engineering Manager...</p>",
+      "descriptionPlain": "We are looking for an Engineering Manager..."
+    }
+  ]
+}

@@ -108,7 +108,8 @@ def with_signals(company: Company, **signals: Any) -> Company:
 
 
 @pytest.fixture(autouse=True)
-def reddit_creds(settings):
+def reddit_creds(settings, monkeypatch):
+    monkeypatch.delenv("REDDIT_USERNAME", raising=False)
     settings.reddit_client_id = "cid-123"
     settings.reddit_client_secret = "s3cret"
     return settings
@@ -146,6 +147,15 @@ def test_user_agent_format(settings, monkeypatch):
     monkeypatch.setattr(settings, "reddit_username", "u/openberry_ops", raising=False)
     assert user_agent(settings) == f"python:openberry:{__version__} (by /u/openberry_ops; " \
                                    "+https://github.com/connexionlimodubai-pixel/gj)"
+
+
+def test_user_agent_reads_reddit_username_env(settings, monkeypatch):
+    # Settings has no reddit_username field yet, so REDDIT_USERNAME is read from the environment.
+    monkeypatch.setenv("REDDIT_USERNAME", "/u/acme_ops")
+    assert user_agent(settings) == f"python:openberry:{__version__} (by /u/acme_ops; " \
+                                   "+https://github.com/connexionlimodubai-pixel/gj)"
+    monkeypatch.setenv("REDDIT_USERNAME", "acme\r\nX-Injected: 1")  # invalid names are ignored
+    assert user_agent(settings) == UA
 
 
 # --------------------------------------------------------------------------------------
@@ -210,7 +220,7 @@ async def test_post_mapping_and_strength_rules(company):
     assert link_post.raw["link_url"] == "https://i.redd.it/k2v9x0abc.jpeg"
 
 
-async def test_subreddit_search_or_query_and_weak_match(company):
+async def test_subreddit_search_or_query_and_skipped_posts(company):
     fake = FakeReddit(search=lambda request: ok("search_dubai.json"))
     out, ctx = await run(company, fake)  # conftest company watches r/dubai
 
@@ -224,10 +234,12 @@ async def test_subreddit_search_or_query_and_weak_match(company):
         "reddit:1o2bbb1": ("competitor_engagement", 90, ["Careem Business", "corporate travel"]),
         # plural keyword match, question title
         "reddit:1o2bbb2": ("keyword_mention", 60, ["chauffeur"]),
-        # Reddit matched it but no term is visible: weak 35, +5 busy thread
-        "reddit:1o2bbb3": ("keyword_mention", 40, []),
+        # "Recommendations welcome" = buying intent
+        "reddit:1o2bbb5": ("keyword_mention", 75, ["chauffeur"]),
     }
-    assert not out[2].signal.raw["matched_in_text"]
+    # Dropped: AutoModerator thread (bbb0), no visible term (bbb3, Reddit matched on metadata),
+    # NSFW (bbb4) and a stickied, moderator-distinguished megathread by a human mod (bbb6).
+    assert all(r.signal.raw["matched_in_text"] for r in out)
     assert ctx.warnings == []
 
 
@@ -242,7 +254,7 @@ async def test_since_filter_and_time_window(company):
     await run(site_wide(company, keywords=[]), fake, since=NOW - timedelta(days=7))
     assert fake.searches[0].url.params["t"] == "week"
     fake = FakeReddit()
-    out, _ = await run(site_wide(company, keywords=[]), fake, since=NOW - timedelta(days=60))
+    out, _ = await run(site_wide(company), fake, since=NOW - timedelta(days=60))
     assert fake.searches[0].url.params["t"] == "year"
     assert "reddit:1o1aaa6" in {r.signal.external_id for r in out}  # 20-day-old post is inside a 60-day lookback
 
@@ -290,6 +302,19 @@ async def test_max_items_stops_collecting_and_requesting(company):
     out, _ = await run(site_wide(company), fake, max_items=2)
     assert [r.signal.external_id for r in out] == ["reddit:1o1aaa1", "reddit:1o1aaa4"]
     assert len(fake.searches) == 1
+
+    fake = FakeReddit()
+    out, _ = await run(site_wide(company), fake, max_items=0)
+    assert out == [] and fake.requests == []  # not even a token request
+
+
+async def test_time_budget_stops_with_warning(company):
+    collector = RedditCollector()
+    collector.time_budget = -1
+    fake = FakeReddit()
+    out, ctx = await run(site_wide(company), fake, collector=collector)
+    assert out == [] and fake.searches == []
+    assert ctx.warnings == ["Reddit: time budget of -1 s used up; stopped for this scan with what was found so far."]
 
 
 async def test_pages_while_full_and_inside_window(company):
@@ -431,6 +456,79 @@ async def test_timeouts_give_up_after_three_in_a_row(company):
     assert ctx.warnings[0] == "Reddit: search 'Blacklane' in all of Reddit failed (ReadTimeout)."
 
 
+async def test_absurd_timestamp_on_a_full_page_does_not_raise(company):
+    # created_utc=1e300 made base.parse_time raise OverflowError inside the paging decision, which
+    # escaped collect() and lost the whole scan.
+    posts = [make_post(f"p{i:02d}", hours_ago=1 + i) for i in range(49)]
+    huge = make_post("zz", hours_ago=1)
+    huge["data"]["created_utc"] = 1e300
+    posts.append(huge)
+
+    def search(request: httpx.Request) -> httpx.Response:
+        return page([], None) if request.url.params.get("after") else page(posts, "t3_zz")
+
+    fake = FakeReddit(search=search)
+    out, ctx = await run(site_wide(company.model_copy(update={"competitors": []}), keywords=["chauffeur"]), fake)
+    assert len(out) == 49
+    assert [r.url.params.get("after") for r in fake.searches] == [None, "t3_zz"]
+    assert ctx.warnings == ["Reddit: skipped 1 malformed post(s)."]
+
+
+async def test_text_cleanup_keeps_angle_brackets_and_decodes_entities(company):
+    post = make_post("t1", hours_ago=2, title="Chauffeur &amp; driver for a roadshow")
+    post["data"]["selftext"] = ("Need a chauffeur for <10 people, budget > $500.\n\n&#x200B;\n\n"
+                                "<b>Thanks</b> &amp; cheers")
+    fake = FakeReddit(search=lambda request: page([post], None))
+    out, _ = await run(site_wide(company.model_copy(update={"competitors": []}), keywords=["chauffeur"]), fake)
+    (sig,) = [r.signal for r in out]
+    assert sig.title == "r/dubai: Chauffeur & driver for a roadshow"
+    # base.strip_html would have dropped "10 people, budget " as if it were a tag.
+    assert sig.summary == "Need a chauffeur for <10 people, budget > $500. Thanks & cheers"
+
+
+async def test_missing_fields_and_unsafe_urls(company):
+    sparse = make_post("n1", hours_ago=2, title="chauffeur wanted")
+    sparse["data"].update(selftext=None, subreddit=None, permalink=None, num_comments=None, score=None,
+                          link_flair_text={"odd": 1}, is_self=False, url="javascript:alert(1)")
+    bad_link = make_post("n2", hours_ago=2)
+    bad_link["data"]["permalink"] = "javascript:alert(1)"
+    bad_id = make_post("x", hours_ago=2)
+    bad_id["data"]["id"] = "../../api/v1/me"
+    bad_title = make_post("n3", hours_ago=2)
+    bad_title["data"]["title"] = 12345
+    fake = FakeReddit(search=lambda request: page([sparse, bad_link, bad_id, bad_title], None))
+    out, ctx = await run(site_wide(company.model_copy(update={"competitors": []}), keywords=["chauffeur"]), fake)
+
+    first, second = (r.signal for r in out)
+    assert first.title == "chauffeur wanted"  # no "r/: " prefix without a subreddit
+    assert first.url == "https://www.reddit.com/comments/n1/"
+    assert first.summary == "chauffeur wanted"
+    assert (first.raw["link_url"], first.raw["flair"], first.raw["score"], first.raw["num_comments"]) == ("", "", 0, 0)
+    assert second.url == "https://www.reddit.com/comments/n2/"
+    assert ctx.warnings == ["Reddit: skipped 2 malformed post(s)."]
+
+
+async def test_posts_without_a_visible_term_are_dropped(company):
+    posts = [
+        make_post("v1", hours_ago=1, title="Best brunch in JLT this weekend"),           # metadata match only
+        make_post("v2", hours_ago=2, title="Chauffeured to DXB today, very smooth"),     # inflection
+        make_post("v3", hours_ago=3, title="Is tipping expected here?"),                 # r/chauffeurs
+        make_post("v4", hours_ago=4, title="Driver was 40 min late, cancelling my account"),  # r/blacklane
+    ]
+    posts[2]["data"]["subreddit"] = "chauffeurs"
+    posts[3]["data"]["subreddit"] = "blacklane"
+    fake = FakeReddit(search=lambda request: page(posts, None))
+    target = site_wide(company.model_copy(update={"competitors": ["Blacklane"]}), keywords=["chauffeur"])
+    out, _ = await run(target, fake)
+    got = {r.signal.external_id: (r.signal.type, r.signal.strength, r.signal.raw["matched_terms"],
+                                  r.signal.raw["matched_in_text"]) for r in out}
+    assert got == {
+        "reddit:v2": ("keyword_mention", 50, ["chauffeur"], True),
+        "reddit:v3": ("keyword_mention", 60, ["chauffeur"], False),
+        "reddit:v4": ("competitor_engagement", 85, ["Blacklane"], False),
+    }
+
+
 async def test_malformed_posts_are_skipped(company):
     good = make_post("good1", hours_ago=2)
     no_id = make_post("x", hours_ago=2)
@@ -465,7 +563,7 @@ async def test_ingest_creates_scored_leads(company):
     assert jane.kind == "person" and jane.source == "reddit"
     assert jane.profile_url == "https://www.reddit.com/user/ops_lead_jane"
     signals, count = repo.list_signals(company.id, lead_id=jane.id)
-    assert count == 2 and {s.external_id for s in signals} == {"reddit:1o1aaa1", "reddit:1o2bbb3"}
+    assert count == 2 and {s.external_id for s in signals} == {"reddit:1o1aaa1", "reddit:1o2bbb5"}
     assert all(s.source == "reddit" for s in signals)
     assert all(lead.intent_score > 0 and lead.score > 0 for lead in leads)
     sarah = next(lead for lead in leads if lead.full_name == "dxb_ea_sarah")

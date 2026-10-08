@@ -41,7 +41,7 @@
 </section>
 
 <div class="dash-grid">
-  <section class="card span-2" aria-labelledby="days-title">
+  <section class="card span-2 chart-card" aria-labelledby="days-title">
     <header class="card-head">
       <div><h2 id="days-title">Signals, last 14 days</h2>
         <p class="card-sub">{% if days.empty %}No signals yet{% else %}{{ days.total|plural("signal") }} · busiest day {{ days.peak }}{% endif %}</p></div>
@@ -104,14 +104,13 @@
     {% if top_leads %}
     <div class="table-wrap">
       <table class="table">
-        <thead><tr><th scope="col">Lead</th><th scope="col">Score</th><th scope="col" class="hide-sm">Why now</th><th scope="col" class="hide-md">Last signal</th></tr></thead>
+        <thead><tr><th scope="col">Lead</th><th scope="col">Score</th><th scope="col" class="hide-sm">Why now</th></tr></thead>
         <tbody>
           {% for lead in top_leads %}
           <tr>
             <td><div class="lead-cell">{{ m.avatar(lead.full_name, lead.kind) }}<div class="min0"><a class="lead-name" href="{{ base }}/leads/{{ lead.id }}">{{ m.lead_title(lead) }}</a><span class="sub">{{ m.lead_sub(lead) }}{% if lead.lead_company and lead.kind == "person" %} · {{ lead.lead_company }}{% endif %}</span></div></div></td>
             <td><div class="score-cell">{{ m.score(lead.score, lead.tier) }}{{ m.tier_badge(lead.tier) }}</div></td>
-            <td class="hide-sm">{% set r = lead|top_reason %}{% if r %}{{ m.reason(r) }}{% endif %}</td>
-            <td class="hide-md nowrap">{{ m.when(lead.last_signal_at, "—") }}</td>
+            <td class="hide-sm why-cell">{% set r = lead|top_reason %}{% if r %}{{ m.reason(r) }}{% endif %}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -142,7 +141,7 @@
     <p class="small"><a href="/help">How to connect Claude{{ m.icon("chevron-right", 12) }}</a></p>
   </section>
 
-  <section class="card" aria-labelledby="recent-title">
+  <section class="card span-2 align-start" aria-labelledby="recent-title">
     <header class="card-head"><div><h2 id="recent-title">Recent signals</h2></div>
       <a class="btn btn-sm btn-ghost" href="{{ base }}/signals">All{{ m.icon("chevron-right", 14) }}</a></header>
     {% if recent %}
@@ -164,46 +163,48 @@
     {% endif %}
   </section>
 
-  <section class="card" aria-labelledby="followups-title">
-    <header class="card-head"><div><h2 id="followups-title">Follow-ups due</h2><p class="card-sub">Sent messages waiting for the next step</p></div>
-      <a class="btn btn-sm btn-ghost" href="{{ base }}/outreach?tab=followups">Queue{{ m.icon("chevron-right", 14) }}</a></header>
-    {% if followups %}
-    <ul class="list">
-      {% for f in followups %}
-      <li class="list-item">
-        {{ m.avatar(f.lead.full_name, f.lead.kind) }}
-        <div class="min0 grow">
-          <a class="lead-name" href="{{ base }}/leads/{{ f.lead.id }}">{{ m.lead_title(f.lead) }}</a>
-          <span class="sub">Step {{ f.next_step }} · due {{ m.when(f.due_since) }}</span>
-        </div>
-        <form method="post" action="{{ base }}/leads/{{ f.lead.id }}/draft">{{ m.csrf() }}<input type="hidden" name="step" value="{{ f.next_step }}">
-          <button class="btn btn-sm" type="submit">{{ m.icon("edit", 14) }}Draft</button></form>
-      </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-      {% call m.empty("clock", "No follow-ups due") %}<p>When you mark a message as sent, the next step appears here after {{ company.outreach.followup_days[0] if company.outreach.followup_days else 3 }} days without a reply.</p>{% endcall %}
-    {% endif %}
-  </section>
+  <div class="dash-col">
+    <section class="card" aria-labelledby="followups-title">
+      <header class="card-head"><div><h2 id="followups-title">Follow-ups due</h2><p class="card-sub">Sent messages waiting for the next step</p></div>
+        <a class="btn btn-sm btn-ghost" href="{{ base }}/outreach?tab=followups">Queue{{ m.icon("chevron-right", 14) }}</a></header>
+      {% if followups %}
+      <ul class="list">
+        {% for f in followups %}
+        <li class="list-item">
+          {{ m.avatar(f.lead.full_name, f.lead.kind) }}
+          <div class="min0 grow">
+            <a class="lead-name" href="{{ base }}/leads/{{ f.lead.id }}">{{ m.lead_title(f.lead) }}</a>
+            <span class="sub">Step {{ f.next_step }} · due {{ m.when(f.due_since) }}</span>
+          </div>
+          <form method="post" action="{{ base }}/leads/{{ f.lead.id }}/draft">{{ m.csrf() }}<input type="hidden" name="step" value="{{ f.next_step }}">
+            <button class="btn btn-sm" type="submit">{{ m.icon("edit", 14) }}Draft</button></form>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+        {% call m.empty("clock", "No follow-ups due") %}<p>When you mark a message as sent, the next step appears here after {{ company.outreach.followup_days[0] if company.outreach.followup_days else 3 }} days without a reply.</p>{% endcall %}
+      {% endif %}
+    </section>
 
-  <section class="card" aria-labelledby="sources-title">
-    <header class="card-head"><div><h2 id="sources-title">Sources</h2><p class="card-sub">Free collectors for this profile</p></div>
-      <a class="btn btn-sm btn-ghost" href="{{ base }}/settings#step-signals">Configure</a></header>
-    <ul class="sources">
-      {% for s in sources %}
-      <li class="source">
-        <span class="source-state {{ 'on' if s.enabled else 'off' }}">{{ m.icon("check" if s.enabled else "minus", 12) }}</span>
-        <div class="min0">
-          <p class="source-name">{{ s.label }}
-            {% if s.enabled %}<span class="pill pill-on">{{ "Via Claude" if s.via_claude else "Enabled" }}</span>
-            {% elif s.configured %}<span class="pill pill-off">Signal types off</span>
-            {% else %}<span class="pill pill-off">Needs setup</span>{% endif %}</p>
-          {% if not s.enabled %}<p class="small muted">Needs {{ s.requires }}. <a href="{{ base }}/settings#step-signals">Set up</a></p>{% endif %}
-        </div>
-      </li>
-      {% endfor %}
-    </ul>
-  </section>
+    <section class="card" aria-labelledby="sources-title">
+      <header class="card-head"><div><h2 id="sources-title">Sources</h2><p class="card-sub">Free collectors for this profile</p></div>
+        <a class="btn btn-sm btn-ghost" href="{{ base }}/settings#step-signals">Configure</a></header>
+      <ul class="sources">
+        {% for s in sources %}
+        <li class="source">
+          <span class="source-state {{ 'on' if s.enabled else 'off' }}">{{ m.icon("check" if s.enabled else "minus", 12) }}</span>
+          <div class="min0">
+            <p class="source-name">{{ s.label }}
+              {% if s.enabled %}<span class="pill pill-on">{{ "Via Claude" if s.via_claude else "Enabled" }}</span>
+              {% elif s.configured %}<span class="pill pill-off">Signal types off</span>
+              {% else %}<span class="pill pill-off">Needs setup</span>{% endif %}</p>
+            {% if not s.enabled %}<p class="small muted">Needs {{ s.requires }}. <a href="{{ base }}/settings#step-signals">Set up</a></p>{% endif %}
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+  </div>
 
   <section class="card span-3" aria-labelledby="runs-title">
     <header class="card-head"><div><h2 id="runs-title">Scan history</h2><p class="card-sub">Automatic scans run every {{ company.scan_interval_hours }}h while the company is active</p></div></header>

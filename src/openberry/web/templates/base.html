@@ -60,11 +60,11 @@
         <li><a href="/help"{% if active == "help" %} aria-current="page"{% endif %}>{{ m.icon("plug") }}Connect Claude</a></li>
       </ul>
     </nav>
+    {% if auth_enabled %}
     <div class="sidebar-foot">
-      {% if auth_enabled %}
       <form method="post" action="/logout">{{ m.csrf() }}<button class="nav-btn" type="submit">{{ m.icon("logout") }}Log out</button></form>
-      {% endif %}
     </div>
+    {% endif %}
   </div>
 </aside>
 <div class="scrim" data-nav-close></div>

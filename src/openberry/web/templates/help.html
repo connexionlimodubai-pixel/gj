@@ -13,7 +13,7 @@
   <section class="card" aria-labelledby="h-code">
     <h2 id="h-code" class="title-icon">{{ m.icon("terminal") }}Claude Code</h2>
     <p>Run this once in a terminal on this machine:</p>
-    <div class="code-block"><pre id="cmd-code">claude mcp add openberry -e OPENBERRY_DB={{ db_path }} -- openberry mcp</pre>{{ m.copy_button("#cmd-code", "Copy", "btn btn-sm btn-ghost") }}</div>
+    <div class="code-block"><pre id="cmd-code">claude mcp add openberry -e OPENBERRY_DB="{{ db_path }}" -- openberry mcp</pre>{{ m.copy_button("#cmd-code", "Copy", "btn btn-sm btn-ghost") }}</div>
     <p class="small muted">The MCP server and this dashboard share the same SQLite database, so whatever Claude adds appears here immediately.</p>
   </section>
 
@@ -25,7 +25,7 @@
     "openberry": {
       "command": "openberry",
       "args": ["mcp"],
-      "env": { "OPENBERRY_DB": "{{ db_path }}" }
+      "env": { "OPENBERRY_DB": {{ db_path|tojson }} }
     }
   }
 }</pre>{{ m.copy_button("#cfg-desktop", "Copy", "btn btn-sm btn-ghost") }}</div>

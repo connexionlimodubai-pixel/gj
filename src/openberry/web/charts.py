@@ -63,11 +63,12 @@ def day_columns(points: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def type_bars(rows: list[dict[str, Any]], limit: int = 8) -> dict[str, Any]:
+def type_bars(rows: list[dict[str, Any]], limit: int = 6) -> dict[str, Any]:
     """Horizontal bars for repo.company_stats()["signals_by_type"]; the tail folds into 'Other'."""
     rows = sorted(rows, key=lambda r: -int(r.get("count") or 0))
-    head = rows[:limit]
-    tail = rows[limit:]
+    if len(rows) <= limit + 1:  # folding a single type into "Other" hides it for nothing
+        limit = len(rows)
+    head, tail = rows[:limit], rows[limit:]
     bars = [{"label": r["label"], "type": r["type"], "count": int(r["count"])} for r in head]
     if tail:
         bars.append({"label": f"Other ({len(tail)} types)", "type": "", "count": sum(int(r["count"]) for r in tail)})

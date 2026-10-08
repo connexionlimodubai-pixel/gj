@@ -72,7 +72,8 @@ class Settings:
     contact_email: str = ""
     user_agent: str = "OpenBerry/0.1 (+https://github.com/connexionlimodubai-pixel/gj)"
     http_timeout: float = 20.0
-    # Extra Host names accepted by the HTTP MCP endpoint (besides localhost and base_url's host).
+    # Extra Host names accepted by the HTTP MCP endpoint and, in local mode, the dashboard
+    # (besides localhost, IP addresses and base_url's host). "*" disables the check.
     allowed_hosts: list[str] = field(default_factory=list)
 
     @classmethod

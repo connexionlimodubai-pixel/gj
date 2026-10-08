@@ -58,7 +58,8 @@ def run_summary(run: ScanRun) -> dict[str, Any]:
     collectors = stats.get("collectors") or {}
     errors = [f"{name}: {c['error']}" for name, c in collectors.items() if isinstance(c, dict) and c.get("error")]
     errors += [str(e) for e in stats.get("errors") or []]
-    warnings = [f"{name}: {w}" for name, c in collectors.items() if isinstance(c, dict) for w in c.get("warnings") or []]
+    warnings = [f"{name}: {w}" for name, c in collectors.items() if isinstance(c, dict)
+                for w in c.get("warnings") or []]
     duration = None
     if run.finished_at:
         duration = max(0, int((run.finished_at - run.started_at).total_seconds()))
@@ -83,12 +84,14 @@ def kpi_tiles(company_id: int, stats: dict[str, Any]) -> list[dict[str, Any]]:
          "sub": f"{stats['tiers']['warm']:,} warm"},
         {"label": "New signals (7d)", "value": stats["signals_7d"], "href": f"{base}/signals",
          "sub": f"{stats['signals_total']:,} all time"},
-        {"label": "Contacted", "value": reached, "href": f"{base}/leads?status=contacted",
+        # Counts every lead reached (replied, meeting, won... too), so it opens all sent messages
+        # rather than leads?status=contacted, which would list fewer leads than the tile shows.
+        {"label": "Contacted", "value": reached, "href": f"{base}/outreach?tab=sent",
          "sub": f"{messages['sent']:,} message{'' if messages['sent'] == 1 else 's'} sent"},
         {"label": "Reply rate", "value": None if rate is None else f"{rate}%", "href": f"{base}/outreach?tab=replies",
          "sub": f"{answered:,} replied" if reached else "No outreach yet"},
         {"label": "Drafts to review", "value": messages["draft"], "href": f"{base}/outreach",
-         "sub": f"{messages['approved']:,} approved, ready to send"},
+         "sub": f"{messages['approved']:,} approved to send"},
     ]
 
 

@@ -157,9 +157,11 @@ class _Fetcher:
         try:
             resp = await self.ctx.client.get(SEARCH_URL, params=params, headers={"Accept": "application/json"})
         except httpx.TimeoutException:
-            return self._fail(f"Hacker News: search for {what} timed out")
+            self._fail(f"Hacker News: search for {what} timed out")
+            return None
         except Exception as exc:  # transport errors, invalid URLs...: one request must not sink the scan
-            return self._fail(f"Hacker News: search for {what} failed ({type(exc).__name__})")
+            self._fail(f"Hacker News: search for {what} failed ({type(exc).__name__})")
+            return None
         if resp.status_code == 429:
             self._stop("Hacker News: rate limited by Algolia (HTTP 429); skipped the remaining searches this scan")
             return None
@@ -168,15 +170,18 @@ class _Fetcher:
                        "skipped the remaining searches this scan")
             return None
         if resp.status_code >= 400:
-            return self._fail(f"Hacker News: HTTP {resp.status_code} for {what}")
+            self._fail(f"Hacker News: HTTP {resp.status_code} for {what}")
+            return None
         try:
             data = resp.json()
         except ValueError:
-            return self._fail(f"Hacker News: invalid JSON for {what}")
+            self._fail(f"Hacker News: invalid JSON for {what}")
+            return None
         hits = data.get("hits") if isinstance(data, dict) else None
         if not isinstance(hits, list):
             detail = f": {truncate(str(data['message']), 120)}" if isinstance(data, dict) and data.get("message") else ""
-            return self._fail(f"Hacker News: unexpected response for {what}{detail}")
+            self._fail(f"Hacker News: unexpected response for {what}{detail}")
+            return None
         self.failures_in_a_row = 0
         if resp.headers.get("x-ratelimit-remaining", "").strip() == "0":
             self._stop("Hacker News: Algolia rate-limit budget exhausted; skipped the remaining searches this scan")
@@ -187,7 +192,6 @@ class _Fetcher:
         self.failures_in_a_row += 1
         if self.failures_in_a_row >= MAX_FAILURES_IN_A_ROW and not self.stopped:
             self._stop(f"Hacker News: {self.failures_in_a_row} failed requests in a row; stopped this scan")
-        return None
 
     def _stop(self, message: str) -> None:
         self.stopped = True

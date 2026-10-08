@@ -195,15 +195,25 @@ def errors_by_field(exc: ValidationError) -> dict[str, str]:
     return errors
 
 
+def _overlay(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for key, value in patch.items():
+        out[key] = _overlay(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
+
+
 def build_company(values: dict[str, Any], keep: CompanyIn | None = None) -> tuple[CompanyIn | None, dict[str, str]]:
-    """Validate submitted values. `keep` carries fields the form does not show (status, weights)."""
+    """Validate submitted values.
+
+    With `keep` (the stored profile), the form is laid over it so fields the form does not
+    show (status, signal weights, anything added to the model later) survive a save.
+    """
     errors = _precheck(values)
     if errors:
         return None, errors
     data = _payload(values)
     if keep is not None:
-        data["status"] = keep.status
-        data["signals"]["weights"] = keep.signals.weights
+        data = _overlay(keep.model_dump(mode="json"), data)
     try:
         return CompanyIn.model_validate(data), {}
     except ValidationError as exc:

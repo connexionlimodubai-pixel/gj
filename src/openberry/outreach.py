@@ -111,8 +111,16 @@ def draft_template(company: Company, lead: Lead, signals: list[Signal], channel:
     return subject, body
 
 
+def _plural(title: str) -> str:
+    """'Travel Manager' -> 'Travel Managers' (good enough for job titles)."""
+    t = title.strip()
+    if not t or t.lower().endswith("s") or " of " in t.lower():
+        return t
+    return t[:-1] + "ies" if t.endswith("y") and t[-2:-1].lower() not in "aeiou" else t + "s"
+
+
 def _audience(company: Company) -> str:
-    titles = company.icp.job_titles[:2]
+    titles = [_plural(t) for t in company.icp.job_titles[:2]]
     industries = company.icp.industries[:1]
     who = " & ".join(titles) if titles else "teams"
     if industries:

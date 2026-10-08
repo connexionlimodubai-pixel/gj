@@ -373,6 +373,8 @@ def update_lead(lead_id: int, fields: dict[str, Any], conn: sqlite3.Connection |
                 updates[key] = str(updates[key] or "").strip()
         if updates:
             merged = lead.model_copy(update={k: v for k, v in fields.items() if k != "tags"})
+            if not merged.full_name and not merged.lead_company and not merged.company_domain:
+                raise ValueError("a lead needs at least a full_name or a lead_company")
             kind = updates.get("kind", lead.kind)
             if kind == "person" and not merged.full_name:
                 kind = "account"

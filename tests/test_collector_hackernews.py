@@ -7,9 +7,10 @@ Fixtures in tests/fixtures/hackernews mirror the recorded Algolia payloads from 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 import pytest
@@ -434,7 +435,8 @@ async def test_bad_hits_are_skipped_not_fatal(company):
         {"objectID": "4", "author": "e", "created_at_i": 1790900000, "title": "[deleted]", "_tags": ["story"]},
         *page["hits"],
     ]
-    signals, ctx = await run(configure(company, hiring_keywords=[]), FakeAlgolia({BLACKLANE: httpx.Response(200, json=page)}))
+    api = FakeAlgolia({BLACKLANE: httpx.Response(200, json=page)})
+    signals, _ = await run(configure(company, hiring_keywords=[]), api)
     found = by_id(signals)
     assert "hn:45410001" in found
     assert not {"hn:1", "hn:2", "hn:3", "hn:4"} & set(found)

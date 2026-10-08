@@ -8,6 +8,7 @@ import httpx
 
 from .config import get_settings
 from .models import Company, Lead
+from .website import UnsafeURL, assert_public_host
 
 log = logging.getLogger(__name__)
 
@@ -42,10 +43,11 @@ async def notify_hot_leads(company: Company, leads: list[Lead], client: httpx.As
     try:
         for name, url, key in targets:
             try:
-                resp = await client.post(url, json={key: text[:1900]})
+                await assert_public_host(url)  # webhooks must never reach the private network
+                resp = await client.post(url, json={key: text[:1900]}, follow_redirects=False)
                 resp.raise_for_status()
                 sent.append(name)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, UnsafeURL) as exc:
                 log.warning("%s webhook failed: %s", name, exc)
     finally:
         if own:

@@ -29,7 +29,7 @@ SIGNAL_TYPES: dict[str, tuple[str, int]] = {
 
 SIGNAL_SOURCES = (
     "hackernews", "reddit", "github", "greenhouse", "lever", "ashby",
-    "google_news", "rss", "sec_edgar", "linkedin", "web", "manual", "claude", "csv",
+    "google_news", "rss", "sec_edgar", "linkedin", "web", "manual", "claude", "csv", "demo",
 )
 
 SENIORITIES: dict[str, str] = {

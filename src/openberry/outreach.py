@@ -50,12 +50,14 @@ def signal_hook(signal: Signal | None, lead: Lead) -> str:
     title = _short(signal.title, 70)
     company = lead.lead_company or "your team"
     hooks = {
-        "competitor_engagement": f"your take on “{title}”",
+        "competitor_engagement": (f"your {title[7:]}" if title.startswith("Opened ")
+                                  else f"your take on “{title}”"),
         "keyword_mention": f"your post “{title}”",
         "hiring": f"that {company} is hiring ({title})",
         "funding": f"the news about {company}'s funding",
         "job_change": "your new role",
-        "github_star": f"that you starred {title}" if title else "your GitHub activity",
+        "github_star": (f"that you {title[0].lower()}{title[1:]}" if re.match(r"(?i)(starred|forked) ", title)
+                        else f"that you starred {title}" if title else "your GitHub activity"),
         "influencer_engagement": f"your comment on “{title}”",
         "profile_visit": "that you checked out our profile",
         "event": f"that you're attending {title}",

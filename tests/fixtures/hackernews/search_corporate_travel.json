@@ -44,6 +44,39 @@
         "author": {
           "matchLevel": "none",
           "matchedWords": [],
+          "value": "travel_pro_dxb"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Location: Dubai<p>Remote: Yes<p>Skills: corporate travel, expense policy, Concur"
+        },
+        "story_title": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "Ask HN: Who wants to be hired? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_travel_pro_dxb",
+        "story_45400002"
+      ],
+      "author": "travel_pro_dxb",
+      "comment_text": "Location: Dubai<p>Remote: Yes<p>Skills: corporate travel, expense policy, Concur",
+      "created_at": "2026-10-06T10:00:00Z",
+      "created_at_i": 1791280800,
+      "objectID": "45400777",
+      "parent_id": 45400002,
+      "story_id": 45400002,
+      "story_title": "Ask HN: Who wants to be hired? (October 2026)",
+      "updated_at": "2026-10-06T10:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
           "value": "dxb_ops"
         },
         "title": {
@@ -74,7 +107,7 @@
     }
   ],
   "hitsPerPage": 50,
-  "nbHits": 2,
+  "nbHits": 3,
   "nbPages": 1,
   "page": 0,
   "params": "query=corporate+travel&tags=%28story%2Ccomment%29&advancedSyntax=true&analyticsTags=backend",

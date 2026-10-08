@@ -732,3 +732,131 @@ async def test_run_scan_uses_the_collector(company, token, monkeypatch):
     assert stats["collectors"]["github"] == {"found": len(TOKEN_IDS), "warnings": []}
     assert stats["signals_new"] == len(TOKEN_IDS) and stats["leads_new"] == 6  # 5 people + 1 organisation
     assert handler.requests[0].url.params["since"] == "2026-09-24T12:00:00Z"  # lookback_days=14
+
+
+# --------------------------------------------------------------------------------------
+# Review fixes
+# --------------------------------------------------------------------------------------
+
+# Documented payload shapes (API research: GET /users/{username}, star+json stargazers, simple-user).
+SIMPLE_USER_KEYS = {
+    "login", "id", "node_id", "avatar_url", "gravatar_id", "url", "html_url", "followers_url", "following_url",
+    "gists_url", "starred_url", "subscriptions_url", "organizations_url", "repos_url", "events_url",
+    "received_events_url", "type", "user_view_type", "site_admin",
+}
+PUBLIC_USER_KEYS = SIMPLE_USER_KEYS | {
+    "name", "company", "blog", "location", "email", "hireable", "bio", "twitter_username", "public_repos",
+    "public_gists", "followers", "following", "created_at", "updated_at",
+}
+
+
+def test_fixtures_match_the_documented_github_payloads():
+    for path in FIXTURES.glob("user_*.json"):
+        profile = json.loads(path.read_text())
+        assert set(profile) == PUBLIC_USER_KEYS, path.name
+        assert isinstance(profile["blog"], str)  # "" when unset, never null
+    for page in ("stargazers_page1.json", "stargazers_page2.json", "stargazers_page3.json"):
+        for entry in fixture(page):
+            assert set(entry) == {"starred_at", "user"} and set(entry["user"]) == SIMPLE_USER_KEYS
+    for item in fixture("issues_acme_limo-sdk.json"):
+        assert set(item["user"]) == SIMPLE_USER_KEYS
+        assert {"id", "number", "title", "body", "html_url", "created_at", "author_association", "labels"} <= set(item)
+        if "pull_request" in item:
+            assert {"url", "html_url", "diff_url", "patch_url", "merged_at"} <= set(item["pull_request"])
+    for fork in fixture("forks_acme_limo-sdk.json"):
+        assert set(fork["owner"]) == SIMPLE_USER_KEYS
+        assert {"id", "full_name", "html_url", "created_at", "pushed_at", "description", "fork"} <= set(fork)
+
+
+@pytest.mark.parametrize("title, body, is_pr", [
+    ("Integration tests fail on Windows", "", False),
+    ("String comparison is case sensitive", "Comparing 'A' and 'a' returns False.", False),
+    ("Lazy evaluation of settings", "", False),
+    ("Migrate to Pydantic v2", "Switching to the v2 validators.", True),
+    ("Deployment docs are outdated", "", False),
+])
+def test_everyday_developer_wording_is_not_buying_intent(title, body, is_pr):
+    groups = gh.intent_groups(f"{title}\n{body}")
+    assert groups == {}
+    assert gh.issue_strength(is_pr, groups) == (45 if is_pr else 50)
+
+
+@pytest.mark.parametrize("text, group", [
+    ("Is there an integration with Salesforce?", "integration"),
+    ("We are migrating from Blacklane next month", "evaluation"),
+    ("Running a pilot with our travel desk", "evaluation"),
+])
+def test_buying_intent_still_detected(text, group):
+    assert group in gh.intent_groups(text)
+
+
+async def test_placeholder_accounts_are_not_leads(company):
+    issue = fixture("issues_acme_limo-sdk.json")[0]
+    ghost = {**issue, "id": 1, "user": simple_user("ghost", 10137)}  # every deleted account becomes "ghost"
+    mannequin = {**issue, "id": 2, "author_association": "MANNEQUIN",
+                 "user": simple_user("imported-bob", 3, kind="Mannequin")}
+    ghost_fork = make_fork("ghost", 10137, 990000001)
+    handler = FakeGitHub({ISSUES: gh_response(200, [ghost, mannequin]), FORKS: gh_response(200, [ghost_fork])})
+    signals, ctx = await run(company, handler)
+    assert signals == [] and ctx.warnings == []
+    assert handler.user_lookups() == []
+
+
+async def test_html_403_on_stargazers_stops_instead_of_blaming_the_restriction(company, token):
+    blocked = httpx.Response(403, text=(FIXTURES / "blocked_403.html").read_text(),
+                             headers={"Content-Type": "text/html; charset=utf-8"})
+    handler = FakeGitHub({STARS: blocked})
+    signals, ctx = await run(company, handler)
+    assert handler.paths == [ISSUES, FORKS, STARS]  # no further requests after the block page
+    assert len(ctx.warnings) == 1 and "access refused (HTTP 403" in ctx.warnings[0]
+    assert not any("administer" in w for w in ctx.warnings)
+    assert set(by_id(signals)) == ANON_IDS  # what was already found is kept (not enriched)
+
+
+async def test_insiders_forks_and_stars_are_not_leads(company, token):
+    # rahul-acme is a MEMBER (he opened PR #209); "acme" owns the repo. Both fork it, rahul also stars it.
+    forks = fixture("forks_acme_limo-sdk.json") + [make_fork("rahul-acme", 50999999, 990000101),
+                                                    make_fork("Acme", 1, 990000102)]
+    stars = fixture("stargazers_page3.json") + [{"starred_at": "2026-10-05T10:00:00Z",
+                                                 "user": simple_user("rahul-acme", 50999999)}]
+    handler = FakeGitHub({FORKS: gh_response(200, forks), (STARS, "3"): gh_response(200, stars)})
+    signals, _ = await run(company, handler)
+    assert set(by_id(signals)) == TOKEN_IDS
+    assert "rahul-acme" not in handler.user_lookups() and "Acme" not in handler.user_lookups()
+
+
+async def test_insider_seen_on_a_later_repo_is_dropped_from_earlier_forks(company):
+    # rival/b lists dev-x as a COLLABORATOR; dev-x's fork of acme/limo-sdk (scanned first) is dropped too.
+    issue = {**fixture("issues_acme_limo-sdk.json")[0], "id": 77, "author_association": "COLLABORATOR",
+             "user": simple_user("dev-x", 4242)}
+    forks = fixture("forks_acme_limo-sdk.json") + [make_fork("dev-x", 4242, 990000201)]
+    handler = FakeGitHub({FORKS: gh_response(200, forks), "/repos/rival/b/issues": gh_response(200, [issue])})
+    signals, _ = await run(configure(company, github_repos=[REPO, "rival/b"]), handler)
+    assert "github:fork:990000201" not in by_id(signals)
+    assert set(by_id(signals)) == ANON_IDS
+
+
+def test_linkedin_profile_in_blog_becomes_linkedin_url():
+    lead = gh.github_lead(simple_user("dana-ops", 1), {**fixture("user_dana-ops.json"),
+                                                         "blog": "www.linkedin.com/in/dana-haddad/"})
+    assert lead.linkedin_url == "https://www.linkedin.com/in/dana-haddad/"
+    assert lead.website == ""
+    company_page = gh.github_lead(simple_user("x", 2), {"blog": "https://linkedin.com/company/northwind"})
+    assert company_page.linkedin_url == "" and company_page.website == "https://linkedin.com/company/northwind"
+
+
+async def test_github_lead_merges_with_an_existing_linkedin_lead(company):
+    from openberry.models import LeadIn
+
+    existing, _ = repo.upsert_lead(company.id, LeadIn(full_name="Dana Haddad", title="Travel Manager",
+                                                      linkedin_url="https://www.linkedin.com/in/dana-haddad"))
+    profile = {**fixture("user_dana-ops.json"), "blog": "https://www.linkedin.com/in/dana-haddad/",
+               "email": None, "twitter_username": None}
+    handler = FakeGitHub({"/users/dana-ops": gh_response(200, profile)})
+    signals, _ = await run(company, handler)
+    stats = ingest(company.id, signals)
+    assert stats.errors == []
+    dana = repo.get_lead(existing.id)
+    assert dana.github_username == "dana-ops" and dana.title == "Travel Manager"
+    dana_signals, _ = repo.list_signals(company.id, lead_id=existing.id)
+    assert {s.external_id for s in dana_signals} == {"github:issue:3456700212", "github:fork:912340001"}

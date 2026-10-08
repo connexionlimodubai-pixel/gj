@@ -152,7 +152,7 @@ class SignalConfig(_Model):
     hiring_keywords: StrList = Field(default_factory=list, description="Job titles at target accounts that signal need, e.g. 'SDR', 'Travel Manager'")
     news_queries: StrList = Field(default_factory=list, description="Google News queries, e.g. 'raises Series A fintech'")
     rss_feeds: StrList = Field(default_factory=list, description="Any RSS/Atom feed URLs to scan for keywords")
-    sec_queries: StrList = Field(default_factory=list, description="SEC EDGAR full-text queries (US companies): new Form D funding filings and 8-K executive changes, e.g. 'logistics software'")
+    sec_queries: StrList = Field(default_factory=list, description="SEC EDGAR full-text queries (US companies). Form D funding filings match names, places, people and industry labels (e.g. 'Other Technology', 'Texas'); 8-K executive changes match topical phrases (e.g. 'logistics software')")
     influencers: StrList = Field(default_factory=list, description="LinkedIn profile URLs whose post engagers Claude should check")
     competitor_pages: StrList = Field(default_factory=list, description="Competitor LinkedIn/company pages whose engagers Claude should check")
     events: StrList = Field(default_factory=list, description="Events/webinars whose attendees are good leads")

@@ -42,7 +42,7 @@ def ingest(company_id: int, raw_signals: list[RawSignal]) -> IngestStats:
                     lead_in = raw.lead.model_copy(update={"signals": []})
                 elif raw.account or raw.account_domain:
                     lead_in = LeadIn(lead_company=raw.account, company_domain=raw.account_domain,
-                                     source=raw.signal.source)
+                                     location=raw.account_location, source=raw.signal.source)
                 else:
                     lead_in = None
                 lead_id = None

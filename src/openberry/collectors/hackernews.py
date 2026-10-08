@@ -11,9 +11,14 @@ What it emits
     keyword_mention        a story or comment about one of `signals.keywords`  -> person lead (the author)
     competitor_engagement  a story or comment about one of `competitors`        -> person lead (the author)
     hiring                 a top-level comment in the latest "Ask HN: Who is hiring?" thread (posted
-                           monthly by the `whoishiring` account) that mentions one of
-                           `signals.hiring_keywords`; the "Company | Role | Location" first line
-                           becomes an account-level signal for that company.
+                           monthly by the `whoishiring` account; the previous month's thread is searched
+                           too when the scan window reaches back before the latest one was posted)
+                           that mentions one of `signals.hiring_keywords`; the
+                           "Company | Role | Location" first line becomes an account-level signal for
+                           that company. Its domain is taken from a headline link only when the host
+                           resembles the company name, so job-board links never merge two companies.
+    Comments in the monthly whoishiring threads (job ads, "Who wants to be hired?" CVs, freelancer
+    offers) are never keyword/competitor mentions: they are not the author's buying intent.
 
 Strength (50 = typical)
     mentions: 50 for a plain mention in the item's own text; 60 for an "Ask HN" question;
@@ -27,8 +32,10 @@ Strength (50 = typical)
 Limits and politeness
     Algolia allows 10,000 requests/hour per IP, sends no rate-limit headers and is reported to
     block abusive IPs instead of answering 429, so this collector is deliberately frugal: at most
-    MAX_REQUESTS_PER_SCAN sequential requests per scan with a short pause between them, one page
-    per query (the newest hits), and it stops at the first 429/403 or after a few failures in a row.
+    MAX_REQUESTS_PER_SCAN sequential requests per scan, about one per second, one page per query
+    (the newest hits), and it stops at the first 429/403, after a few failures in a row, or when
+    the scan's time budget is spent (so the scan returns what it has well before services'
+    per-collector timeout would discard everything).
     When there are more terms than the request budget allows, the searched subset rotates daily.
     HN profiles carry no company or e-mail, so person leads are just the HN username plus profile
     URL; profile enrichment (user endpoints) is not done here because it is not part of the
@@ -44,6 +51,8 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -52,7 +61,15 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from ..models import Company, LeadIn, SignalIn
-from .base import CollectContext, Collector, RawSignal, find_terms, parse_time, strip_html, truncate
+from .base import (
+    CollectContext,
+    Collector,
+    RawSignal,
+    find_terms,
+    parse_time,
+    strip_html,
+    truncate,
+)
 
 SEARCH_URL = "https://hn.algolia.com/api/v1/search_by_date"
 ITEM_URL = "https://news.ycombinator.com/item?id={id}"
@@ -64,6 +81,8 @@ MAX_HIRING_KEYWORDS = 4          # hiring uses 1 request to find the thread + 1 
 MENTION_HITS_PER_PAGE = 50
 HIRING_HITS_PER_PAGE = 100
 MAX_FAILURES_IN_A_ROW = 3
+TIME_BUDGET_SECONDS = 60.0       # no new request after this; services cancels a collector at 120 s
+REQUEST_TIMEOUT_SECONDS = 20.0   # per request, capped so budget + one slow request stays under 120 s
 SUMMARY_LIMIT = 500
 HIRING_BOT = "whoishiring"
 
@@ -81,14 +100,28 @@ CHURN_PHRASES = [
     "migrating from", "moving away from", "replacement for", "frustrated with", "fed up with",
     "cancel", "cancelled", "canceled", "too expensive", "price increase", "terrible", "awful",
 ]
-# Hosts in a job headline that belong to job boards / tools, not to the hiring company.
+# Hosts in a job headline that belong to job boards / tools, not to the hiring company
+# (company_domain also requires the host to resemble the company name).
 NON_COMPANY_HOSTS = (
     "greenhouse.io", "lever.co", "ashbyhq.com", "workable.com", "linkedin.com", "notion.site",
     "notion.so", "google.com", "forms.gle", "ycombinator.com", "workatastartup.com", "wellfound.com",
     "angel.co", "breezy.hr", "recruitee.com", "bamboohr.com", "smartrecruiters.com", "github.com",
     "typeform.com", "rippling.com", "jobvite.com", "teamtailor.com", "personio.de", "personio.com",
     "homerun.co", "bit.ly", "calendly.com", "airtable.com", "welcometothejungle.com", "dover.com",
+    "gem.com", "myworkdayjobs.com", "icims.com", "applytojob.com", "jazz.co", "pinpointhq.com",
+    "join.com", "paylocity.com", "adp.com", "paycomonline.net", "dayforcehcm.com", "ultipro.com",
+    "taleo.net", "zohorecruit.com", "freshteam.com", "indeed.com", "glassdoor.com", "builtin.com",
+    "otta.com", "tally.so", "jotform.com", "loom.com", "x.com", "twitter.com", "youtube.com",
+    "medium.com", "substack.com", "hnhiring.com", "remoteok.com", "weworkremotely.com",
 )
+# Leading host labels that are not the company's own domain ("careers.acme.com" -> "acme.com").
+_GENERIC_HOST_LABELS = frozenset({
+    "www", "jobs", "job", "careers", "career", "apply", "app", "join", "work", "hiring", "team",
+    "boards", "hr", "people", "talent", "recruiting",
+})
+# The monthly threads posted by `whoishiring`; their comments are job ads, CVs or freelancer offers.
+JOB_THREAD_RE = re.compile(
+    r"^\s*Ask HN:\s*(?:Who is hiring|Who wants to be hired|Freelancer\?\s*Seeking freelancer)", re.I)
 _TYPE_RANK = {"competitor_engagement": 2, "keyword_mention": 1}
 _DEAD_TEXTS = {"", "[deleted]", "[dead]", "[flagged]"}
 
@@ -99,8 +132,11 @@ class HackerNewsCollector(Collector):
     signal_types = ("competitor_engagement", "keyword_mention", "hiring")
     requires = "keywords, competitors or hiring keywords"
 
-    # Seconds between two API calls (tests set this to 0).
-    request_interval: float = 0.5
+    # Seconds between two API calls (the research suggests ~1 request/s; tests set this to 0).
+    request_interval: float = 1.0
+    # Wall-clock seconds after which no new request is started, and the clock used to measure them.
+    time_budget: float = TIME_BUDGET_SECONDS
+    clock: Callable[[], float] = staticmethod(time.monotonic)
 
     def is_configured(self, company: Company) -> bool:
         s = company.signals
@@ -108,18 +144,19 @@ class HackerNewsCollector(Collector):
 
     async def collect(self, company: Company, ctx: CollectContext) -> list[RawSignal]:
         enabled = set(company.signals.enabled_types)
-        fetcher = _Fetcher(ctx, MAX_REQUESTS_PER_SCAN, self.request_interval)
-        since_ts = int(ctx.since.timestamp())
+        fetcher = _Fetcher(ctx, MAX_REQUESTS_PER_SCAN, self.request_interval, self.time_budget, self.clock)
+        # A naive `since` would make every aware/naive comparison below raise; treat it as UTC.
+        since = parse_time(ctx.since) or ctx.since
         out: list[RawSignal] = []
 
         hiring_keywords = company.signals.hiring_keywords if "hiring" in enabled else []
         if hiring_keywords and ctx.max_items > 0:
-            out += await _collect_hiring(hiring_keywords, ctx, fetcher, since_ts)
+            out += await _collect_hiring(hiring_keywords, ctx, fetcher, since)
 
         terms = mention_terms(company, enabled)
         room = ctx.max_items - len(out)
         if terms and room > 0 and not fetcher.exhausted:
-            out += await _collect_mentions(terms, ctx, fetcher, since_ts, room)
+            out += await _collect_mentions(terms, ctx, fetcher, since, room)
         return out[: ctx.max_items]
 
 
@@ -131,10 +168,14 @@ class HackerNewsCollector(Collector):
 class _Fetcher:
     """Sequential, capped access to the search endpoint. Never raises; warns instead."""
 
-    def __init__(self, ctx: CollectContext, max_requests: int, interval: float) -> None:
+    def __init__(self, ctx: CollectContext, max_requests: int, interval: float, time_budget: float,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.ctx = ctx
         self.max_requests = max_requests
         self.interval = interval
+        self.clock = clock
+        self.deadline = clock() + time_budget
+        self.timeout = min(float(ctx.settings.http_timeout or REQUEST_TIMEOUT_SECONDS), REQUEST_TIMEOUT_SECONDS)
         self.used = 0
         self.failures_in_a_row = 0
         self.stopped = False
@@ -153,9 +194,13 @@ class _Fetcher:
             return None
         if self.used and self.interval > 0:
             await asyncio.sleep(self.interval)
+        if self.clock() >= self.deadline:
+            self._stop("Hacker News: scan time budget used up; skipped the remaining searches this scan")
+            return None
         self.used += 1
         try:
-            resp = await self.ctx.client.get(SEARCH_URL, params=params, headers={"Accept": "application/json"})
+            resp = await self.ctx.client.get(SEARCH_URL, params=params, headers={"Accept": "application/json"},
+                                             timeout=self.timeout)
         except httpx.TimeoutException:
             self._fail(f"Hacker News: search for {what} timed out")
             return None
@@ -219,11 +264,12 @@ def mention_terms(company: Company, enabled: set[str]) -> list[tuple[str, str]]:
 
 
 async def _collect_mentions(terms: list[tuple[str, str]], ctx: CollectContext, fetcher: _Fetcher,
-                            since_ts: int, room: int) -> list[RawSignal]:
+                            since: datetime, room: int) -> list[RawSignal]:
+    since_ts = int(since.timestamp())
     budget = fetcher.remaining
     if len(terms) > budget:
         # Rotate the searched subset daily so every term is covered over a few scans.
-        start = ctx.since.date().toordinal() % len(terms)
+        start = since.date().toordinal() % len(terms)
         terms = terms[start:] + terms[:start]
         ctx.warn(f"Hacker News: {len(terms)} keywords/competitors but only {budget} searches left "
                  f"this scan (cap {MAX_REQUESTS_PER_SCAN}); searching {', '.join(t for t, _ in terms[:budget])}")
@@ -241,11 +287,12 @@ async def _collect_mentions(terms: list[tuple[str, str]], ctx: CollectContext, f
             },
             f"'{term}'",
         )
+        bad: list[str] = []
         for hit in hits or []:
             try:
-                raw = mention_signal(hit, term, sig_type, ctx.since)
+                raw = mention_signal(hit, term, sig_type, since)
             except Exception as exc:  # a malformed hit must not sink the query
-                ctx.warn(f"Hacker News: skipped a malformed result for '{term}' ({type(exc).__name__})")
+                bad.append(type(exc).__name__)
                 continue
             if raw is None:
                 continue
@@ -254,6 +301,8 @@ async def _collect_mentions(terms: list[tuple[str, str]], ctx: CollectContext, f
                 found[key] = _merge_mentions(found[key], raw)
             elif len(found) < room:
                 found[key] = raw
+        if bad:
+            ctx.warn(f"Hacker News: skipped {len(bad)} malformed result(s) for '{term}' ({bad[0]})")
     return list(found.values())
 
 
@@ -272,7 +321,7 @@ def mention_signal(hit: dict[str, Any], term: str, sig_type: str, since: datetim
     if is_comment:
         own_title = ""
         body = _text(hit.get("comment_text"))
-        if body.lower() in _DEAD_TEXTS:
+        if body.lower() in _DEAD_TEXTS or JOB_THREAD_RE.search(_text(hit.get("story_title"))):
             return None
         context = " ".join([_text(hit.get("story_title")), str(hit.get("story_url") or "")])
     else:
@@ -372,18 +421,23 @@ def _merge_mentions(a: RawSignal, b: RawSignal) -> RawSignal:
 class HiringThread:
     id: str
     title: str
+    created: float = 0.0
 
 
 async def _collect_hiring(keywords: list[str], ctx: CollectContext, fetcher: _Fetcher,
-                          since_ts: int) -> list[RawSignal]:
+                          since: datetime) -> list[RawSignal]:
+    since_ts = int(since.timestamp())
     hits = await fetcher.search({"tags": f"story,author_{HIRING_BOT}", "hitsPerPage": 10},
                                 "the latest 'Who is hiring?' thread")
     if hits is None:
         return []
-    thread = latest_hiring_thread(hits)
-    if thread is None:
+    threads = hiring_threads(hits, since)
+    if not threads:
         ctx.warn("Hacker News: could not find the latest 'Ask HN: Who is hiring?' thread")
         return []
+    by_id = {t.id: t for t in threads}
+    story_tags = ",".join(f"story_{t.id}" for t in threads)
+    thread_tags = f"comment,({story_tags})" if len(threads) > 1 else f"comment,{story_tags}"
     if len(keywords) > MAX_HIRING_KEYWORDS:
         ctx.warn(f"Hacker News: only the first {MAX_HIRING_KEYWORDS} of {len(keywords)} hiring keywords "
                  "are searched in 'Who is hiring?'")
@@ -395,17 +449,18 @@ async def _collect_hiring(keywords: list[str], ctx: CollectContext, fetcher: _Fe
         hits = await fetcher.search(
             {
                 "query": keyword,
-                "tags": f"comment,story_{thread.id}",
+                "tags": thread_tags,
                 "numericFilters": f"created_at_i>{since_ts}",
                 "hitsPerPage": HIRING_HITS_PER_PAGE,
             },
             f"hiring '{keyword}'",
         )
+        bad: list[str] = []
         for hit in hits or []:
             try:
-                raw = hiring_signal(hit, keyword, thread, ctx.since)
+                raw = hiring_signal(hit, keyword, by_id, since)
             except Exception as exc:
-                ctx.warn(f"Hacker News: skipped a malformed hiring post ({type(exc).__name__})")
+                bad.append(type(exc).__name__)
                 continue
             if raw is None:
                 continue
@@ -417,29 +472,36 @@ async def _collect_hiring(keywords: list[str], ctx: CollectContext, fetcher: _Fe
                     "strength": max(prev.strength, raw.signal.strength), "raw": {**prev.raw, "matched": matched}})
             elif len(found) < ctx.max_items:
                 found[key] = raw
+        if bad:
+            ctx.warn(f"Hacker News: skipped {len(bad)} malformed hiring post(s) for '{keyword}' ({bad[0]})")
     return list(found.values())
 
 
-def latest_hiring_thread(hits: list[dict[str, Any]]) -> HiringThread | None:
-    threads = [
-        h for h in hits
-        if h.get("objectID") and re.search(r"\bwho is hiring\b", str(h.get("title") or ""), re.I)
-    ]
-    if not threads:
-        return None
-    best = max(threads, key=_created_ts)
-    return HiringThread(id=str(best["objectID"]), title=_text(best.get("title")))
+def hiring_threads(hits: list[dict[str, Any]], since: datetime) -> list[HiringThread]:
+    """The latest "Who is hiring?" thread, plus the previous one when the scan window starts before
+    the latest was posted (job posts made in last month's thread during the window still count)."""
+    threads = sorted(
+        (HiringThread(id=str(h["objectID"]), title=_text(h.get("title")), created=_created_ts(h))
+         for h in hits
+         if h.get("objectID") and re.search(r"\bwho is hiring\b", str(h.get("title") or ""), re.I)),
+        key=lambda t: t.created, reverse=True,
+    )
+    if len(threads) > 1 and threads[0].created > since.timestamp():
+        return threads[:2]
+    return threads[:1]
 
 
-def hiring_signal(hit: dict[str, Any], keyword: str, thread: HiringThread, since: datetime) -> RawSignal | None:
-    """A top-level job post in the hiring thread -> account-level hiring signal."""
+def hiring_signal(hit: dict[str, Any], keyword: str, threads: dict[str, HiringThread],
+                  since: datetime) -> RawSignal | None:
+    """A top-level job post in a hiring thread -> account-level hiring signal."""
     object_id = str(hit.get("objectID") or "").strip()
     author = str(hit.get("author") or "").strip()
     if not object_id or not author or hit.get("dead") or hit.get("deleted"):
         return None
     parent = hit.get("parent_id")
-    if parent is not None and str(parent) != thread.id:
+    if parent is not None and str(parent) not in threads:
         return None  # a reply under a job post, not a job post
+    thread = threads.get(str(parent)) or threads.get(str(hit.get("story_id"))) or next(iter(threads.values()))
     occurred = parse_time(hit.get("created_at_i") or hit.get("created_at"))
     if occurred is None or occurred <= since:
         return None
@@ -451,7 +513,8 @@ def hiring_signal(hit: dict[str, Any], keyword: str, thread: HiringThread, since
     if not pattern.search(body):
         return None
 
-    headline_html = re.split(r"<p>|\n", comment_html, maxsplit=1)[0]
+    # The headline is the first non-empty paragraph ("<p>Acme | ..." happens too).
+    headline_html = next((p for p in re.split(r"<p>|\n", comment_html) if _text(p)), "")
     headline = _text(headline_html)
     parsed = parse_headline(headline, keyword)
     if parsed is None:
@@ -478,7 +541,7 @@ def hiring_signal(hit: dict[str, Any], keyword: str, thread: HiringThread, since
             "matched_in": "headline" if in_headline else "body",
         },
     )
-    return RawSignal(signal=signal, account=company, account_domain=company_domain(headline_html))
+    return RawSignal(signal=signal, account=company, account_domain=company_domain(headline_html, company))
 
 
 def parse_headline(headline: str, keyword: str) -> tuple[str, str] | None:
@@ -506,18 +569,47 @@ def _clean_company(text: str) -> str:
     return name if 0 < len(name) <= 80 else ""
 
 
-def company_domain(headline_html: str) -> str:
-    """The hiring company's own domain from links in the job headline (job-board links ignored)."""
+def company_domain(headline_html: str, company: str) -> str:
+    """The hiring company's own domain from the job headline, or "" when unsure.
+
+    A wrong domain is worse than none (the domain is the account's identity key, so a shared
+    job-board host would merge unrelated companies): a link only counts when its host is not a
+    known job board/tool and resembles the company name ("careers.acmebank.com" ~ "Acme Bank").
+    """
     text = html.unescape(headline_html)
     candidates = re.findall(r"""href=["']([^"']+)["']""", text) + re.findall(r"https?://[^\s<>\"')|]+", text)
     for url in candidates:
         try:
-            host = (urlsplit(url).hostname or "").lower().removeprefix("www.")
+            host = (urlsplit(url).hostname or "").lower()
         except ValueError:
             continue
-        if "." in host and not any(host == h or host.endswith("." + h) for h in NON_COMPANY_HOSTS):
+        host = _strip_generic_labels(host)
+        if ("." in host and not any(host == h or host.endswith("." + h) for h in NON_COMPANY_HOSTS)
+                and _host_resembles(host, company)):
             return host
+    bare = company.lower().removeprefix("www.")
+    if re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}", bare):  # "acme.io | Engineer | ..."
+        return bare
     return ""
+
+
+def _strip_generic_labels(host: str) -> str:
+    labels = host.split(".")
+    while len(labels) > 2 and labels[0] in _GENERIC_HOST_LABELS:
+        labels = labels[1:]
+    return ".".join(labels)
+
+
+def _host_resembles(host: str, company: str) -> bool:
+    """'acmebank.example' ~ 'Acme Bank', 'getacme.com' ~ 'Acme', 'ibm.com' ~ 'IBM'; conservative on purpose."""
+    name = re.sub(r"[^a-z0-9]", "", company.lower())
+    for label in host.split(".")[:-1]:
+        label = re.sub(r"[^a-z0-9]", "", label)
+        if label in _GENERIC_HOST_LABELS or not label or not name:
+            continue
+        if label == name or (len(label) >= 4 and label in name) or (len(name) >= 4 and name in label):
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------------------

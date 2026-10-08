@@ -12,7 +12,13 @@ Source (no key, no signup)
     (paged with `from`), ranked by relevance rather than date. Hits are per DOCUMENT, so one filing can
     come back several times (8-K main document + exhibits): filings are de-duplicated on `adsh`.
     Each configured query is sent as a quoted phrase (a query that already contains double quotes,
-    e.g. '"freight audit" OR "fleet telematics"', is sent unchanged).
+    e.g. '"freight audit" OR "fleet telematics"', is sent unchanged). Hits whose form is not the one
+    asked for are ignored (and reported), so a changed or ignored `forms` filter cannot turn a 10-K
+    into a "funding" signal.
+    What a query can match differs by form: an 8-K and its exhibits (press releases) are prose, so
+    topical phrases ("logistics software") work. A Form D is structured data only (issuer name and
+    address, related persons, industry group such as "Other Technology" or "Computers", amounts), so
+    a topical phrase rarely matches one; company names, people, cities or industry-group labels do.
 
 What it emits (both account-level: lead=None, account=<filer name>; no domain is known)
     funding     Form D: notice of an exempt private offering, filed within 15 days of the first sale,
@@ -32,7 +38,10 @@ What it emits (both account-level: lead=None, account=<filer name>; no domain is
                 8-K/A amendments are skipped (they complete an event that was already reported). The
                 people's names are only in the document text: the summary points Claude to the filing.
     Filer names come from display_names[0] with the "(CIK ...)" and ticker "(ABC, ABCW)" suffixes and
-    EDGAR state tags such as "/DE/" removed; tickers go to raw["tickers"]. url is the filing's archive
+    EDGAR state tags such as "/DE/" or "/MN" removed; tickers go to raw["tickers"]. The CIK is the one
+    in that same display name (else ciks[0]), so name, CIK and url agree for co-registrant filings.
+    Summaries show US state codes only: EDGAR's foreign codes ("E9" = Cayman Islands, "X0") stay in
+    raw. url is the filing's archive
     folder https://www.sec.gov/Archives/edgar/data/<cik>/<adsh without dashes>/ and external_id is
     "sec_edgar:D:<adsh>" or "sec_edgar:8-K:<adsh>". A filing matched by several queries is returned
     once, with every matching query in raw["queries"].
@@ -46,7 +55,8 @@ Time
 Limits and politeness
     SEC's fair-access policy: at most 10 requests/second per user, and every request must declare a
     User-Agent with a contact e-mail ("OpenBerry <email>", from OPENBERRY_CONTACT_EMAIL or else the
-    company's contact e-mail; without one nothing is fetched). Undeclared tools get HTTP 403.
+    company's contact e-mail; it must be a plain ASCII address because it goes in an HTTP header;
+    without a usable one nothing is fetched). Undeclared tools get HTTP 403.
     Requests are sequential, `request_interval` (0.2 s) apart. At most MAX_QUERIES queries per scan
     (rotated daily when more are configured), one search per query and signal type (Form D only when
     "funding" is enabled, 8-K only for "job_change"), a second page only while requests remain for
@@ -91,12 +101,17 @@ TITLE_LIMIT = 160
 SUMMARY_LIMIT = 500
 
 NO_EMAIL_WARNING = "SEC EDGAR needs a contact e-mail: set OPENBERRY_CONTACT_EMAIL or the company contact e-mail"
+BAD_EMAIL_WARNING = ("SEC EDGAR: the contact e-mail is not a plain address that can be sent in the User-Agent "
+                     "header (ASCII only, like ops@example.com): fix OPENBERRY_CONTACT_EMAIL or the company "
+                     "contact e-mail")
 
-_EMAIL_RE = re.compile(r"[^@\s<>()\"']+@[^@\s<>()\"']+\.[A-Za-z]{2,}")
+_EMAIL_RE = re.compile(r"[A-Za-z0-9!#$%&*+/=?^_`{|}~.\-]+@[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?\.[A-Za-z]{2,}")
 _ADSH_RE = re.compile(r"\d{10}-\d{2}-\d{6}")
 _CIK_SUFFIX_RE = re.compile(r"\s*\(\s*CIK\s*#?\s*(\d{1,10})\s*\)\s*$", re.I)
 _TICKERS_SUFFIX_RE = re.compile(r"\s*\(\s*([A-Z0-9][A-Z0-9.\-]{0,9}(?:\s*,\s*[A-Z0-9][A-Z0-9.\-]{0,9})*)\s*\)\s*$")
-_STATE_TAG_RE = re.compile(r"\s*/[A-Z]{2,4}/?\s*$")       # EDGAR conformed-name tags: "ACME CORP /DE/"
+_STATE_TAG_RE = re.compile(r"(?:\s*/[A-Z]{2,4}/?)+\s*$")  # EDGAR name tags: "ACME CORP /DE/", "X CO/MN", "/DE/ /NEW/"
+_US_STATE_RE = re.compile(r"[A-Z]{2}")                        # EDGAR's non-US codes all contain a digit ("E9", "X0", "A6")
+_FOREIGN_CODE_SUFFIX_RE = re.compile(r",\s*(?=[A-Z0-9]{2}$)[A-Z]*\d[A-Z0-9]*$")   # "London, X0" -> "London"
 _FUND_NAME_RE = re.compile(
     r"\bfunds?\b"
     r"|\bL\.?\s?P\b\.?(?![a-z0-9])"
@@ -145,7 +160,8 @@ class SecEdgarCollector(Collector):
             return []
         email = contact_email(ctx.settings, company)
         if not email:
-            ctx.warn(NO_EMAIL_WARNING)
+            configured = any((v or "").strip() for v in (ctx.settings.contact_email, company.contact_email))
+            ctx.warn(BAD_EMAIL_WARNING if configured else NO_EMAIL_WARNING)
             return []
 
         queries = select_queries(company.signals.sec_queries, ctx)
@@ -174,7 +190,7 @@ class SecEdgarCollector(Collector):
                           today: date, searches_after: int, found: dict[str, Filing],
                           ctx: CollectContext) -> None:
         """Fetch up to MAX_PAGES_PER_SEARCH pages of one search and add new matching filings to `found`."""
-        offset = kept = malformed = 0
+        offset = kept = malformed = other_forms = 0
         for page in range(MAX_PAGES_PER_SEARCH):
             # A further page only when a request is still left for every search that has not run yet.
             if page and (fetcher.used + searches_after >= fetcher.max_requests or fetcher.out_of_budget()):
@@ -187,6 +203,9 @@ class SecEdgarCollector(Collector):
             for hit in hits:
                 try:
                     filing = parse_hit(hit, form, query)
+                except WrongForm:
+                    other_forms += 1
+                    continue
                 except (ValueError, TypeError, AttributeError):
                     malformed += 1
                     continue
@@ -206,6 +225,9 @@ class SecEdgarCollector(Collector):
                 break
         if malformed:
             ctx.warn(f'SEC EDGAR search "{query}" ({form.label}): skipped {malformed} malformed hit(s)')
+        if other_forms:
+            ctx.warn(f'SEC EDGAR search "{query}" ({form.label}): ignored {other_forms} hit(s) of other forms '
+                     "(the search API may have changed)")
 
 
 # --------------------------------------------------------------------------------------
@@ -281,13 +303,21 @@ class Filing:
         return ARCHIVE_URL.format(cik=self.cik, folder=self.adsh.replace("-", ""))
 
 
+class WrongForm(Exception):
+    """The hit is a filing of another form than the one searched for."""
+
+
 def parse_hit(hit: Any, form: FormSearch, query: str) -> Filing | None:
-    """A Filing for a hit we keep, None for one we skip on purpose; ValueError when malformed."""
+    """A Filing for a hit we keep, None for one we skip on purpose; ValueError when malformed,
+    WrongForm when the hit is not the form we asked for."""
     if not isinstance(hit, dict) or not isinstance(hit.get("_source"), dict):
         raise ValueError("hit without _source")
     src: dict[str, Any] = hit["_source"]
     if is_amendment(src):
         return None
+    filed_as = {f.upper() for f in (_s(src.get("form")), *_strs(src.get("root_forms"))) if f}
+    if filed_as and form.form.upper() not in filed_as:
+        raise WrongForm(", ".join(sorted(filed_as)))
     items = [i.upper() for i in _strs(src.get("items"))]
     if form is FORM_8K and "5.02" not in items:
         return None
@@ -297,8 +327,9 @@ def parse_hit(hit: Any, form: FormSearch, query: str) -> Filing | None:
         raise ValueError("hit without accession number")
     names = _strs(src.get("display_names"))
     entity, tickers, name_cik = split_display_name(names[0] if names else "")
+    # The CIK printed in the name we use, so name, CIK and url agree when a filing has co-registrants.
     ciks = [c for c in _strs(src.get("ciks")) if c.isdigit()]
-    cik = str(int(ciks[0] if ciks else name_cik or "0"))
+    cik = str(int(name_cik or (ciks[0] if ciks else "0")))
     if not entity or cik == "0":
         raise ValueError("hit without filer name or CIK")
     filed = parse_time(_s(src.get("file_date")))
@@ -372,17 +403,20 @@ def build_signal(f: Filing) -> RawSignal:
         occurred_at=f.file_date,
         raw={k: v for k, v in raw.items() if v not in (None, "", [], {})},
     )
-    return RawSignal(signal=signal, account=f.entity)
+    places = [p for p in (_FOREIGN_CODE_SUFFIX_RE.sub("", loc).strip() for loc in f.biz_locations) if p]
+    return RawSignal(signal=signal, account=f.entity, account_location=places[0] if places else "")
 
 
 def build_summary(f: Filing) -> str:
     day = f.file_date.date().isoformat()
     where = []
-    if f.biz_locations:
-        where.append(f"Based in {'; '.join(f.biz_locations[:2])}")
-    if f.inc_states:
-        where.append(f"incorporated in {', '.join(f.inc_states[:2])}")
-    matched = ", ".join(f'"{q}"' for q in f.queries)
+    places = [p for p in (_FOREIGN_CODE_SUFFIX_RE.sub("", loc).strip() for loc in f.biz_locations) if p]
+    if places:
+        where.append(f"Based in {'; '.join(places[:2])}")
+    states = [s for s in f.inc_states if _US_STATE_RE.fullmatch(s)]
+    if states:
+        where.append(f"incorporated in {', '.join(states[:2])}")
+    matched = ", ".join(phrase(q) for q in f.queries)
     if f.form is FORM_D:
         rules = [label for code, label in _EXEMPTIONS.items() if code in f.items]
         text = (f"{f.entity} filed a Form D on {day}: notice of an exempt private securities offering, "
@@ -439,7 +473,7 @@ class _Fetcher:
         except httpx.TimeoutException:
             self._fail(f"SEC EDGAR {what}: request timed out")
             return None
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:   # ValueError: e.g. unencodable header
             self._fail(f"SEC EDGAR {what}: request failed ({type(exc).__name__})")
             return None
 

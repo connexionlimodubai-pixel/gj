@@ -17,18 +17,22 @@ Source: GitHub REST API (https://api.github.com, `X-GitHub-Api-Version: 2022-11-
 
 What it emits
     competitor_engagement  someone outside the project opened an issue or PR -> person lead (the author).
-                           Skipped: bots (type "Bot" or a login ending in "[bot]") and authors whose
+                           Skipped: bots (type "Bot" or a login ending in "[bot]"), GitHub's placeholder
+                           accounts ("ghost" for deleted users, "Mannequin" for imports) and authors whose
                            author_association is OWNER, MEMBER or COLLABORATOR (they work there).
     github_star            someone forked the repo -> person lead (fork owner); a fork owned by an
                            organisation is an account-level signal for that organisation. Also someone
                            starred the repo (own/collaborator repos with GITHUB_TOKEN only) -> person lead.
+    Insiders (each watched repo's owner account and anyone seen as OWNER/MEMBER/COLLABORATOR on a watched
+    repo this scan) are dropped from forks and stars too: maintainers routinely fork to open PRs.
 
 Strength (50 = typical)
     issues/PRs: 50 for an issue, 45 for a PR with no intent words; 80 when the title/body shows
         evaluation or migration intent ("evaluating", "alternative to", "migrating from", "pricing"...),
         75 for frustration ("frustrated", "deal breaker", "unmaintained"...), 70 for integration or
         production use ("integrate", "in production", "our team"...); +5 when two of those groups match
-        (max 85). Issue-template HTML comments are ignored when matching.
+        (max 85). Issue-template HTML comments are ignored when matching. Everyday developer wording
+        ("integration tests", "string comparison", "migrate to v2") deliberately does not count.
     forks: 50; 65 when the owner pushed commits to the fork after forking. Organisation forks: 60 / 70.
     stars: 50.
 
@@ -82,12 +86,17 @@ SUMMARY_LIMIT = 500
 MATCH_LIMIT = 4000                 # characters of an issue body scanned for intent words
 
 INSIDER_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+GHOST_LOGIN = "ghost"              # GitHub's stand-in for deleted accounts (shared by all of them)
+PLACEHOLDER_TYPES = {"Bot", "Mannequin"}  # Mannequin = placeholder for users of an imported repo
 
-# Evaluating the project, or moving to/from a tool: the strongest buying signal on a repo.
+# Evaluating the project, or moving off another tool: the strongest buying signal on a repo.
+# Generic developer wording is left out on purpose: "evaluation"/"comparison"/"comparing" match code
+# ("lazy evaluation", "string comparison") and "migrate to"/"switching to" match upgrade PRs ("Migrate
+# to Pydantic v2"); none of them says anything about buying.
 EVALUATION_PHRASES = [
-    "evaluating", "evaluation", "comparing", "comparison", "proof of concept", "poc", "pilot",
+    "evaluating", "proof of concept", "poc", "pilot",
     "alternative to", "alternatives to", "migrating from", "migrate from", "migration from",
-    "migrating to", "migrate to", "switching from", "switch from", "switching to", "moving from",
+    "switching from", "switch from", "moving from",
     "moving away from", "replacement for", "replace our", "looking for", "pricing", "enterprise",
     "commercial license", "commercial support", "support contract",
 ]
@@ -96,13 +105,15 @@ FRUSTRATION_PHRASES = [
     "frustrated", "frustrating", "deal breaker", "dealbreaker", "showstopper", "blocking us",
     "unusable", "too slow", "too expensive", "abandoned", "unmaintained",
 ]
-# Real use at work: integration, deployment and production questions.
+# Real use at work: integration, deployment and production questions. Bare "integration" and
+# "deployment" are left out: they mostly mean "integration tests" / "deployment docs" on GitHub.
 INTEGRATION_PHRASES = [
-    "integrate", "integrating", "integration", "in production", "production environment",
+    "integrate", "integrating", "integration with", "in production", "production environment",
     "our team", "our company", "our customers", "our clients", "our platform", "our stack",
     "we are using", "we're using", "we use", "we rely on", "self-hosted", "self hosted",
-    "deploy", "deployed", "deploying", "deployment", "at scale", "sso", "saml", "on-prem", "on-premise",
+    "deploy", "deployed", "deploying", "at scale", "sso", "saml", "on-prem", "on-premise",
 ]
+_LINKEDIN_PROFILE_RE = re.compile(r"^https?://([a-z]{2,3}\.)?linkedin\.com/(in|pub)/[^/?#\s]+", re.IGNORECASE)
 
 # Hosts that are not an organisation's own domain (used when deriving an account domain).
 NON_COMPANY_HOSTS = (
@@ -147,12 +158,14 @@ class GitHubCollector(Collector):
 
         api = _GitHubApi(ctx, token, self.request_interval, self.time_budget)
         hits: dict[str, _Hit] = {}
+        # Lower-case logins of people who work on a watched repo: never leads, whatever they did.
+        insiders: set[str] = {repo.partition("/")[0].lower() for repo in repos}
         for repo in repos:
             if api.exhausted or len(hits) >= ctx.max_items:
                 break
             repo_ok = True
             if want_issues:
-                found, repo_ok = await _collect_issues(api, repo)
+                found, repo_ok = await _collect_issues(api, repo, insiders)
                 _merge(hits, found)
             if want_forks and repo_ok and not api.exhausted:
                 found, repo_ok = await _collect_forks(api, repo)
@@ -160,7 +173,8 @@ class GitHubCollector(Collector):
                 if token and repo_ok and not api.exhausted:
                     _merge(hits, await _collect_stars(api, repo))
 
-        selected = sorted(hits.values(), key=lambda h: (h.signal.strength, h.signal.occurred_at),
+        outsiders = [hit for hit in hits.values() if hit.login.lower() not in insiders]
+        selected = sorted(outsiders, key=lambda h: (h.signal.strength, h.signal.occurred_at),
                           reverse=True)[: ctx.max_items]
         profiles = await _fetch_profiles(api, selected)
         out: list[RawSignal] = []
@@ -233,6 +247,11 @@ class _GitHubApi:
         status = resp.status_code
         if self._rate_limited(resp):
             return None
+        if status == 403 and _error_message(resp) is None:
+            # Checked before `quiet`: an HTML block page is not GitHub saying "no access to this list".
+            self._stop("GitHub: access refused (HTTP 403 without an API error, possibly blocked by a proxy "
+                       "or GitHub's abuse detection); skipped the remaining requests this scan")
+            return None
         if status in quiet:
             self.failures_in_a_row = 0
             self._check_remaining(resp)
@@ -244,12 +263,7 @@ class _GitHubApi:
                        if self.token else f"GitHub: HTTP 401 for {what}; stopped this scan")
             return None
         if status == 403:
-            message = _error_message(resp)
-            if message is None:
-                self._stop("GitHub: access refused (HTTP 403 without an API error, possibly blocked by a proxy "
-                           "or GitHub's abuse detection); skipped the remaining requests this scan")
-                return None
-            return self.fail(f"GitHub: HTTP 403 for {what}: {message}")
+            return self.fail(f"GitHub: HTTP 403 for {what}: {_error_message(resp)}")
         if status >= 400:
             message = _error_message(resp)
             return self.fail(f"GitHub: HTTP {status} for {what}" + (f": {message}" if message else ""))
@@ -383,9 +397,15 @@ def is_bot(user: dict[str, Any]) -> bool:
     return user.get("type") == "Bot" or login.endswith("[bot]")
 
 
+def is_placeholder(user: dict[str, Any]) -> bool:
+    """Bots, the shared 'ghost' of deleted accounts and imported 'Mannequin' users: not real people."""
+    login = str(user.get("login") or "").strip().lower()
+    return is_bot(user) or user.get("type") in PLACEHOLDER_TYPES or login == GHOST_LOGIN
+
+
 def _actor(user: Any) -> dict[str, Any] | None:
-    """The simple-user object if it is a usable, non-bot account."""
-    if not isinstance(user, dict) or not str(user.get("login") or "").strip() or is_bot(user):
+    """The simple-user object if it is a usable account of a real person or organisation."""
+    if not isinstance(user, dict) or not str(user.get("login") or "").strip() or is_placeholder(user):
         return None
     return user
 
@@ -395,8 +415,11 @@ def _actor(user: Any) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------------------
 
 
-async def _collect_issues(api: _GitHubApi, repo: str) -> tuple[list[_Hit], bool]:
-    """Returns (hits, repo_ok). repo_ok is False when the repository does not exist."""
+async def _collect_issues(api: _GitHubApi, repo: str, insiders: set[str]) -> tuple[list[_Hit], bool]:
+    """Returns (hits, repo_ok). repo_ok is False when the repository does not exist.
+
+    Adds the logins of OWNER/MEMBER/COLLABORATOR authors (on any listed item, old or new) to `insiders`.
+    """
     since = api.since
     reply = await api.get(
         f"/repos/{_repo_path(repo)}/issues", f"issues of {repo}",
@@ -412,6 +435,9 @@ async def _collect_issues(api: _GitHubApi, repo: str) -> tuple[list[_Hit], bool]
         return [], True
     hits: list[_Hit] = []
     for item in _as_items(reply, api, f"issues of {repo}") or []:
+        insider = _insider_login(item)
+        if insider:
+            insiders.add(insider)
         try:
             hit = issue_hit(item, repo, since)
         except Exception as exc:  # a malformed item must not sink the list
@@ -420,6 +446,14 @@ async def _collect_issues(api: _GitHubApi, repo: str) -> tuple[list[_Hit], bool]
         if hit is not None:
             hits.append(hit)
     return hits, True
+
+
+def _insider_login(item: dict[str, Any]) -> str:
+    """Lower-case login of an issue author who works on the repo (OWNER/MEMBER/COLLABORATOR), else ''."""
+    user = item.get("user")
+    if str(item.get("author_association") or "").upper() not in INSIDER_ASSOCIATIONS or not isinstance(user, dict):
+        return ""
+    return str(user.get("login") or "").strip().lower()
 
 
 def issue_hit(item: dict[str, Any], repo: str, since: datetime) -> _Hit | None:
@@ -671,12 +705,17 @@ def github_lead(user: dict[str, Any], profile: dict[str, Any] | None) -> LeadIn:
     p = profile or {}
     profile_url = _clean(p.get("html_url")) or _clean(user.get("html_url")) or f"https://github.com/{login}"
     email = _clean(p.get("email"))
+    blog = normalize_website(p.get("blog"))
+    # Many people put their LinkedIn profile in `blog`: it is an identity (merges with LinkedIn-sourced
+    # leads and enables the LinkedIn channel), not their website.
+    linkedin = blog if _LINKEDIN_PROFILE_RE.match(blog) else ""
     return LeadIn(
         full_name=_clean(p.get("name")) or login,
         github_username=login,
         profile_url=profile_url,
+        linkedin_url=linkedin,
         lead_company=clean_company(p.get("company")),
-        website=normalize_website(p.get("blog")),
+        website="" if linkedin else blog,
         location=_clean(p.get("location")),
         bio=truncate(_clean(p.get("bio")), SUMMARY_LIMIT),
         twitter=_clean(p.get("twitter_username")).lstrip("@"),

@@ -44,6 +44,39 @@
         "author": {
           "matchLevel": "none",
           "matchedWords": [],
+          "value": "limo_cto"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "LimoCo | Backend Engineer | Dubai<p>We dispatch 2,000 chauffeur rides a day."
+        },
+        "story_title": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_limo_cto",
+        "story_45400001"
+      ],
+      "author": "limo_cto",
+      "comment_text": "LimoCo | Backend Engineer | Dubai<p>We dispatch 2,000 chauffeur rides a day.",
+      "created_at": "2026-10-05T12:00:00Z",
+      "created_at_i": 1791201600,
+      "objectID": "45401020",
+      "parent_id": 45400001,
+      "story_id": 45400001,
+      "story_title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-05T12:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
           "value": "dxb_ops"
         },
         "title": {
@@ -137,7 +170,7 @@
     }
   ],
   "hitsPerPage": 50,
-  "nbHits": 4,
+  "nbHits": 5,
   "nbPages": 1,
   "page": 0,
   "params": "query=chauffeur&tags=%28story%2Ccomment%29&advancedSyntax=true&analyticsTags=backend",

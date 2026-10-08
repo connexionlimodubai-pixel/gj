@@ -22,6 +22,7 @@ Sources
 What it emits (classified from the headline)
     funding         "Acme raises $18M Series A", "... secures €12 million seed round", "... has raised",
                     "Series B round", "investment led by"                          -> account lead
+                    (not raised prices/fares/forecasts/bids/stakes, nor contracts, orders or acquisitions)
     job_change      "Acme appoints Jane Doe as CTO", "Jane Doe joins Acme as VP", "promoted to",
                     "Acme names new CFO" -> person lead (name, title, company) when the headline names
                     the person, otherwise an account lead
@@ -43,7 +44,8 @@ Strength (50 = typical)
 Limits and politeness
     Sequential requests with a pause between them; at most MAX_QUERIES_PER_SCAN Google News searches
     and MAX_FEEDS_PER_SCAN feeds per scan (the subset rotates daily when more are configured); a time
-    budget keeps the collector inside the scan timeout; feeds over MAX_FEED_BYTES are skipped.
+    budget plus per-hop timeouts (host lookup included) keep the collector inside the scan timeout;
+    feeds over MAX_FEED_BYTES and feed URLs with invalid host names are skipped with a warning.
     Google News is abandoned for the scan on HTTP 403/429/503 (Retry-After is reported) or after 3
     failures in a row; a feed host answering 403/429 is skipped for the rest of the scan and RSS stops
     after 5 failed feeds in a row. Redirects (at most MAX_REDIRECTS) are followed by hand so every
@@ -117,7 +119,7 @@ class GoogleNewsCollector(Collector):
     name = "google_news"
     label = "Google News"
     signal_types = ("funding", "company_news", "job_change")
-    requires = "news_queries"
+    requires = "news_queries (Google's feed terms allow personal, non-commercial use only)"
 
     request_interval: float = 1.0                 # seconds between searches (tests set 0)
     time_budget: float = TIME_BUDGET_SECONDS
@@ -127,11 +129,12 @@ class GoogleNewsCollector(Collector):
 
     async def collect(self, company: Company, ctx: CollectContext) -> list[RawSignal]:
         enabled = set(company.signals.enabled_types)
+        since = _aware(ctx.since)
         queries = [q.strip()[:MAX_QUERY_CHARS] for q in company.signals.news_queries if q.strip()]
         if not queries or ctx.max_items <= 0:
             return []
         if len(queries) > MAX_QUERIES_PER_SCAN:
-            queries = _rotate(queries, MAX_QUERIES_PER_SCAN, ctx.since)
+            queries = _rotate(queries, MAX_QUERIES_PER_SCAN, since)
             ctx.warn(f"Google News: {len(company.signals.news_queries)} news queries but at most "
                      f"{MAX_QUERIES_PER_SCAN} are searched per scan; this scan searched: {', '.join(queries)}")
         fetcher = _FeedFetcher(ctx, "Google News", max_requests=MAX_QUERIES_PER_SCAN,
@@ -144,13 +147,13 @@ class GoogleNewsCollector(Collector):
             if fetcher.exhausted or found.full:
                 break
             feed = await fetcher.fetch(GOOGLE_NEWS_URL, f"search “{query}”",
-                                       params=google_news_params(query, ctx.since, now))
+                                       params=google_news_params(query, since, now))
             if feed is None:
                 continue
             bad: list[str] = []
             for entry in feed.entries:
                 try:
-                    raw = google_news_signal(entry, query, company, ctx.since, now)
+                    raw = google_news_signal(entry, query, company, since, now)
                 except Exception as exc:  # one odd item must not sink the query
                     bad.append(type(exc).__name__)
                     continue
@@ -175,9 +178,10 @@ class RssCollector(Collector):
 
     async def collect(self, company: Company, ctx: CollectContext) -> list[RawSignal]:
         enabled = set(company.signals.enabled_types)
+        since = _aware(ctx.since)
         feeds, invalid = split_feed_urls(company.signals.rss_feeds)
         for url in invalid:
-            ctx.warn(f"RSS: skipped “{truncate(url, 80)}”: only http:// and https:// feed URLs are supported")
+            ctx.warn(f"RSS: skipped “{_redact(url)}”: not a valid http:// or https:// feed URL")
         terms = _Terms.from_company(company)
         if terms.empty:
             if feeds:
@@ -188,7 +192,7 @@ class RssCollector(Collector):
             return []
         if len(feeds) > MAX_FEEDS_PER_SCAN:
             total = len(feeds)
-            feeds = _rotate(feeds, MAX_FEEDS_PER_SCAN, ctx.since)
+            feeds = _rotate(feeds, MAX_FEEDS_PER_SCAN, since)
             ctx.warn(f"RSS: {total} feeds configured but at most {MAX_FEEDS_PER_SCAN} are read per scan; "
                      "the rest rotate in on later scans")
         fetcher = _FeedFetcher(ctx, "RSS", max_requests=MAX_FEEDS_PER_SCAN, interval=self.request_interval,
@@ -208,7 +212,7 @@ class RssCollector(Collector):
             bad: list[str] = []
             for entry in feed.entries:
                 try:
-                    raw = rss_signal(entry, info, company, terms, ctx.since, now)
+                    raw = rss_signal(entry, info, company, terms, since, now)
                 except Exception as exc:
                     bad.append(type(exc).__name__)
                     continue
@@ -252,7 +256,7 @@ class _FeedFetcher:
         self.block_statuses = block_statuses
         self.stop_on_block = stop_on_block
         self.public_only = public_only
-        self.timeout = httpx.Timeout(min(ctx.settings.http_timeout or REQUEST_TIMEOUT, REQUEST_TIMEOUT))
+        self.timeout = min(ctx.settings.http_timeout or REQUEST_TIMEOUT, REQUEST_TIMEOUT)
         self.used = 0
         self.failures_in_a_row = 0
         self.stopped = False
@@ -303,11 +307,12 @@ class _FeedFetcher:
     async def _download(self, url: str, params: dict[str, str] | None) -> tuple[bytes, str, str]:
         current, current_params = url, params
         for _ in range(MAX_REDIRECTS + 1):
-            await self._check_target(current)
+            timeout = self._hop_timeout()
+            await self._check_target(current, timeout)
             try:
                 async with self.ctx.client.stream("GET", current, params=current_params,
                                                   headers={"Accept": FEED_ACCEPT}, follow_redirects=False,
-                                                  timeout=self.timeout) as resp:
+                                                  timeout=httpx.Timeout(timeout)) as resp:
                     location = resp.headers.get("location")
                     if resp.status_code in REDIRECT_STATUSES and location:
                         current, current_params = urljoin(str(resp.url), location.strip()), None
@@ -323,15 +328,29 @@ class _FeedFetcher:
                 raise _FetchError(f"failed ({type(exc).__name__})") from exc
         raise _FetchError(f"redirected more than {MAX_REDIRECTS} times")
 
-    async def _check_target(self, url: str) -> None:
+    def _hop_timeout(self) -> float:
+        """Per-hop timeout, shrunk near the hard deadline so host check + connect + first byte all end by it
+        (services.run_scan cancels the whole collector, losing what it found, if it runs past 120 s)."""
+        remaining = self.hard_deadline - time.monotonic()
+        if remaining < 0.5:
+            raise _FetchError("was skipped: time budget for this scan used up")
+        return min(self.timeout, remaining / 3)
+
+    async def _check_target(self, url: str, timeout: float) -> None:
         parts = urlsplit(url)
         if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
             raise _FetchError("redirected to a non-http(s) URL", "skip")
+        if not _valid_hostname(parts.hostname):
+            raise _FetchError("skipped: invalid host name", "skip")
         if self.public_only:
             try:
-                await assert_public_host(url)
+                await asyncio.wait_for(assert_public_host(url), timeout)
             except UnsafeURL as exc:
                 raise _FetchError(f"skipped: {exc} (only public hosts are fetched)", "skip") from exc
+            except (asyncio.TimeoutError, TimeoutError) as exc:  # a stalled resolver has no timeout of its own
+                raise _FetchError("host lookup timed out") from exc
+            except Exception as exc:  # e.g. UnicodeError from the resolver's IDNA codec: never sink the scan
+                raise _FetchError(f"skipped: cannot check host ({type(exc).__name__})", "skip") from exc
 
     def _check_status(self, resp: httpx.Response) -> None:
         status = resp.status_code
@@ -398,9 +417,24 @@ def parse_feed(body: bytes, url: str, content_type: str = "") -> tuple[Any, str]
 def google_news_params(query: str, since: datetime, now: datetime) -> dict[str, str]:
     q = query.strip()
     if not re.search(r"\b(?:when|after|before):", q, re.I):
-        days = max(1, math.ceil((now - since).total_seconds() / 86400))
+        # An hour of slack: run_scan computes `since` a moment before the collector reads the clock,
+        # and a 14-day lookback should search when:14d, not when:15d.
+        days = max(1, math.ceil((now - since).total_seconds() / 86400 - 1 / 24))
         q = f"{q} when:{days}d"
     return {"q": q, **GOOGLE_NEWS_EDITION}
+
+
+def _aware(since: datetime) -> datetime:
+    """ctx.since as aware UTC (a naive value would make every comparison raise)."""
+    return parse_time(since) or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _valid_hostname(host: str | None) -> bool:
+    """Syntax only: 1-63 character labels, at most 253 characters (the resolver raises on anything else)."""
+    host = (host or "").rstrip(".")
+    if not host or len(host) > 253:
+        return False
+    return host.startswith("[") or ":" in host or all(0 < len(label) <= 63 for label in host.split("."))
 
 
 def split_feed_urls(urls: list[str]) -> tuple[list[str], list[str]]:
@@ -411,7 +445,7 @@ def split_feed_urls(urls: list[str]) -> tuple[list[str], list[str]]:
         url = url.strip()
         try:
             parts = urlsplit(url)
-            ok = parts.scheme.lower() in ("http", "https") and bool(parts.hostname)
+            ok = parts.scheme.lower() in ("http", "https") and _valid_hostname(parts.hostname)
         except ValueError:
             ok = False
         target = valid if ok else invalid
@@ -424,6 +458,11 @@ def feed_label(url: str) -> str:
     """host/path of a feed URL for warnings: no credentials, no query string (it may hold API keys)."""
     parts = urlsplit(url)
     return truncate(f"{parts.hostname or ''}{parts.path if parts.path not in ('', '/') else ''}", 80)
+
+
+def _redact(url: str) -> str:
+    """A rejected feed URL for warnings, without credentials, query string or fragment."""
+    return truncate(re.sub(r"[?#].*$", "", re.sub(r"(//|^)[^/@\s]*@", r"\1", url.strip(), count=1)), 80)
 
 
 def _rotate(items: list[str], cap: int, since: datetime) -> list[str]:
@@ -681,16 +720,24 @@ _MONEY = (r"(?:[$€£¥₹]\s?\d[\d,.]*(?:\s?(?:k|m|mn|mm|million|b|bn|billion)
           r"|\b\d[\d,.]*\s?(?:million|billion|mn|bn)\b)")
 _FUNDING_OBJECT = (rf"(?:{_MONEY}|\bseries\s+[a-f]\d?\b|\b(?:pre-?)?seed\b"
                    r"|\b(?:funding|financing|investment|extension)\s+round\b|\bventure\s+debt\b)")
-_RAISE_VERBS = r"(?:rais(?:es|ed|ing)|raise|attract(?:s|ed)?|receiv(?:es|ed)|receive)"
-# Verbs also used for contracts and acquisitions: only funding when no deal word is around.
+_RAISE_VERBS = r"(?:rais(?:es|ed|ing)|raise)"
+# What else gets "raised": prices, fares, forecasts, bids, stakes... ("Uber raises minimum fare to AED 12").
+_NOT_RAISED = (r"(?:prices?|pricing|fares?|rates?|fees?|tariffs?|tolls?|rents?|salar(?:y|ies)|wages?|"
+               r"pay\s+(?:to|for|by)|"
+               r"forecasts?|guidance|outlook|targets?|estimates?|expectations?|projections?|dividends?|payouts?|"
+               r"bids?|offers?|stakes?|holdings?|caps?|limits?|ceilings?|minimums?|prizes?|capacity|production|"
+               r"output|awareness|concerns?|questions?|alarms?|eyebrows|hopes?|fears?|doubts?)")
+_NOT_RAISED_RE = re.compile(rf"\b{_NOT_RAISED}\b", re.I)
+# Verbs also used for contracts, orders and acquisitions: only funding when no deal word is around.
 _DEAL_VERBS = (r"(?:secur(?:es|ed)|secure|clos(?:es|ed)|close|land(?:s|ed)?|bag(?:s|ged)?|net(?:s|ted)?|"
-               r"snag(?:s|ged)?|scor(?:es|ed)|score|pick(?:s|ed)?\s+up|nab(?:s|bed)?|rake(?:s|d)?\s+in)")
+               r"snag(?:s|ged)?|scor(?:es|ed)|score|pick(?:s|ed)?\s+up|nab(?:s|bed)?|rake(?:s|d)?\s+in|"
+               r"attract(?:s|ed)?|receiv(?:es|ed)|receive)")
+_FUNDING_RAISE_RE = re.compile(rf"\b{_RAISE_VERBS}\b(?P<gap>[^.;:|]{{0,40}}?){_FUNDING_OBJECT}", re.I)
 _FUNDING_VERB_RES = (
-    re.compile(rf"\b{_RAISE_VERBS}\b[^.;:|]{{0,40}}?{_FUNDING_OBJECT}", re.I),
     re.compile(r"\b(?:announc(?:es|ed)|announce|complet(?:es|ed)|complete|unveil(?:s|ed)?)\s+"
                rf"(?:its\s+|a\s+|an\s+|the\s+)?(?:{_MONEY}\s+)?(?:series\s+[a-f]\d?|(?:pre-?)?seed|funding|financing)\b",
                re.I),
-    re.compile(r"\bha(?:s|ve)\s+(?:now\s+|just\s+)?raised\b", re.I),
+    re.compile(rf"\bha(?:s|ve)\s+(?:now\s+|just\s+)?raised\b(?!\s+(?:its\s+|their\s+|the\s+)?{_NOT_RAISED}\b)", re.I),
 )
 _FUNDING_DEAL_RE = re.compile(rf"\b{_DEAL_VERBS}\b[^.;:|]{{0,40}}?{_FUNDING_OBJECT}", re.I)
 _DEAL_WORDS_RE = re.compile(r"\b(?:acqui\w*|merger|buyout|takeover|contracts?|deals?|orders?|sale|tender|"
@@ -708,8 +755,8 @@ _ROLE = (r"(?:c[etfomirp]o|ciso|chief\s+[\w-]+(?:\s+[\w-]+)?\s+officer|chief|pre
          r"head(?!\s*-?\s*(?:count|quarters?|lines?))|vp|svp|evp|vice\s+president|managing\s+director|director|"
          r"general\s+manager|country\s+manager)\b")
 _LEADIN = r"(?:(?:its|the|their|a|an|new|first|next|interim|acting|permanent|global|group|regional|senior|executive)\s+)*"
-_APPOINT_VERBS = (r"(?:appoint(?:s|ed)?|nam(?:es|ed)|name|hir(?:es|ed)|hire|tap(?:s|ped)?|promot(?:es|ed)|promote|"
-                  r"welcom(?:es|ed)|welcome|elevat(?:es|ed)|elevate)")
+_APPOINT_VERBS = (r"(?:appoint(?:s|ed)?|appointments?|nam(?:es|ed)|name|hir(?:es|ed)|hire|tap(?:s|ped)?|"
+                  r"promot(?:es|ed)|promote|welcom(?:es|ed)|welcome|elevat(?:es|ed)|elevate)")
 _JOB_RES = (
     re.compile(rf"\b{_APPOINT_VERBS}\b(?:\s+[^\s,;:]+){{0,6}}?\s*,?\s+(?:as\s+|to\s+(?:the\s+role\s+of\s+)?)?"
                rf"{_LEADIN}(?P<role>{_ROLE})", re.I),
@@ -720,6 +767,9 @@ _ROLE_END_RE = re.compile(r"\s*(?:[,;:|(]|\s[-–—]\s)|\s+(?:amid|ahead|after|
                           r"during|in|on|to|for|effective|replacing|succeeding)\s", re.I)
 _SENIOR_RE = re.compile(r"\b(?:c[etfomirp]o|ciso|chief|president|chair\w*|vp|svp|evp|vice\s+president|head|"
                         r"managing\s+director|general\s+manager|founder)\b", re.I)
+# "Acme enters administration", "Acme expands layoffs": not growth news.
+_DISTRESS_RE = re.compile(r"\b(?:administration|liquidation|bankrupt\w*|insolven\w*|receivership|layoffs?|lays?\s+off|"
+                          r"job\s+cuts|shut(?:s|ting)?\s+down|winds?\s+down|probe|investigation|lawsuit)\b", re.I)
 _EXPANSION_RE = re.compile(
     r"\b(?:open(?:s|ed|ing)?(?![-\s]?source)|expand(?:s|ed|ing)?|expansion|enter(?:s|ed|ing)?|launch(?:es|ed)?\s+in|"
     r"relocat(?:es|ed|ing|ion)|relocate|mov(?:es|ed|ing)\s+(?:its\s+)?(?:hq|headquarters)|sets?\s+up|"
@@ -766,17 +816,72 @@ _FUNCTION_WORDS = frozenset("""
     as in to for with on at by after amid from over into is are was were will can may could would should
     why how what who this that it its the a an his her their our says said while than then but or if
 """.split())
-_GENERIC_ACCOUNTS = frozenset("""
-    startup startups company companies firm fintech insurtech proptech platform unicorn investors report
-    government ministry dubai uae abu dhabi saudi arabia riyadh qatar doha india china europe eu us u.s.
-    uk america google news
+# Subjects that are not a company (compared lower-case, dots removed; one entry per line may hold spaces).
+_GENERIC_ACCOUNTS = frozenset(line.strip() for line in """
+    startup
+    startups
+    company
+    companies
+    firm
+    fintech
+    insurtech
+    proptech
+    platform
+    unicorn
+    investors
+    report
+    government
+    ministry
+    news
+    google news
+    dubai
+    uae
+    abu dhabi
+    sharjah
+    saudi
+    saudi arabia
+    ksa
+    riyadh
+    jeddah
+    qatar
+    doha
+    kuwait
+    bahrain
+    oman
+    egypt
+    gcc
+    gulf
+    mena
+    middle east
+    india
+    china
+    japan
+    singapore
+    hong kong
+    europe
+    eu
+    uk
+    britain
+    us
+    usa
+    america
+    united states
+    united kingdom
+    germany
+    france
+    london
+    new york
+""".splitlines() if line.strip())
+# Leading words that describe the subject in a Title Case headline ("Startup Acme Raises $5M").
+_LEADING_DESCRIPTORS = frozenset("""
+    startup start-up scaleup scale-up unicorn fintech insurtech proptech healthtech edtech legaltech
 """.split())
 _DESCRIPTOR_TOKEN_RE = re.compile(rf"^(?:{_DESCRIPTOR_WORDS})$", re.I)
 _NOT_NAME = frozenset("""
     former new ex exec executive executives veteran industry its the chief head senior global group board
     interim acting president director officer leader expert partner founder cofounder co-founder banker
     lawyer team top key two three four five ceo cto cfo coo cmo cro cio vp svp evp as to and of for with
-    investor analyst insider alum alumnus manager staff hire hires
+    investor analyst insider alum alumnus manager staff hire hires appointment appointments announces
 """.split())
 
 
@@ -799,7 +904,8 @@ def analyze_headline(title: str) -> Headline:
     """Classify a news headline and pull out the company (and appointed person) it is about."""
     text = re.sub(r"\s+", " ", (title or "").replace("‘", "'").replace("’", "'")).strip()
     kind, role = _classify(text)
-    info = Headline(kind=kind, role=role, expansion=bool(_EXPANSION_RE.search(text)))
+    info = Headline(kind=kind, role=role,
+                    expansion=bool(_EXPANSION_RE.search(text)) and not _DISTRESS_RE.search(text))
     if kind == "funding":
         money = re.search(_MONEY, text, re.I)
         info.amount = money.group(0).strip().rstrip(".,") if money else ""
@@ -808,6 +914,8 @@ def analyze_headline(title: str) -> Headline:
         info.person, info.account = _job_parties(text)
         if info.account:  # "named CEO of Acme": the role is "CEO"
             info.role = re.sub(rf"\s+(?:of|at)\s+{re.escape(info.account)}$", "", info.role, flags=re.I)
+        if info.person and info.person.lower() in info.role.lower():
+            info.role = _new_role(text, info.person, info.role)
     if not info.account:
         info.account = _account_from_subject(text)
     return info
@@ -816,6 +924,10 @@ def analyze_headline(title: str) -> Headline:
 def _classify(text: str) -> tuple[str, str]:
     """(kind, role). The verb that comes first wins when a headline matches both kinds."""
     candidates: list[tuple[int, str, str]] = []
+    for m in _FUNDING_RAISE_RE.finditer(text):
+        if not _NOT_RAISED_RE.search(m.group("gap")):
+            candidates.append((m.start(), "funding", ""))
+            break
     for regex in _FUNDING_VERB_RES:
         if m := regex.search(text):
             candidates.append((m.start(), "funding", ""))
@@ -880,9 +992,19 @@ def _plausible_person(candidate: str) -> str:
     return ""
 
 
+def _new_role(text: str, person: str, role: str) -> str:
+    """"Acme promotes CFO Jane Doe to CEO": the new role follows the person, the old one precedes them."""
+    if m := re.search(rf"{re.escape(person)}\s*,?\s+(?:as|to)\s+(?:the\s+role\s+of\s+)?{_LEADIN}(?P<role>{_ROLE})",
+                      text, re.I):
+        return _role_text(text, m.start("role"))
+    return re.sub(r"\s+", " ", re.sub(re.escape(person), " ", role, flags=re.I)).strip(" ,")
+
+
 def _name_token(token: str) -> bool:
     core = token.strip(".'’")
     if not core or any(ch.isdigit() for ch in core) or core.lower() in _NOT_NAME:
+        return False
+    if re.search(r"['’]s$", token):  # "Google's Jane Doe": the possessive is the employer, not the name
         return False
     return not (len(core) >= 3 and core.isupper())
 
@@ -891,20 +1013,30 @@ def clean_account(name: str) -> str:
     """A plausible company name from a regex capture, or "" when it looks generic or wrong."""
     name = re.sub(r"(?:'s|’s|')$", "", (name or "").strip()).strip(" .,:;-")
     tokens = name.split()
-    # "Fintech Firm Ledgerly" (Title Case headline): drop the descriptor words in front of the name.
+    # "Fintech Firm Ledgerly" / "Startup Acme" (Title Case headline): drop descriptor words in front.
     cut = 0
     for i, token in enumerate(tokens):
-        if _DESCRIPTOR_TOKEN_RE.match(token) and (i > 0 or token.lower().endswith(("-based", "-backed"))):
+        if (_DESCRIPTOR_TOKEN_RE.match(token) and (i > 0 or token.lower().endswith(("-based", "-backed")))) or \
+                (i == cut and i < len(tokens) - 1 and token.lower() in _LEADING_DESCRIPTORS):
             cut = i + 1
     tokens = tokens[cut:]
+    # "India's Zepto", "Abu Dhabi's ADQ": a place in the possessive is not part of the name.
+    for i, token in enumerate(tokens[:-1]):
+        if token.endswith(("'s", "’s")) and _is_generic(" ".join(tokens[:i] + [token[:-2]])):
+            tokens = tokens[i + 1:]
+            break
     if not tokens or len(tokens) > 6:
         return ""
     if tokens[0].lower() in _BAD_FIRST or any(t.lower() in _FUNCTION_WORDS for t in tokens[1:]):
         return ""
     name = " ".join(tokens)
-    if name.lower() in _GENERIC_ACCOUNTS or not 2 <= len(name) <= 60:
+    if _is_generic(name) or not 2 <= len(name) <= 60:
         return ""
     return name
+
+
+def _is_generic(name: str) -> bool:
+    return re.sub(r"\s+", " ", name.lower().replace(".", "")).strip() in _GENERIC_ACCOUNTS
 
 
 def vet_account(name: str, company: Company) -> tuple[str, str]:

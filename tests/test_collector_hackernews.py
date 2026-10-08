@@ -6,6 +6,7 @@ Fixtures in tests/fixtures/hackernews mirror the recorded Algolia payloads from 
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -28,11 +29,15 @@ FIXTURES = Path(__file__).parent / "fixtures" / "hackernews"
 SINCE = datetime(2026, 9, 24, tzinfo=timezone.utc)
 SINCE_TS = 1790208000
 SEARCH = "https://hn.algolia.com/api/v1/search_by_date"
-THREAD = "45400001"
+THREAD = "45400001"        # "Who is hiring? (October 2026)", posted after SINCE
+PREV_THREAD = "45100001"   # "Who is hiring? (September 2026)"
+# SINCE (Sep 24) is before the October thread was posted, so September's thread is searched too.
+HIRING_TAGS = f"comment,(story_{THREAD},story_{PREV_THREAD})"
+LATEST_ONLY_TAGS = f"comment,story_{THREAD}"
 
 FINDER = ("story,author_whoishiring", None)
-HIRING_EA = (f"comment,story_{THREAD}", "Executive Assistant")
-HIRING_TRAVEL = (f"comment,story_{THREAD}", "Travel")
+HIRING_EA = (HIRING_TAGS, "Executive Assistant")
+HIRING_TRAVEL = (HIRING_TAGS, "Travel")
 BLACKLANE = ("(story,comment)", "Blacklane")
 CHAUFFEUR = ("(story,comment)", "chauffeur")
 CAREEM = ("(story,comment)", "Careem Business")
@@ -46,6 +51,8 @@ ROUTES = {
     CHAUFFEUR: "search_chauffeur.json",
     CAREEM: "search_careem_business.json",
     CORP_TRAVEL: "search_corporate_travel.json",
+    (LATEST_ONLY_TAGS, "Executive Assistant"): "hiring_executive_assistant.json",
+    (LATEST_ONLY_TAGS, "Travel"): "hiring_travel.json",
 }
 EMPTY_PAGE = {"hits": [], "hitsPerPage": 50, "nbHits": 0, "nbPages": 0, "page": 0, "query": ""}
 
@@ -80,13 +87,14 @@ class FakeAlgolia:
         return [(r.url.params.get("tags"), r.url.params.get("query")) for r in self.requests]
 
 
-async def run(company: Company, handler: FakeAlgolia, *, since: datetime = SINCE,
-              max_items: int = 200) -> tuple[list[RawSignal], CollectContext]:
-    collector = HackerNewsCollector()
+async def run(company: Company, handler: FakeAlgolia, *, since: datetime = SINCE, max_items: int = 200,
+              collector: HackerNewsCollector | None = None,
+              settings: Any = None) -> tuple[list[RawSignal], CollectContext]:
+    collector = collector or HackerNewsCollector()
     collector.request_interval = 0
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler),
                                  headers={"User-Agent": "OpenBerry-test"}) as client:
-        ctx = CollectContext(client=client, since=since, settings=get_settings(), max_items=max_items)
+        ctx = CollectContext(client=client, since=since, settings=settings or get_settings(), max_items=max_items)
         signals = await collector.collect(company, ctx)
     return signals, ctx
 
@@ -103,7 +111,7 @@ def configure(company: Company, *, competitors: list[str] | None = None, **signa
 
 
 ALL_IDS = {
-    "hn:hiring:45401001", "hn:hiring:45401003", "hn:hiring:45401010",
+    "hn:hiring:45401001", "hn:hiring:45401003", "hn:hiring:45401010", "hn:hiring:45101007",
     "hn:45410001", "hn:45410002", "hn:45410003", "hn:45410008",
     "hn:45410020", "hn:45410021", "hn:45410030",
 }
@@ -148,8 +156,11 @@ async def test_sends_expected_requests(company):
     assert api.keys == [FINDER, HIRING_EA, HIRING_TRAVEL, BLACKLANE, CHAUFFEUR, CAREEM, CORP_TRAVEL]
     params = [dict(r.url.params) for r in api.requests]
     assert params[0] == {"tags": "story,author_whoishiring", "hitsPerPage": "10"}
-    assert params[1] == {"query": "Executive Assistant", "tags": f"comment,story_{THREAD}",
+    assert params[1] == {"query": "Executive Assistant", "tags": HIRING_TAGS,
                          "numericFilters": f"created_at_i>{SINCE_TS}", "hitsPerPage": "100"}
+    assert str(api.requests[1].url) == (
+        f"{SEARCH}?query=Executive+Assistant&tags=comment%2C%28story_{THREAD}%2Cstory_{PREV_THREAD}%29"
+        f"&numericFilters=created_at_i%3E{SINCE_TS}&hitsPerPage=100")
     assert params[3] == {"query": "Blacklane", "tags": "(story,comment)",
                          "numericFilters": f"created_at_i>{SINCE_TS}", "hitsPerPage": "50"}
     assert str(api.requests[3].url) == (
@@ -158,6 +169,7 @@ async def test_sends_expected_requests(company):
         assert request.method == "GET"
         assert request.headers["accept"] == "application/json"
         assert request.headers["user-agent"] == "OpenBerry-test"  # the shared client's headers are kept
+        assert request.extensions["timeout"]["read"] == hn.REQUEST_TIMEOUT_SECONDS
 
 
 async def test_enabled_types_limit_queries(company):
@@ -246,9 +258,18 @@ async def test_maps_who_is_hiring_posts_to_account_signals(company):
     globex = found["hn:hiring:45401010"]
     assert (globex.account, globex.account_domain) == ("Globex", "globex.example")
     assert globex.signal.title == "Hiring: Travel Manager"
-    # Replies (45401002), deleted posts (45401005), posts without a "Company | Role" headline
-    # (45401006) and prefix-only matches ("traveling", 45401011) are not hiring signals.
-    assert not {"hn:hiring:45401002", "hn:hiring:45401005", "hn:hiring:45401006", "hn:hiring:45401011"} & set(found)
+    # Replies (45401002, 45101008), deleted posts (45401005), posts without a "Company | Role"
+    # headline (45401006) and prefix-only matches ("traveling", 45401011) are not hiring signals.
+    assert not {"hn:hiring:45401002", "hn:hiring:45101008", "hn:hiring:45401005", "hn:hiring:45401006",
+                "hn:hiring:45401011"} & set(found)
+
+    # A late post in last month's thread, still inside the scan window. careers.<domain> is reduced
+    # to the company's own domain.
+    umbrella = found["hn:hiring:45101007"]
+    assert (umbrella.account, umbrella.account_domain) == ("Umbrella Travel Group", "umbrella-travel.example")
+    assert umbrella.signal.title == "Hiring: Corporate Travel Manager"
+    assert umbrella.signal.raw["thread_id"] == PREV_THREAD
+    assert umbrella.signal.raw["thread_title"] == "Ask HN: Who is hiring? (September 2026)"
 
 
 async def test_picks_latest_who_is_hiring_thread(company):
@@ -282,7 +303,11 @@ async def test_only_items_newer_than_since(company):
     assert "numericFilters" not in api.requests[0].url.params  # the thread finder is not time-filtered
     assert [r.url.params["numericFilters"] for r in api.requests[1:]] == [expected] * (len(api.requests) - 1)
     found = by_id(signals)
+    # The October thread predates `since`, so September's thread is no longer searched.
+    assert [tags for tags, _ in api.keys[1:3]] == [LATEST_ONLY_TAGS, LATEST_ONLY_TAGS]
     assert "hn:hiring:45401001" not in found and "hn:hiring:45401003" not in found  # Oct 1
+    assert "hn:hiring:45101007" not in found  # previous thread
+    assert "hn:hiring:45401010" in found  # Oct 2 08:00
     assert "hn:45410008" in found  # Oct 2 07:00
     assert all(r.signal.occurred_at > since for r in signals)
 
@@ -327,7 +352,7 @@ async def test_hiring_keywords_are_capped_within_the_budget(company):
     api = FakeAlgolia()
     _, ctx = await run(company, api)
     assert len(api.requests) == 12
-    hiring_queries = [q for tags, q in api.keys if tags == f"comment,story_{THREAD}"]
+    hiring_queries = [q for tags, q in api.keys if tags == HIRING_TAGS]
     assert hiring_queries == ["Role 0", "Role 1", "Role 2", "Role 3"]
     assert any("first 4 of 6 hiring keywords" in w for w in ctx.warnings)
 
@@ -442,6 +467,68 @@ async def test_bad_hits_are_skipped_not_fatal(company):
     assert not {"hn:1", "hn:2", "hn:3", "hn:4"} & set(found)
 
 
+async def test_malformed_hits_warn_once_per_query(company):
+    page = fixture("search_blacklane.json")
+    page["hits"] = [{"objectID": str(i), "author": "a", "created_at_i": 1790900000, "_tags": 5,
+                     "title": "Blacklane"} for i in (1, 2)] + page["hits"]
+    api = FakeAlgolia({BLACKLANE: httpx.Response(200, json=page)})
+    signals, ctx = await run(configure(company, hiring_keywords=[]), api)
+    assert "hn:45410001" in by_id(signals)
+    assert ctx.warnings == ["Hacker News: skipped 2 malformed result(s) for 'Blacklane' (TypeError)"]
+
+
+# --------------------------------------------------------------------------------------
+# Review fixes: semantics, time handling, time budget
+# --------------------------------------------------------------------------------------
+
+
+async def test_job_thread_comments_are_not_mentions(company):
+    signals, _ = await run(company, FakeAlgolia())
+    found = by_id(signals)
+    # A CV in "Who wants to be hired?" and a job ad in "Who is hiring?" both contain a keyword,
+    # but neither is the author's buying intent.
+    assert "hn:45400777" not in found and "hn:45401020" not in found
+    seeker = fixture("search_corporate_travel.json")["hits"][1]
+    assert seeker["story_title"].startswith("Ask HN: Who wants to be hired?")
+    assert hn.mention_signal(seeker, "corporate travel", "keyword_mention", SINCE) is None
+    freelancer = {**seeker, "story_title": "Ask HN: Freelancer? Seeking freelancer? (October 2026)"}
+    assert hn.mention_signal(freelancer, "corporate travel", "keyword_mention", SINCE) is None
+    ordinary = {**seeker, "story_title": "Ask HN: How do you manage corporate travel?"}
+    assert hn.mention_signal(ordinary, "corporate travel", "keyword_mention", SINCE) is not None
+
+
+async def test_naive_since_is_treated_as_utc(company):
+    aware, _ = await run(company, FakeAlgolia())
+    api = FakeAlgolia()
+    naive, ctx = await run(company, api, since=SINCE.replace(tzinfo=None))
+    assert ctx.warnings == []
+    assert [r.signal.external_id for r in naive] == [r.signal.external_id for r in aware]
+    assert api.requests[1].url.params["numericFilters"] == f"created_at_i>{SINCE_TS}"
+
+
+async def test_time_budget_stops_new_requests(company):
+    ticks = iter(range(0, 10_000, 25))  # every clock reading is 25 s later than the previous one
+    collector = HackerNewsCollector()
+    collector.time_budget = 60
+    collector.clock = lambda: float(next(ticks))
+    api = FakeAlgolia()
+    signals, ctx = await run(company, api, collector=collector)
+    assert api.keys == [FINDER, HIRING_EA]  # third request would start at t=75 s > 60 s budget
+    assert any("time budget" in w for w in ctx.warnings)
+    assert {r.signal.external_id for r in signals} == {"hn:hiring:45401001", "hn:hiring:45401003"}
+
+
+async def test_request_timeout_is_capped_below_the_collector_timeout(company):
+    slow = dataclasses.replace(get_settings(), http_timeout=90.0)
+    api = FakeAlgolia()
+    await run(company, api, settings=slow)
+    assert {r.extensions["timeout"]["read"] for r in api.requests} == {hn.REQUEST_TIMEOUT_SECONDS}
+    fast = dataclasses.replace(get_settings(), http_timeout=5.0)
+    api = FakeAlgolia()
+    await run(company, api, settings=fast)
+    assert {r.extensions["timeout"]["read"] for r in api.requests} == {5.0}
+
+
 # --------------------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------------------
@@ -463,9 +550,43 @@ def test_parse_headline(headline, keyword, expected):
 def test_company_domain_skips_job_boards():
     html = ('Acme | EA | <a href="https:&#x2F;&#x2F;jobs.ashbyhq.com&#x2F;acme">x</a> '
             '<a href="https:&#x2F;&#x2F;www.acme.example&#x2F;jobs">acme</a>')
-    assert hn.company_domain(html) == "acme.example"
-    assert hn.company_domain("Acme | EA | https://boards.greenhouse.io/acme") == ""
-    assert hn.company_domain("Acme | EA | Remote") == ""
+    assert hn.company_domain(html, "Acme") == "acme.example"
+    assert hn.company_domain("Acme | EA | https://boards.greenhouse.io/acme", "Acme") == ""
+    assert hn.company_domain("Acme | EA | Remote", "Acme") == ""
+
+
+@pytest.mark.parametrize(("headline", "company", "expected"), [
+    # Multi-tenant job hosts must never become the account domain: every company using them
+    # would share the identity key acct:d:<host> and merge into one account lead.
+    ("Initech | Travel Manager | https://jobs.gem.com/initech", "Initech", ""),
+    ("Hooli | EA | https://hooli.wd5.myworkdayjobs.com/en-US/careers", "Hooli", ""),
+    ("Hooli | EA | https://some-ats.example/hooli/apply", "Hooli", ""),  # unknown host, no resemblance
+    ("Hooli | EA | https://careers.hooli.com/jobs/1", "Hooli", "hooli.com"),
+    ("Acme Bank (YC W20) | EA | https://acme.io", "Acme Bank", "acme.io"),
+    ("Acme | EA | https://getacme.com/careers", "Acme", "getacme.com"),
+    ("IBM | EA | https://www.ibm.com", "IBM", "ibm.com"),
+    ("acme.example | Travel Manager", "acme.example", "acme.example"),  # bare-domain company name
+])
+def test_company_domain_requires_resemblance(headline, company, expected):
+    assert hn.company_domain(headline, company) == expected
+
+
+def test_hiring_threads_cover_the_scan_window():
+    stories = fixture("whoishiring_stories.json")["hits"]
+    early = hn.hiring_threads(stories, datetime(2026, 9, 24, tzinfo=timezone.utc))
+    assert [t.id for t in early] == [THREAD, PREV_THREAD]  # window reaches back into September
+    late = hn.hiring_threads(stories, datetime(2026, 10, 2, tzinfo=timezone.utc))
+    assert [t.id for t in late] == [THREAD]
+    assert hn.hiring_threads([s for s in stories if "hiring?" not in s["title"]], SINCE) == []
+
+
+def test_hiring_headline_after_a_leading_paragraph_tag():
+    threads = {THREAD: hn.HiringThread(id=THREAD, title="Ask HN: Who is hiring? (October 2026)")}
+    hit = {"objectID": "9", "author": "x", "parent_id": int(THREAD), "created_at_i": 1790900000,
+           "comment_text": "<p>Hooli | Travel Manager | NYC<p>Run our travel desk."}
+    raw = hn.hiring_signal(hit, "Travel Manager", threads, SINCE)
+    assert raw is not None
+    assert (raw.account, raw.signal.title, raw.signal.strength) == ("Hooli", "Hiring: Travel Manager", 60)
 
 
 @pytest.mark.parametrize(("args", "expected"), [
@@ -521,13 +642,6 @@ async def test_ingest_creates_scored_leads(company):
     assert again.signals_new == 0 and again.signals_duplicate == len(ALL_IDS)
 
 
-_HN_IDS_COLLAPSE = (repo.lead_identity_keys(hn.hn_lead("alice"), "person")
-                    == repo.lead_identity_keys(hn.hn_lead("bob"), "person"))
-
-
-@pytest.mark.xfail(_HN_IDS_COLLAPSE, strict=True,
-                   reason="repo.lead_identity_keys drops the ?id= query of HN profile URLs, so every HN user "
-                          "shares one identity key (core change requested)")
 async def test_each_hn_author_is_a_distinct_lead(company):
     signals, _ = await run(company, FakeAlgolia())
     authors = {r.lead.full_name for r in signals if r.lead is not None}

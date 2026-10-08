@@ -40,8 +40,10 @@ Time
 
 Limits and politeness
     None of the three APIs documents a GET rate limit. Boards are fetched one at a time with a short
-    pause, at most MAX_BOARDS_PER_SCAN boards per scan (the checked set rotates daily when more are
-    configured) and MAX_REQUESTS_PER_SCAN requests in total, Lever EU retries included. A provider is
+    pause, at most MAX_BOARDS_PER_SCAN boards per scan (when more are configured the checked set moves
+    on by MAX_BOARDS_PER_SCAN each day, so each board is still checked every few days, well inside
+    the lookback window) and MAX_REQUESTS_PER_SCAN requests in total, Lever EU retries included.
+    Each request has a wall-clock cap (request_timeout). A provider is
     skipped for the rest of the scan after HTTP 429, 401/403 (usually a firewall block), a zero
     rate-limit-remaining header or three failures in a row. Fetching also stops once ctx.max_items
     signals are found or the time budget (kept below the scan's per-collector timeout) runs out.
@@ -73,6 +75,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from ..models import Company, JobBoard, SignalIn
+from ..repo import company_key
 from ..scoring import phrase_in
 from .base import CollectContext, Collector, RawSignal, parse_time, strip_html, truncate
 
@@ -103,10 +106,13 @@ class JobBoardsCollector(Collector):
     signal_types = ("hiring",)
     requires = "job_boards (plus hiring keywords or ICP job titles to match)"
 
-    # Seconds between two requests, and seconds after which no new request starts. Kept well under
-    # services.COLLECTOR_TIMEOUT_SECONDS so a slow scan returns what it has instead of being cancelled.
+    # Seconds between two requests, seconds after which no new request starts, and the wall-clock cap
+    # on one request (body included: httpx timeouts are per read, so a slowly trickling multi-MB board
+    # is not bounded by them). time_budget + request_timeout stays under
+    # services.COLLECTOR_TIMEOUT_SECONDS, so a slow scan returns what it has instead of being cancelled.
     request_interval: float = 0.25
     time_budget: float = 90.0
+    request_timeout: float = 25.0
 
     def is_configured(self, company: Company) -> bool:
         return bool(company.signals.job_boards)
@@ -123,7 +129,8 @@ class JobBoardsCollector(Collector):
         boards = select_boards(company.signals.job_boards, ctx)
         since = _utc(ctx.since)
         now = datetime.now(timezone.utc).replace(microsecond=0)
-        fetcher = _Fetcher(ctx, MAX_REQUESTS_PER_SCAN, self.request_interval, self.time_budget)
+        fetcher = _Fetcher(ctx, MAX_REQUESTS_PER_SCAN, self.request_interval, self.time_budget,
+                           self.request_timeout)
         found: list[_Match] = []
         seen: set[str] = set()
         open_roles: Counter[str] = Counter()
@@ -187,13 +194,22 @@ def hiring_terms(company: Company) -> tuple[list[str], str]:
 
 
 def select_boards(boards: list[JobBoard], ctx: CollectContext) -> list[JobBoard]:
-    """Unique boards (provider + token, case-insensitive), at most MAX_BOARDS_PER_SCAN, rotated daily."""
+    """Unique boards (provider + token, case-insensitive), at most MAX_BOARDS_PER_SCAN, rotated daily.
+
+    The window moves by a whole MAX_BOARDS_PER_SCAN each day, so every board is checked at least once
+    every ceil(n / MAX_BOARDS_PER_SCAN) days. Moving it by one board a day would leave boards
+    unchecked for weeks, longer than the lookback window, and their new postings would never be seen.
+    """
     unique: dict[tuple[str, str], JobBoard] = {}
     for board in boards:
+        if not board.token.strip("."):
+            # "." / ".." pass the model's token check, but httpx collapses them into another API path.
+            ctx.warn(f"{board.provider} board '{board.token}': not a valid board token; skipped")
+            continue
         unique.setdefault((board.provider, board.token.lower()), board)
     out = list(unique.values())
     if len(out) > MAX_BOARDS_PER_SCAN:
-        start = ctx.since.date().toordinal() % len(out)
+        start = (ctx.since.date().toordinal() * MAX_BOARDS_PER_SCAN) % len(out)
         out = out[start:] + out[:start]
         ctx.warn(f"Job boards: {len(out)} boards configured but only {MAX_BOARDS_PER_SCAN} are checked "
                  "per scan; the checked set rotates daily")
@@ -210,12 +226,21 @@ def role_strength(open_matching_roles: int) -> int:
 
 
 def account_name(board: JobBoard, postings: list[Posting]) -> str:
+    """The board's company name, else the name Greenhouse reports, else the token.
+
+    models.parse_job_boards fills a missing company with the token ("greenhouse:discord" ->
+    company "discord"), so a company equal to the token counts as unset and the reported name wins.
+    """
     named = next((p.company_name for p in postings if p.company_name), "")
-    return board.company.strip() or named or board.token
+    company = board.company.strip()
+    if company and company.lower() != board.token.lower():
+        return company
+    return named or company or board.token
 
 
 def _account_key(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", name.lower())
+    """Same identity as an account lead (repo.company_key: case, punctuation and 'Ltd'/'Inc' ignored)."""
+    return company_key(name) or name.strip().lower()
 
 
 # --------------------------------------------------------------------------------------
@@ -438,10 +463,12 @@ PROVIDERS: dict[str, _Provider] = {
 class _Fetcher:
     """Sequential, capped GETs with per-provider back-off. Never raises; warns instead."""
 
-    def __init__(self, ctx: CollectContext, max_requests: int, interval: float, time_budget: float) -> None:
+    def __init__(self, ctx: CollectContext, max_requests: int, interval: float, time_budget: float,
+                 request_timeout: float) -> None:
         self.ctx = ctx
         self.max_requests = max_requests
         self.interval = interval
+        self.request_timeout = request_timeout
         self.deadline = time.monotonic() + time_budget
         self.used = 0
         self.stopped: set[str] = set()
@@ -477,8 +504,10 @@ class _Fetcher:
             await asyncio.sleep(self.interval)
         self.used += 1
         try:
-            resp = await self.ctx.client.get(url, params=provider.params, headers={"Accept": "application/json"})
-        except httpx.TimeoutException:
+            resp = await asyncio.wait_for(
+                self.ctx.client.get(url, params=provider.params, headers={"Accept": "application/json"}),
+                self.request_timeout)
+        except (httpx.TimeoutException, asyncio.TimeoutError):
             self._fail(name, f"{name} board '{token}': request timed out")
             return _Outcome.FAILED, None
         except Exception as exc:  # transport errors, invalid URLs...: one board must not sink the scan

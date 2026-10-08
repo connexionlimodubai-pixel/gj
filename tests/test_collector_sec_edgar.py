@@ -208,6 +208,31 @@ async def test_without_contact_email_nothing_is_fetched(company):
         "SEC EDGAR needs a contact e-mail: set OPENBERRY_CONTACT_EMAIL or the company contact e-mail"]
 
 
+async def test_non_ascii_email_is_not_sent_in_the_user_agent(company, settings):
+    # Review fix: a non-ASCII address passed the e-mail check and made httpx raise UnicodeEncodeError
+    # out of collect(). Such an address is now unusable: fall back to the next one, or warn.
+    settings.contact_email = "josé@acme.example"
+    handler = FakeEdgar()
+    await run(configure(company, contact_email="sales@acme.example"), handler)
+    assert {r.headers["User-Agent"] for r in handler.requests} == {"OpenBerry sales@acme.example"}
+
+    handler = FakeEdgar()
+    signals, ctx = await run(configure(company, contact_email="ops@exämple.com"), handler)
+    assert signals == [] and handler.requests == []
+    assert ctx.warnings == [sec_edgar.BAD_EMAIL_WARNING]
+
+
+async def test_request_that_cannot_be_built_is_a_warning(company, monkeypatch):
+    # Belt and braces: whatever httpx raises while encoding the request is a warning, not a crash.
+    monkeypatch.setattr(sec_edgar, "contact_email", lambda settings, company: "josé@acme.example")
+    handler = FakeEdgar()
+    signals, ctx = await run(configure(company), handler)
+    assert signals == [] and handler.requests == []
+    assert ctx.warnings[:2] == [
+        'SEC EDGAR search "logistics software" (Form D): request failed (UnicodeEncodeError)',
+        'SEC EDGAR search "logistics software" (8-K): request failed (UnicodeEncodeError)']
+
+
 async def test_quoted_queries_are_sent_unchanged(company):
     boolean = '"freight audit" OR "fleet telematics"'
     handler = FakeEdgar()
@@ -315,11 +340,59 @@ async def test_8k_signal_fields(company):
     ("Capria Opportunities, LP - Eduvanz Series  (CIK 0002052988)",
      ("Capria Opportunities, LP - Eduvanz Series", [], "0002052988")),
     ("Smith &amp; Rowe Freight, Inc.  (CIK 0002095555)", ("Smith & Rowe Freight, Inc.", [], "0002095555")),
+    ("WELLS FARGO & COMPANY/MN (WFC) (CIK 0000072971)", ("WELLS FARGO & COMPANY", ["WFC"], "0000072971")),
+    ("ACME HOLDINGS CORP /DE/ /NEW/  (CIK 0000000042)", ("ACME HOLDINGS CORP", [], "0000000042")),
     ("Plain Name", ("Plain Name", [], "")),
     ("", ("", [], "")),
 ])
 def test_split_display_name(display, expected):
     assert split_display_name(display) == expected
+
+
+async def test_cik_comes_from_the_named_filer(company):
+    # Review fix: with co-registrants, ciks[] and display_names[] need not share an order; the url and
+    # raw cik used ciks[0] even when the account name was another filer's.
+    hit = make_hit(1, form="8-K", items=["5.02", "9.01"])
+    hit["_source"].update({
+        "ciks": ["0000000333", "0000000222"],
+        "display_names": ["Parent Freight Corp (PFC) (CIK 0000000222)", "Parent Freight Sub LLC  (CIK 0000000333)"],
+        "adsh": "0000000222-26-000009"})
+    signals, _ = await run(configure(company, enabled_types=["job_change"]),
+                           FakeEdgar(routes={(Q, "8-K", 0): page([hit])}))
+    [only] = signals
+    assert only.account == "Parent Freight Corp"
+    assert only.signal.raw["cik"] == "222"
+    assert only.signal.url == "https://www.sec.gov/Archives/edgar/data/222/000000022226000009/"
+
+
+async def test_hits_of_other_forms_are_never_signals(company):
+    # Review fix: if EFTS ignored or changed the `forms` filter, a 10-K matching the query became a
+    # "Form D filing" funding signal. Hits must be the searched form (root_forms or form).
+    ten_k = make_hit(2, form="10-K", items=[])
+    s1 = make_hit(3, form="S-1", items=[])
+    s1["_source"]["form"] = None                       # root_forms alone is enough to tell
+    good = make_hit(4)
+    handler = FakeEdgar(routes={(Q, "D", 0): page([ten_k, s1, good])})
+    signals, ctx = await run(configure(company, enabled_types=["funding"]), handler)
+    assert ids(signals) == ["sec_edgar:D:0002100004-26-000004"]
+    assert ctx.warnings == [(f'SEC EDGAR search "{QUERY}" (Form D): ignored 2 hit(s) of other forms '
+                             "(the search API may have changed)")]
+
+
+async def test_summary_hides_edgar_country_codes_and_keeps_boolean_queries_readable(company):
+    # Review fix: EDGAR's foreign codes ("E9" = Cayman Islands, "X0" = UK) read as noise to a salesperson,
+    # and a boolean query was wrapped in a second pair of quotes.
+    boolean = '"freight audit" OR "fleet telematics"'
+    hit = make_hit(5, form="8-K", items=["5.02"])
+    hit["_source"].update({"biz_locations": ["London, X0"], "inc_states": ["E9"]})
+    signals, _ = await run(configure(company, sec_queries=[boolean], enabled_types=["job_change"]),
+                           FakeEdgar(routes={(boolean, "8-K", 0): page([hit])}))
+    summary = signals[0].signal.summary
+    assert "Based in London." in summary
+    assert "X0" not in summary and "E9" not in summary and "incorporated" not in summary
+    assert f"Matched SEC full-text search {boolean}." in summary
+    assert signals[0].signal.raw["inc_states"] == ["E9"]            # raw keeps the code
+    assert signals[0].signal.raw["biz_locations"] == ["London, X0"]
 
 
 @pytest.mark.parametrize(("name", "items", "fund"), [
@@ -569,6 +642,12 @@ async def test_ingest_creates_scored_account_leads(company):
     person = repo.get_lead(person.id)
     assert person.intent_score > 0
     assert any("(company)" in reason for reason in person.score_reasons)
+
+    # The same company under its EDGAR conformed name merges into the existing account.
+    conformed = make_hit(9, form="8-K", items=["5.02"], name="ROUTELOGIC HOLDINGS INC. /DE/ /NEW/")
+    later, _ = await run(configured, FakeEdgar(routes={(Q, "8-K", 0): page([conformed])}))
+    merged = ingest(company.id, later)
+    assert merged.leads_new == 0 and merged.leads_updated == 1 and merged.signals_new == 1
 
     # The next scan sees the same filings: nothing new.
     again = ingest(company.id, (await run(configured, FakeEdgar()))[0])

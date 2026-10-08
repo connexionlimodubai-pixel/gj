@@ -89,18 +89,41 @@ def normalize_domain(value: str) -> str:
     return v if "." in v else ""
 
 
-def company_key(name: str, domain: str = "") -> str:
-    d = normalize_domain(domain)
-    if d:
-        return f"d:{d}"
+def _name_key(name: str) -> str:
     n = _COMPANY_SUFFIXES.sub(" ", (name or "").lower())
     n = re.sub(r"[^a-z0-9]+", "", n)
     return f"n:{n}" if n else ""
 
 
+def _domain_key(domain: str) -> str:
+    d = normalize_domain(domain)
+    return f"d:{d}" if d else ""
+
+
+def company_key(name: str, domain: str = "") -> str:
+    """The key that links people to their company's account-level intent.
+
+    The normalised name wins because people leads almost always carry a company name but
+    rarely a domain; the domain is the fallback for accounts known only by their website.
+    """
+    return _name_key(name) or _domain_key(domain)
+
+
 def normalize_linkedin(url: str) -> str:
     m = re.search(r"linkedin\.com/(in|company|pub|school)/([^/?#\s]+)", url or "", re.I)
     return f"{m.group(1).lower()}/{m.group(2).lower()}" if m else ""
+
+
+# Query parameters that name the profile itself (news.ycombinator.com/user?id=pg) are part of its
+# identity; any other query parameters (tracking, ?utm_source=...) and fragments are dropped.
+_PROFILE_ID_PARAMS = ("id", "user", "username", "u")
+
+
+def normalize_profile_url(url: str) -> str:
+    base, _, query = re.sub(r"^https?://(www\.)?", "", url.strip().lower()).split("#")[0].partition("?")
+    ident = "&".join(p for p in query.split("&")
+                     if p.partition("=")[0] in _PROFILE_ID_PARAMS and p.partition("=")[2])
+    return base.rstrip("/") + (f"?{ident}" if ident else "")
 
 
 def _norm_name(name: str) -> str:
@@ -111,7 +134,8 @@ def lead_identity_keys(data: LeadIn | Lead, kind: str) -> list[str]:
     keys: list[str] = []
     ckey = company_key(data.lead_company, data.company_domain)
     if kind == "account":
-        return [f"acct:{ckey}"] if ckey else []
+        # Both identities, so "Acme Bank" seen first by name and later with acme.com merge.
+        return [f"acct:{k}" for k in (_name_key(data.lead_company), _domain_key(data.company_domain)) if k]
     if li := normalize_linkedin(data.linkedin_url):
         keys.append(f"li:{li}")
     if data.email and "@" in data.email:
@@ -122,8 +146,7 @@ def lead_identity_keys(data: LeadIn | Lead, kind: str) -> list[str]:
         handle = re.sub(r"^https?://(www\.)?(twitter|x)\.com/", "", data.twitter.strip(), flags=re.I)
         keys.append(f"tw:{handle.lstrip('@').strip('/').lower()}")
     if data.profile_url and not normalize_linkedin(data.profile_url):
-        url = re.sub(r"^https?://(www\.)?", "", data.profile_url.strip().lower()).split("?")[0].rstrip("/")
-        keys.append(f"url:{url}")
+        keys.append(f"url:{normalize_profile_url(data.profile_url)}")
     name = _norm_name(data.full_name)
     if name and ckey:
         keys.append(f"nc:{name}|{ckey}")

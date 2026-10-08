@@ -8,10 +8,12 @@ an Atom blog with relative links, a malformed feed and an HTML block page.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import time
 import re
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -157,7 +159,8 @@ def test_registered_with_declared_metadata():
     assert isinstance(gn, GoogleNewsCollector) and isinstance(rss, RssCollector)
     assert gn.signal_types == ("funding", "company_news", "job_change")
     assert rss.signal_types == ("funding", "job_change", "company_news", "keyword_mention")
-    assert gn.requires == "news_queries" and "rss_feeds" in rss.requires
+    assert gn.requires.startswith("news_queries") and "rss_feeds" in rss.requires
+    assert "non-commercial" in gn.requires  # the feed's own terms, shown in the UI where the source is set up
 
 
 def test_google_news_is_configured(company):
@@ -381,6 +384,40 @@ async def test_google_news_bad_item_is_skipped(company, monkeypatch):
     assert ctx.warnings == ["Google News: skipped 1 malformed result for “Series A fintech” (ValueError)"]
 
 
+async def test_requests_and_host_checks_end_by_the_hard_deadline(company, monkeypatch):
+    """A stalled resolver or slow host must not push the collector past run_scan's 120 s cancel."""
+    timeouts: list[dict[str, float]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"])
+        return xml("rss_techcrunch.xml")
+
+    async def stalled_resolver(url: str) -> None:
+        await asyncio.sleep(3600)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ctx = CollectContext(client=client, since=SINCE, settings=get_settings())
+        fetcher = news._FeedFetcher(ctx, "RSS", max_requests=5, interval=0, budget=60, max_failures=5,
+                                    block_statuses=frozenset({403, 429}), stop_on_block=False, public_only=False)
+        assert fetcher.timeout == news.REQUEST_TIMEOUT
+        fetcher.hard_deadline = time.monotonic() + 6       # 6 s left: lookup, connect and read get 2 s each
+        assert await fetcher.fetch(TC_FEED, "feed techcrunch.com/feed/") is not None
+        assert 0 < timeouts[0]["connect"] <= 2 and 0 < timeouts[0]["read"] <= 2
+
+        monkeypatch.setattr(news, "assert_public_host", stalled_resolver)
+        fetcher.public_only = True
+        fetcher.hard_deadline = time.monotonic() + 0.6
+        started = time.monotonic()
+        assert await fetcher.fetch(BLOG_FEED, "feed blog.example.org/feed.atom") is None
+        assert time.monotonic() - started < 2
+
+        fetcher.hard_deadline = time.monotonic() + 0.1
+        assert await fetcher.fetch(BLOG_FEED, "feed blog.example.org/feed.atom") is None
+    assert len(timeouts) == 1
+    assert ctx.warnings == ["RSS: feed blog.example.org/feed.atom host lookup timed out",
+                            "RSS: feed blog.example.org/feed.atom was skipped: time budget for this scan used up"]
+
+
 async def test_google_news_time_budget(company):
     collector = GoogleNewsCollector()
     collector.time_budget = 0
@@ -495,7 +532,73 @@ async def test_rss_rejects_non_http_feed_urls(company):
     signals, ctx = await run(RssCollector(), company, handler)
     assert handler.urls == [TC_FEED] and signals
     assert len(ctx.warnings) == 4
-    assert all("only http:// and https:// feed URLs are supported" in w for w in ctx.warnings)
+    assert all("not a valid http:// or https:// feed URL" in w for w in ctx.warnings)
+
+
+async def test_rss_invalid_host_names_never_sink_the_scan(company, monkeypatch):
+    """Host names the resolver cannot encode used to raise UnicodeError out of collect(), losing every feed."""
+    from openberry import website
+
+    monkeypatch.setattr(news, "assert_public_host", website.assert_public_host)  # the real check
+    long_label = "https://" + "a" * 64 + ".example.com/rss?token=SECRET"   # 64-char label: invalid syntax
+    unicode_label = "https://" + "ü" * 60 + ".example.com/feed"           # valid syntax, IDNA "label too long"
+    redirect = "https://redirect.example.com/feed"
+    handler = FakeWeb(feeds={redirect: httpx.Response(301, headers={"Location": "https://" + "b" * 70 + ".io/rss"})})
+    company = configure(company, rss_feeds=[long_label, "https://exa..mple.com/rss", unicode_label, redirect, TC_FEED])
+    assert RssCollector().is_configured(company)
+
+    async def tc_is_public(url: str) -> None:  # no DNS in the sandbox: resolve only the hosts that need it
+        if "techcrunch.com" not in url and "redirect.example.com" not in url:
+            await website.assert_public_host(url)
+
+    monkeypatch.setattr(news, "assert_public_host", tc_is_public)
+    signals, ctx = await run(RssCollector(), company, handler)
+    assert handler.urls == [redirect, TC_FEED]
+    assert len(signals) == 6
+    assert ctx.warnings == [
+        f"RSS: skipped “{news._redact(long_label)}”: not a valid http:// or https:// feed URL",
+        "RSS: skipped “https://exa..mple.com/rss”: not a valid http:// or https:// feed URL",
+        f"RSS: feed {news.feed_label(unicode_label)} skipped: cannot check host (UnicodeEncodeError)",
+        "RSS: feed redirect.example.com/feed skipped: invalid host name",
+    ]
+    assert not any("SECRET" in w for w in ctx.warnings)
+
+
+async def test_naive_since_is_treated_as_utc(company):
+    naive = SINCE.replace(tzinfo=None)
+    gn_signals, gn_ctx = await run(GoogleNewsCollector(), company, FakeWeb(), since=naive)
+    rss_signals, rss_ctx = await run(RssCollector(), company, FakeWeb(), since=naive)
+    assert gn_ctx.warnings == [] and rss_ctx.warnings == []
+    assert (len(gn_signals), len(rss_signals)) == (6, 6)
+    assert all(r.signal.occurred_at > SINCE for r in gn_signals + rss_signals)
+
+
+async def test_google_news_when_matches_the_lookback(company):
+    # run_scan sets since = now - lookback_days a moment before the collector reads the clock.
+    handler = FakeWeb()
+    await run(GoogleNewsCollector(), company, handler, since=NOW - timedelta(days=14, seconds=3))
+    assert handler.queries == [f"{DUBAI} when:14d"]
+
+
+async def test_google_news_price_raises_and_people_are_mapped_correctly(company):
+    company = configure(company, news_queries=["Dubai chauffeur"])
+    handler = FakeWeb(gn={"Dubai chauffeur": "google_news_people_and_prices.xml"})
+    signals, ctx = await run(GoogleNewsCollector(), company, handler)
+    assert ctx.warnings == []
+    found = by_title(signals)
+
+    fare = found["Uber raises minimum fare to AED 12 in Dubai"]
+    assert (fare.signal.type, fare.account, fare.signal.strength) == ("company_news", "Uber", 45)
+    assert "amount" not in fare.signal.raw
+
+    jane = found["Acme Bank names Google's Jane Doe as CTO"]
+    assert jane.lead == LeadIn(full_name="Jane Doe", title="CTO", lead_company="Acme Bank", source="google_news")
+    omar = found["Globex promotes CFO Omar Haddad to CEO"]
+    assert omar.lead == LeadIn(full_name="Omar Haddad", title="CEO", lead_company="Globex", source="google_news")
+    assert omar.signal.raw["role"] == "CEO"
+
+    zepto = found["India's Zepto raises $450 million to expand to Dubai"]
+    assert (zepto.signal.type, zepto.account, zepto.signal.raw["amount"]) == ("funding", "Zepto", "$450 million")
 
 
 async def test_rss_refuses_private_hosts_and_unsafe_redirects(company):
@@ -662,6 +765,30 @@ async def test_rss_feed_urls_in_warnings_hide_secrets(company):
     ("eToro unveils new trading app", "", "eToro", "", ""),
     ("How corporate travel managers are rethinking ground transport", "", "", "", ""),
     ("Report: Acme In Talks To Raise $1B", "funding", "", "", ""),
+    # Raising prices, fares, forecasts, bids or stakes is not a funding round.
+    ("Uber raises minimum fare to AED 12 in Dubai", "", "Uber", "", ""),
+    ("Netflix raises subscription prices to $17.99", "", "Netflix", "", ""),
+    ("Careem has raised fares in Dubai", "", "Careem", "", ""),
+    ("Acme raises 2026 revenue forecast to $5 billion", "", "Acme", "", ""),
+    ("Microsoft raises bid for Activision to $70 billion", "", "Microsoft", "", ""),
+    ("Acme raised its stake in Globex to $1B", "", "Acme", "", ""),
+    ("Tesla receives $500 million order from Hertz", "", "Tesla", "", ""),
+    ("Acme raises $5M in debt financing", "funding", "Acme", "", ""),
+    ("Acme receives $2M grant", "funding", "Acme", "", ""),
+    # Places are not accounts; a place in the possessive or a leading descriptor is not part of the name.
+    ("Abu Dhabi launches new tourism visa", "", "", "", ""),
+    ("Saudi Arabia secures $5bn loan from banks", "funding", "", "", ""),
+    ("U.S. names new ambassador to UAE", "", "", "", ""),
+    ("India's Zepto raises $450 million", "funding", "Zepto", "", ""),
+    ("Abu Dhabi's ADQ invests $1B in fund", "", "ADQ", "", ""),
+    ("Startup Acme Raises $5M Seed Round", "funding", "Acme", "", ""),
+    ("Google opens new Dubai office", "", "Google", "", ""),
+    ("Emirates launches new Dubai chauffeur service", "", "Emirates", "", ""),
+    # The employer in the possessive is not part of the person's name; the new role follows the person.
+    ("Acme names Google's Jane Doe as CTO", "job_change", "Acme", "Jane Doe", "CTO"),
+    ("Acme promotes CFO Jane Doe to CEO", "job_change", "Acme", "Jane Doe", "CEO"),
+    ("Acme Announces Appointment Of Jane Doe As Chief Financial Officer", "job_change", "Acme", "Jane Doe",
+     "Chief Financial Officer"),
 ])
 def test_analyze_headline(title, kind, account, person, role):
     info = analyze_headline(title)
@@ -678,6 +805,10 @@ def test_headline_details_and_strength_rules():
     expansion = analyze_headline("Northwind Capital opens Dubai office")
     assert expansion.expansion and news_strength("company_news", expansion, has_target=True) == 60
     assert not analyze_headline("Acme launches open-source SDK").expansion
+    assert analyze_headline("Acme enters Saudi market").expansion
+    distress = analyze_headline("Acme enters administration")  # used to score as expansion news (60)
+    assert not distress.expansion and news_strength("company_news", distress, has_target=True) == 45
+    assert not analyze_headline("Acme expands layoffs to Dubai office").expansion
     assert news_strength("company_news", analyze_headline("Acme ships SDK"), has_target=True) == 45
     assert news_strength("keyword_mention", analyze_headline("x"), has_target=False) == 40
     assert news_strength("funding", funding, has_target=True, topic_in_title=True) == 80

@@ -8,9 +8,11 @@ Ashby `/posting-api/job-board/{name}` ({"apiVersion", "jobs"} with isListed and 
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -92,10 +94,11 @@ class FakeBoards:
 
 
 async def run(company: Company, handler: FakeBoards, *, since: datetime = SINCE, max_items: int = 200,
-              time_budget: float = 60.0) -> tuple[list[RawSignal], CollectContext]:
+              time_budget: float = 60.0, request_timeout: float = 25.0) -> tuple[list[RawSignal], CollectContext]:
     collector = JobBoardsCollector()
     collector.request_interval = 0
     collector.time_budget = time_budget
+    collector.request_timeout = request_timeout
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler),
                                  headers={"User-Agent": "OpenBerry-test"}) as client:
         ctx = CollectContext(client=client, since=since, settings=get_settings(), max_items=max_items)
@@ -410,11 +413,28 @@ async def test_board_cap_and_daily_rotation(company):
     signals, ctx = await run(configure(company, *specs), handler)
     assert signals == []
     assert len(handler.requests) == jobs.MAX_BOARDS_PER_SCAN == 30
-    start = SINCE.date().toordinal() % 35
+    start = (SINCE.date().toordinal() * 30) % 35   # the window moves by a whole scan's worth per day
     expected = [(start + i) % 35 for i in range(30)]
     assert handler.urls == [GH_BOARD.format(token=f"board{i:02d}") for i in expected]
     assert ctx.warnings == ["Job boards: 35 boards configured but only 30 are checked per scan; "
                             "the checked set rotates daily"]
+
+
+@pytest.mark.parametrize("n_boards, max_gap_days", [(31, 2), (60, 2), (100, 4)])
+def test_rotation_checks_every_board_well_inside_the_lookback(n_boards, max_gap_days):
+    # Regression: moving the window by one board a day left boards unchecked for up to n - 29 days
+    # (31 days with 60 boards), longer than the 14-day lookback, so their new postings were never seen.
+    configured = boards(*[f"lever:site{i:03d}:Site {i}" for i in range(n_boards)])
+    last_seen: dict[str, int] = {}
+    worst = 0
+    for day in range(60):
+        ctx = CollectContext(client=None, since=SINCE + timedelta(days=day), settings=get_settings())  # type: ignore[arg-type]
+        for board in jobs.select_boards(configured, ctx):
+            if board.token in last_seen:
+                worst = max(worst, day - last_seen[board.token])
+            last_seen[board.token] = day
+    assert len(last_seen) == n_boards
+    assert worst <= max_gap_days
 
 
 async def test_request_cap_counts_lever_eu_retries(company):
@@ -542,6 +562,29 @@ async def test_500_malformed_json_and_timeouts_warn(company):
     ]
 
 
+async def test_slow_response_is_cut_off_by_the_request_timeout(company):
+    # httpx timeouts are per read, so a board trickling in slowly was unbounded and could push the
+    # collector past services.COLLECTOR_TIMEOUT_SECONDS, which throws away every signal found so far.
+    async def trickle(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, json=fixture("greenhouse_acmebank.json"))
+
+    handler = FakeBoards(overrides={GH: trickle})
+    started = time.monotonic()
+    signals, ctx = await run(company, handler, request_timeout=0.05)
+    assert time.monotonic() - started < 2
+    assert handler.urls == [GH, LV]
+    assert ids(signals) == [LV_TRAVEL_MANAGER, LV_UNDATED]
+    assert ctx.warnings == ["greenhouse board 'acmebank': request timed out"]
+
+
+def test_time_budget_plus_request_timeout_fits_the_scan_timeout():
+    from openberry.services import COLLECTOR_TIMEOUT_SECONDS
+
+    collector = JobBoardsCollector()
+    assert collector.time_budget + collector.request_timeout < COLLECTOR_TIMEOUT_SECONDS
+
+
 async def test_connection_errors_never_raise(company):
     handler = FakeBoards(overrides={GH: _raise(httpx.ConnectError("no route to host")),
                                     LV: _raise(httpx.RemoteProtocolError("peer closed connection"))})
@@ -603,6 +646,93 @@ async def test_malformed_postings_are_skipped_not_fatal(company):
     assert weird.url == "https://job-boards.greenhouse.io/acmebank/jobs/5"
     assert weird.summary == "Acme Bank is hiring: Executive Assistant to the CEO."
     assert ctx.warnings == ["greenhouse board 'acmebank': skipped 4 malformed posting(s)"]
+
+
+async def test_dot_only_tokens_are_skipped_without_a_request(company):
+    # "." and ".." pass JobBoard's token check, but httpx collapses them into another path
+    # (https://api.lever.co/v0?mode=json), so they must never be requested.
+    company = configure(company, job_boards=[JobBoard(provider="lever", token=".."),
+                                             JobBoard(provider="ashby", token="."),
+                                             JobBoard(provider="lever", token="northwind", company="Northwind")])
+    handler = FakeBoards()
+    signals, ctx = await run(company, handler)
+    assert handler.urls == [LV]
+    assert ids(signals) == [LV_TRAVEL_MANAGER, LV_UNDATED]
+    assert ctx.warnings == ["lever board '..': not a valid board token; skipped",
+                            "ashby board '.': not a valid board token; skipped"]
+
+
+async def test_textarea_board_without_company_uses_the_greenhouse_company_name(company):
+    # parse_job_boards fills a missing company with the token, so "greenhouse:acmebank" used to give
+    # the account "acmebank" even though every Greenhouse posting carries company_name "Acme Bank".
+    signals, _ = await run(configure(company, "greenhouse:acmebank", "lever:northwind"), FakeBoards())
+    accounts = {r.signal.source: r.account for r in signals}
+    assert accounts == {"greenhouse": "Acme Bank", "lever": "northwind"}
+    assert by_id(signals)[GH_EA_CEO].signal.summary.startswith("Acme Bank is hiring:")
+    # A company name the user typed always wins over the payload's.
+    signals, _ = await run(configure(company, "greenhouse:acmebank:ACME Bank PJSC"), FakeBoards())
+    assert {r.account for r in signals} == {"ACME Bank PJSC"}
+
+
+async def test_roles_are_counted_per_account_identity_not_spelling(company):
+    # "Northwind" and "Northwind Ltd" are one account lead (repo.company_key), so their roles add up.
+    company = configure(company, "lever:northwind:Northwind", "ashby:lumen:Northwind Ltd.")
+    signals, _ = await run(company, FakeBoards())
+    assert {r.signal.raw["open_matching_roles"] for r in signals} == {4}
+    assert {r.signal.strength for r in signals} == {85}
+    stats = ingest(company.id, signals)
+    assert stats.errors == [] and repo.list_leads(company.id, kind="account")[1] == 1
+
+
+async def test_documented_example_payloads_map_field_by_field(company):
+    # The verbatim example responses from the API research (not this test suite's own fixtures),
+    # so a field-name mistake in the collector cannot hide behind a fixture with the same mistake.
+    handler = FakeBoards(overrides={
+        GH_BOARD.format(token="discord"): httpx.Response(200, json=fixture("documented_greenhouse.json")),
+        "https://api.lever.co/v0/postings/spotify": httpx.Response(200, json=fixture("documented_lever.json")),
+        "https://api.ashbyhq.com/posting-api/job-board/ashby": httpx.Response(200, json=fixture("documented_ashby.json")),
+    })
+    company = configure(company, "greenhouse:discord", "lever:spotify:Spotify", "ashby:ashby:Ashby",
+                        hiring_keywords=["Software Engineer", "Account Executive", "Engineering Manager"])
+    signals, ctx = await run(company, handler, since=datetime(2024, 1, 1, tzinfo=UTC))
+    assert ctx.warnings == []
+    found = {r.signal.source: r for r in signals}
+    assert set(found) == {"greenhouse", "lever", "ashby"}
+
+    gh = found["greenhouse"]
+    assert gh.account == "Discord"
+    assert gh.signal.external_id == "greenhouse:discord:8642213002"
+    assert gh.signal.title == "Hiring: Software Engineer, Notifications"
+    assert gh.signal.url == "https://job-boards.greenhouse.io/discord/jobs/8642213002"
+    assert gh.signal.occurred_at == datetime(2026, 9, 11, 17, 13, 31, tzinfo=UTC)
+    assert gh.signal.raw["time_field"] == "first_published"
+    assert gh.signal.raw["location"] == "San Francisco Bay Area"
+    assert gh.signal.raw["department"] == "Product Engineering"
+    assert gh.signal.raw["requisition_id"] == "R-107350"
+    assert "Discord has a highly engaged community" in gh.signal.summary and "&lt;" not in gh.signal.summary
+
+    lv = found["lever"]
+    assert lv.signal.external_id == "lever:spotify:1ff4a4e3-897c-4eab-9ee2-aa7d1d07a9d6"
+    assert lv.signal.title == "Hiring: Account Executive, Backstage"
+    assert lv.signal.url == "https://jobs.lever.co/spotify/1ff4a4e3-897c-4eab-9ee2-aa7d1d07a9d6"
+    assert lv.signal.occurred_at == datetime(2026, 3, 29, 10, 0, tzinfo=UTC)
+    assert lv.signal.raw["time_field"] == "createdAt"
+    assert (lv.signal.raw["location"], lv.signal.raw["department"], lv.signal.raw["team"]) == (
+        "Toronto", "Operations and Business Support", "Platform")
+    assert lv.signal.raw["employment"] == "Permanent" and lv.signal.raw["country"] == "CA"
+    assert "workplace" not in lv.signal.raw                      # "unspecified"
+    assert "As an Account Executive for Spotify Backstage" in lv.signal.summary
+
+    ab = found["ashby"]
+    assert ab.signal.external_id == "ashby:ashby:7458d4e9-da2e-47bd-98cb-adfda43d42b2"
+    assert ab.signal.title == "Hiring: Engineering Manager, EU"
+    assert ab.signal.url == "https://jobs.ashbyhq.com/ashby/7458d4e9-da2e-47bd-98cb-adfda43d42b2"
+    assert ab.signal.occurred_at == datetime(2024, 3, 4, 14, 29, 8, 532000, tzinfo=UTC)
+    assert ab.signal.raw["time_field"] == "publishedAt"
+    assert ab.signal.raw["location"] == "Remote - European Union; Spain"
+    assert (ab.signal.raw["department"], ab.signal.raw["team"]) == ("Engineering", "EMEA Engineering")
+    assert (ab.signal.raw["employment"], ab.signal.raw["workplace"]) == ("Full-time", "Remote")
+    assert ab.signal.raw["apply_url"].endswith("/application")
 
 
 async def test_ashby_posting_without_id_uses_the_url_slug(company):

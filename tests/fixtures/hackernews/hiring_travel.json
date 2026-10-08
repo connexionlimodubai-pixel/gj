@@ -104,10 +104,76 @@
       "story_id": 45400001,
       "story_title": "Ask HN: Who is hiring? (October 2026)",
       "updated_at": "2026-10-01T16:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "umbrella_hr"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Umbrella Travel Group | Corporate Travel Manager | Dubai | Onsite | <a href=\"https:&#x2F;&#x2F;careers.umbrella-travel.example&#x2F;jobs&#x2F;12\" rel=\"nofollow\">https:&#x2F;&#x2F;careers.umbrella-travel.example&#x2F;jobs&#x2F;12</a><p>Run travel for 300 staff."
+        },
+        "story_title": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (September 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_umbrella_hr",
+        "story_45100001"
+      ],
+      "author": "umbrella_hr",
+      "comment_text": "Umbrella Travel Group | Corporate Travel Manager | Dubai | Onsite | <a href=\"https:&#x2F;&#x2F;careers.umbrella-travel.example&#x2F;jobs&#x2F;12\" rel=\"nofollow\">https:&#x2F;&#x2F;careers.umbrella-travel.example&#x2F;jobs&#x2F;12</a><p>Run travel for 300 staff.",
+      "created_at": "2026-09-28T10:00:00Z",
+      "created_at_i": 1790589600,
+      "objectID": "45101007",
+      "parent_id": 45100001,
+      "story_id": 45100001,
+      "story_title": "Ask HN: Who is hiring? (September 2026)",
+      "updated_at": "2026-09-28T10:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "curious_dev"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Is the Travel Manager role open to remote?"
+        },
+        "story_title": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (September 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_curious_dev",
+        "story_45100001"
+      ],
+      "author": "curious_dev",
+      "comment_text": "Is the Travel Manager role open to remote?",
+      "created_at": "2026-09-28T12:00:00Z",
+      "created_at_i": 1790596800,
+      "objectID": "45101008",
+      "parent_id": 45101007,
+      "story_id": 45100001,
+      "story_title": "Ask HN: Who is hiring? (September 2026)",
+      "updated_at": "2026-09-28T12:00:00Z"
     }
   ],
   "hitsPerPage": 50,
-  "nbHits": 3,
+  "nbHits": 5,
   "nbPages": 1,
   "page": 0,
   "params": "query=Travel&tags=comment%2Cstory_45400001&numericFilters=created_at_i%3E1790208000&hitsPerPage=100&advancedSyntax=true&analyticsTags=backend",

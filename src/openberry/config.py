@@ -68,6 +68,10 @@ class Settings:
     # commercial use needs Reddit's agreement). The Reddit source stays off without them.
     reddit_client_id: str = ""
     reddit_client_secret: str = ""
+    reddit_username: str = ""  # used in the User-Agent Reddit requires: "... (by /u/<username>)"
+    # Let RSS feeds point at private/loopback hosts (e.g. a local RSSHub). Keep off when public
+    # registration is on or the dashboard is shared.
+    allow_private_feeds: bool = False
     # Contact e-mail sent in the User-Agent where APIs require one (SEC EDGAR fair-access policy).
     contact_email: str = ""
     user_agent: str = "OpenBerry/0.1 (+https://github.com/connexionlimodubai-pixel/gj)"
@@ -99,6 +103,8 @@ class Settings:
             github_token=os.environ.get("GITHUB_TOKEN", os.environ.get("OPENBERRY_GITHUB_TOKEN", "")),
             reddit_client_id=os.environ.get("REDDIT_CLIENT_ID", ""),
             reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
+            reddit_username=os.environ.get("REDDIT_USERNAME", ""),
+            allow_private_feeds=_bool("OPENBERRY_ALLOW_PRIVATE_FEEDS", False),
             contact_email=os.environ.get("OPENBERRY_CONTACT_EMAIL", ""),
             allowed_hosts=[h.strip() for h in os.environ.get("OPENBERRY_ALLOWED_HOSTS", "").split(",") if h.strip()],
         )

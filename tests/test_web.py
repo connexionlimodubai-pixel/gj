@@ -1615,3 +1615,173 @@ def test_anonymous_registrations_get_the_default_agent_limit(client, web_setting
     post(client, "/register", {"name": "Visitor Co", "outreach.agent_daily_limit": "50"}, page="/register")
     visitor = next(c for c in repo.list_companies() if c.name == "Visitor Co")
     assert (visitor.outreach.agent_sending, visitor.outreach.agent_daily_limit) == (False, 15)
+
+
+# --------------------------------------------------------------------------------------
+# The LinkedIn account: connection-note limits (free: 200 characters, 5 a month; Premium: 300) and the weekly cap
+# --------------------------------------------------------------------------------------
+
+def _set_account(company_id: int, account: str) -> None:
+    repo.update_company(company_id, {"outreach": {"linkedin_account": account}})
+
+
+def test_note_counters_follow_the_linkedin_account(client, company):
+    base = f"/c/{company.id}"
+    agent_on(company.id)
+    lead, msg = approved_linkedin(company.id, body="Hi Omar, " + "x" * 241)  # 250 characters
+    lead_page = f"{base}/leads/{lead.id}"
+
+    page = client.get(lead_page).text
+    assert f'id="msg-{msg.id}-body" name="body" rows="4" data-maxlen="200" data-counter="msg-{msg.id}-count"' in page
+    counter = re.search(rf'<p class="counter[^"]*" id="msg-{msg.id}-count".*?</p>', page, re.S).group(0)
+    assert 'class="counter over"' in counter and "250 / 200: too long for a connection note" in counter
+    assert ("Notes from a free LinkedIn account: up to 200 characters, on 5 connection requests a month "
+            "(Premium: 300 characters, every request)") in text_of(page)
+    assert f'href="{base}/settings#f-outreach-linkedin_account"' in page
+    approved_tab = client.get(f"{base}/outreach?tab=approved").text
+    item = re.search(rf'<li class="card queue-item" id="q-{msg.id}">.*?</li>', approved_tab, re.S).group(0)
+    assert ("250 / 200 characters: too long for a connection note from your free LinkedIn account"
+            in text_of(item)) and "Queued for your agent" not in item
+    # The agent won't send it, and approving it says why.
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "approve", "next": f"{base}/outreach"},
+                page=lead_page)
+    note = html_lib.unescape(client.get(resp.headers["location"]).text)
+    assert ("It isn't in your AI agent's queue right now (the connection note is longer than 200 characters (250)"
+            in note)
+
+    _set_account(company.id, "premium")
+    page = client.get(lead_page).text
+    assert f'data-maxlen="300" data-counter="msg-{msg.id}-count"' in page
+    counter = re.search(rf'<p class="counter[^"]*" id="msg-{msg.id}-count".*?</p>', page, re.S).group(0)
+    assert 'class="counter"' in counter and "250 / 300" in counter and "too long" not in counter
+    assert "Notes from a Premium LinkedIn account: up to 300 characters." in text_of(page)
+    assert "5 connection requests a month" not in text_of(page)
+    approved_tab = client.get(f"{base}/outreach?tab=approved").text
+    item = re.search(rf'<li class="card queue-item" id="q-{msg.id}">.*?</li>', approved_tab, re.S).group(0)
+    assert "250 / 300 characters" in text_of(item) and "too long" not in item and "Queued for your agent" in item
+
+
+def test_template_drafts_in_the_dashboard_fit_the_linkedin_account(client, company):
+    base = f"/c/{company.id}"
+    repo.update_company(company.id, {
+        "name": "Acme Executive Chauffeurs International", "value_proposition": "On-time chauffeurs",
+        "icp": {"job_titles": ["Executive Assistant to the CEO", "Corporate Travel Manager"],
+                "industries": ["Financial Services and Consulting"]},
+        "outreach": {"sender_name": "Samantha Al-Rashid"}})
+    lead, _ = repo.upsert_lead(company.id, LeadIn(
+        full_name="Omar Haddad", lead_company="Northwind", linkedin_url="https://www.linkedin.com/in/omar-h",
+        signals=[SignalIn(type="keyword_mention", source="reddit",
+                          title="r/dubai: Need a reliable chauffeur for a three-day CEO roadshow across the UAE")]))
+    lead_page = f"{base}/leads/{lead.id}"
+    for account, low, high in (("free", 1, 200), ("premium", 201, 300)):
+        _set_account(company.id, account)
+        post(client, f"{lead_page}/draft", {"channel": "linkedin_connect", "step": "1", "engine": "template"},
+             page=lead_page)
+        note = repo.list_messages(company.id, lead_id=lead.id, limit=1)[0]
+        assert note.channel == "linkedin_connect" and low <= len(note.body) <= high, (account, len(note.body))
+
+
+def test_profile_form_sets_the_linkedin_account(client, company):
+    base = f"/c/{company.id}"
+    page = client.get(f"{base}/settings").text
+    select = re.search(r'<select[^>]*name="outreach.linkedin_account".*?</select>', page, re.S).group(0)
+    assert re.findall(r'<option value="(\w+)"( selected)?>([^<]+)</option>', select) == [
+        ("free", " selected", "Free (Basic)"), ("premium", "", "Premium")]
+    assert ("Sets LinkedIn's connection-note limits: free accounts can add a note to 5 requests a month, "
+            "200 characters each; Premium to every request, 300 characters.") in html_lib.unescape(page)
+    # Step 5, Outreach & alerts (after its channels, before the agent settings).
+    assert (page.index('id="step-outreach"') < page.index('name="outreach.channels"')
+            < page.index('name="outreach.linkedin_account"') < page.index('name="outreach.agent_sending"'))
+
+    values = {**flat_values(repo.get_company(company.id)), "outreach.linkedin_account": "premium"}
+    assert post(client, f"{base}/settings", values).status_code == 303
+    assert repo.get_company(company.id).outreach.linkedin_account == "premium"
+    assert '<option value="premium" selected>Premium</option>' in client.get(f"{base}/settings").text
+    assert browser_submit(client, f"{base}/settings", f"{base}/settings").status_code == 303
+    assert repo.get_company(company.id).outreach.linkedin_account == "premium"  # an unrelated save keeps it
+    bad = post(client, f"{base}/settings", {**values, "outreach.linkedin_account": "business"})
+    assert bad.status_code == 422 and 'id="f-outreach-linkedin_account-err"' in bad.text
+    assert repo.get_company(company.id).outreach.linkedin_account == "premium"
+
+    register = client.get("/register").text
+    assert 'name="outreach.linkedin_account"' in register and "Free (Basic)" in register
+    post(client, "/register", {"name": "Premium Co", "outreach.linkedin_account": "premium"}, page="/register")
+    post(client, "/register", {"name": "Basic Co"}, page="/register")
+    accounts = {c.name: c.outreach.linkedin_account for c in repo.list_companies()}
+    assert (accounts["Premium Co"], accounts["Basic Co"]) == ("premium", "free")
+
+
+def test_outreach_card_shows_the_connection_limits(client, company):
+    base = f"/c/{company.id}"
+    card = text_of(agent_card(client.get(f"{base}/outreach").text))
+    assert "Connection requests this week: 0 of 80" in card
+    assert "Notes this month: 0 of 5 (free LinkedIn account, notes up to 200 characters)" in card
+
+    earlier, _ = repo.upsert_lead(company.id, LeadIn(full_name="Earlier Lead",
+                                                     linkedin_url="https://www.linkedin.com/in/earlier"))
+    for _ in range(2):  # sent by hand: LinkedIn counts them, so OpenBerry does too
+        repo.create_message(earlier.id, "Hi, happy to connect!", channel="linkedin_connect", status="sent")
+    card = text_of(agent_card(client.get(f"{base}/outreach").text))
+    assert "Connection requests this week: 2 of 80" in card and "Notes this month: 2 of 5" in card
+    assert "on hold" not in card
+
+    agent_on(company.id)
+    for _ in range(3):
+        repo.create_message(earlier.id, "Hi, happy to connect!", channel="linkedin_connect", status="sent")
+    _, connect = approved_linkedin(company.id, name="Nadia Connect", slug="nadia-connect")
+    _, dm = approved_linkedin(company.id, name="Karim Message", body="Thanks for connecting!",
+                              channel="linkedin_dm", slug="karim-message")
+    page = agent_card(client.get(f"{base}/outreach").text)
+    card = text_of(page)
+    assert "Notes this month: 5 of 5" in card and "Connection requests are on hold." in card
+    assert ("Free LinkedIn accounts can add a note to only 5 connection requests a month, and 5 were sent in the "
+            "last 30 days.") in card and "LinkedIn messages still go out." in card
+    assert "Your agent can send connection requests again from" in card
+    assert f'href="{base}/settings#f-outreach-linkedin_account"' in page
+    queue = re.search(r'<ul class="list agent-queue">.*?</ul>', page, re.S).group(0)
+    assert f"#msg-{dm.id}" in queue and f"#msg-{connect.id}" not in queue  # the DM still goes
+    skipped = re.search(r'<details class="agent-skipped">.*?</details>', page, re.S).group(0)
+    assert "Nadia Connect" in skipped and "add a note to only 5 connection requests a month" in text_of(skipped)
+
+    _set_account(company.id, "premium")
+    for _ in range(75):
+        repo.create_message(earlier.id, "Hi, happy to connect!", channel="linkedin_connect", status="sent")
+    card = text_of(agent_card(client.get(f"{base}/outreach").text))
+    assert "Connection requests this week: 80 of 80" in card and "Notes this month" not in card
+    assert "Premium LinkedIn account: a note on every request, up to 300 characters" in card
+    assert ("80 connection requests were sent in the last 7 days. Your agent sends at most 80 a week, to stay below "
+            "LinkedIn's weekly invitation limit") in card and "LinkedIn messages still go out." in card
+
+
+def test_a_note_edited_in_the_dashboard_counts_each_line_break_once(client, company):
+    """Browsers submit a textarea's line breaks as CR LF; the counter (and LinkedIn) count one character each."""
+    base = f"/c/{company.id}"
+    agent_on(company.id)
+    lead, msg = approved_linkedin(company.id)
+    lines = ["Hi Omar,", "x" * 186, "Sam"]  # 8 + 186 + 3 characters and 2 line breaks: 199, under the free 200
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "approve", "body": "\r\n".join(lines)},
+                page=f"{base}/leads/{lead.id}")
+    assert resp.status_code == 303
+    saved = repo.get_message(msg.id)
+    assert saved.body == "\n".join(lines) and len(saved.body) == 199 and saved.status == "approved"
+    assert [i["message_id"] for i in repo.send_queue(company.id)["items"]] == [msg.id]
+    page = client.get(f"{base}/leads/{lead.id}").text
+    assert re.search(rf'id="msg-{msg.id}-count"[^>]*>199 / 200</p>', page)
+    # Editing the same text again doesn't count as a change: it stays approved.
+    post(client, f"{base}/messages/{msg.id}", {"action": "save", "body": "\r\n".join(lines)},
+         page=f"{base}/leads/{lead.id}")
+    assert repo.get_message(msg.id).status == "approved"
+
+
+def test_a_sent_note_is_never_flagged_too_long(client, company):
+    """A note sent from Premium (or by hand) before the account was set to free went out: nothing to shorten."""
+    base = f"/c/{company.id}"
+    _set_account(company.id, "premium")
+    _, msg = approved_linkedin(company.id, body="Hi Omar, " + "x" * 241)  # 250 characters
+    repo.update_message(msg.id, status="sent")
+    _set_account(company.id, "free")
+    sent_tab = client.get(f"{base}/outreach?tab=sent").text
+    raw = re.search(rf'<li class="card queue-item" id="q-{msg.id}">.*?</li>', sent_tab, re.S).group(0)
+    item = text_of(raw)
+    assert "250 characters" in item and "/ 200" not in item and "too long" not in item and "shorten" not in item
+    assert "counter over" not in raw

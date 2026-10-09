@@ -32,8 +32,9 @@ A Python app stores everything, collects free public signals, scores leads, and 
   - `signals: SignalConfig`: enabled_types, keywords, subreddits, github_repos, job_boards,
     hiring_keywords, news_queries, rss_feeds, sec_queries, influencers, competitor_pages, events, lookback_days, weights
   - `outreach: OutreachConfig`: sender, tone, language, channels, calendar link, CTA, signature,
-    max_followups, followup_days, mode (review | auto_draft), banned_words, extra_instructions, and AI agent sending:
-    agent_sending (off by default), agent_daily_limit (1-50, default 15), agent_paused_until, agent_pause_reason
+    max_followups, followup_days, mode (review | auto_draft), banned_words, extra_instructions, linkedin_account
+    (free | premium, default free: the connection-note limits, see `outreach.connect_note_limit`), and AI agent
+    sending: agent_sending (off by default), agent_daily_limit (1-50, default 15), agent_paused_until, agent_pause_reason
   - `notify: NotifyConfig`: Slack and Discord webhooks, min_score (alerts need a hot lead, so values below 70 act as 70)
 - **Lead**: a person (`kind="person"`) or an account (`kind="account"`, company-level intent such as
   hiring or funding, with no contact found yet). People inherit 60% of their company's account-level intent.
@@ -100,5 +101,7 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
 - OpenBerry never sends anything to LinkedIn or by email itself. OpenBerry drafts, and a human sends, or, when the user
   turns on AI agent sending for a company, the user's own browser agent sends the LinkedIn messages they approved.
   `repo.send_queue`, `repo.confirm_agent_sent` and `repo.report_send_problem` enforce its rules server-side: approved
-  LinkedIn messages only, a rolling 24-hour limit, the never-contact list, and a 24-hour pause on any reported problem.
+  LinkedIn messages only, a rolling 24-hour limit, the never-contact list, LinkedIn's connection limits (note length
+  for the account, 80 connection requests in 7 days, 5 notes in 30 days on a free account), and a 24-hour pause on
+  any reported problem.
   Claude and the JSON API can only turn it off or lower the limit. See [AI_AGENT_SENDING.md](AI_AGENT_SENDING.md).

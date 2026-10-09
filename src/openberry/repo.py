@@ -766,6 +766,16 @@ def _message_from_row(row: sqlite3.Row) -> Message:
     return Message.model_validate(dict(row))
 
 
+def message_text(text: str) -> str:
+    """A message body as stored: every line break as a single LF character, and the ends trimmed.
+
+    Browsers submit a textarea's line breaks as CR LF, two characters, while its character counter (and LinkedIn)
+    count one per line break: without this a connection note with line breaks that fits the account's limit in the
+    dashboard would be stored longer than the limit, and never queued for the agent.
+    """
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
 def create_message(lead_id: int, body: str, *, channel: str = "linkedin_dm", subject: str = "", step: int = 1,
                    generated_by: str = "template", status: str = "draft", direction: str = "outbound",
                    conn: sqlite3.Connection | None = None) -> Message:
@@ -775,7 +785,8 @@ def create_message(lead_id: int, body: str, *, channel: str = "linkedin_dm", sub
         raise ValueError(f"status must be one of {', '.join(MESSAGE_STATUSES)}")
     if direction not in ("outbound", "inbound"):
         raise ValueError("direction must be 'outbound' or 'inbound'")
-    if not body.strip():
+    body = message_text(body)
+    if not body:
         raise ValueError("message body is empty")
     now = iso()
     with _conn(conn) as c:
@@ -783,8 +794,8 @@ def create_message(lead_id: int, body: str, *, channel: str = "linkedin_dm", sub
         cur = c.execute(
             "INSERT INTO messages (company_id, lead_id, direction, channel, step, subject, body, status, generated_by, "
             "created_at, updated_at, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (lead.company_id, lead_id, direction, channel, max(1, int(step)), subject.strip(), body.strip(), status,
-             generated_by, now, now, now if status in ("sent", "received") else None),
+            (lead.company_id, lead_id, direction, channel, max(1, int(step)), subject.strip(), body, status,
+             generated_by, now, now, now if status in ("sent", "replied", "received") else None),
         )
         return get_message(cur.lastrowid, conn=c)
 
@@ -854,16 +865,18 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
         msg = get_message(message_id, conn=c)
         updates: dict[str, Any] = {}
         if body is not None:
-            if not body.strip():
+            if not message_text(body):
                 raise ValueError("message body is empty")
-            updates["body"] = body.strip()
+            updates["body"] = message_text(body)
         if subject is not None:
             updates["subject"] = subject.strip()
         if status is not None:
             if status not in MESSAGE_STATUSES:
                 raise ValueError(f"status must be one of {', '.join(MESSAGE_STATUSES)}")
             updates["status"] = status
-            if status == "sent" and not msg.sent_at:
+            # 'replied' = sent, then answered: a message first recorded that way was sent too (it then counts
+            # toward the connection-request limits, which count every request sent, by its sent_at).
+            if (status == "sent" or (status == "replied" and msg.direction == "outbound")) and not msg.sent_at:
                 updates["sent_at"] = iso()
         elif (msg.status == "approved" and msg.direction == "outbound"
               and (updates.get("body", msg.body), updates.get("subject", msg.subject)) != (msg.body, msg.subject)):
@@ -1414,9 +1427,9 @@ def confirm_agent_sent(message_id: int, now: datetime | None = None,
     needs a note within the account's length limit and a free slot in the weekly connection limit and, on a
     free LinkedIn account, the monthly note limit. Every check runs under SQLite's write lock (BEGIN
     IMMEDIATE), and the UPDATE repeats the limits, the never-sent and the duplicate-step checks itself, so two
-    agents confirming at once can't both take the last slot or send the same step twice. Marks the message sent like update_message(status="sent") does, with
-    sent_via="agent", and moves a new or qualified lead to 'contacted'. Confirming again a message the
-    agent already confirmed returns it unchanged.
+    agents confirming at once can't both take the last slot or send the same step twice. Marks the message
+    sent like update_message(status="sent") does, with sent_via="agent", and moves a new or qualified lead
+    to 'contacted'. Confirming again a message the agent already confirmed returns it unchanged.
     """
     now = _utc(now or utcnow())
     with _write_locked(conn) as c:
@@ -1480,14 +1493,16 @@ def update_message_as(message_id: int, via: str, *, status: str | None = None, b
     """update_message, also recording who marked it sent (Message.sent_via) when this call marks it sent.
 
     The MCP server passes via="claude": LinkedIn messages Claude records as sent count toward the agent's
-    daily limit, so recording a send this way never gets around it.
+    daily limit, so recording a send this way never gets around it. That includes an outbound message first
+    recorded as 'replied' (sent, then answered), which update_message dates as sent too.
     """
     if via not in ("agent", "claude"):
         raise ValueError("via must be 'agent' or 'claude'")
     with _conn(conn) as c:
         before = get_message(message_id, conn=c)
         updated = update_message(message_id, status=status, body=body, subject=subject, conn=c)
-        if status == "sent" and before.status != "sent":
+        if ((status == "sent" and before.status != "sent")
+                or (status == "replied" and before.direction == "outbound" and before.sent_at is None)):
             stamp = iso(_utc(now or utcnow()))
             c.execute("UPDATE messages SET sent_via = ?, sent_at = ?, updated_at = ? WHERE id = ?",
                       (via, stamp, stamp, message_id))

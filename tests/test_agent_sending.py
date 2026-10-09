@@ -1054,3 +1054,139 @@ async def test_claude_cant_free_connection_slots_by_deleting_leads(company):
         assert "connection-request limits" in await error_text(c, "delete_lead", lead_id=lead_id)
         enable(company, linkedin_account="premium")  # Premium counts the last 7 days only
         assert (await ok(c, "delete_lead", lead_id=lead_id))["deleted"]
+
+
+def test_a_connection_request_first_recorded_as_replied_counts_too(company):
+    """'replied' = sent, then answered: recorded straight away like that, it still takes a weekly / monthly slot."""
+    enable(company)
+    msg = approved(person(company))
+    repo.update_message(msg.id, status="replied")
+    assert repo.get_message(msg.id).sent_at is not None
+    other = repo.create_message(person(company), "Hi, happy to connect!", channel="linkedin_connect", status="replied")
+    assert other.sent_at is not None
+    state = repo.agent_sending_status(company.id)
+    assert (state["connect_sent_7d"], state["connect_notes_30d"], state["connect_remaining"]) == (2, 2, 3)
+
+
+def test_the_stop_rules_forbid_sending_a_connection_request_without_its_note():
+    from openberry.mcp_server import STOP_AND_REPORT_ON
+
+    flat = " ".join(STOP_AND_REPORT_ON.split())
+    assert "no more notes (personalized invitations) can be added" in flat
+    assert "never send a connection request without its approved note" in flat
+
+
+async def test_claude_may_set_the_linkedin_account_but_never_the_agents_own_settings(company):
+    enable(company, agent_daily_limit=10)
+    repo.report_send_problem(company.id, "Weekly invitation limit reached")
+    async with mcp_client() as c:
+        for extra, words in (({"agent_daily_limit": 20}, "raise the agent's daily limit"),
+                             ({"agent_paused_until": None}, "pause or resume"),
+                             ({"agent_pause_reason": ""}, "pause or resume")):
+            refused = await error_text(c, "update_company", company_id=company.id,
+                                       changes={"outreach": {"linkedin_account": "premium", **extra}})
+            assert "only the user can" in refused and words in refused, extra
+        assert repo.get_company(company.id).outreach.linkedin_account == "free"  # nothing changed
+        repo.update_company(company.id, {"outreach": {"agent_sending": False}})  # the user turns it off
+        refused = await error_text(c, "update_company", company_id=company.id,
+                                   changes={"outreach": {"linkedin_account": "premium", "agent_sending": True}})
+        assert "turn AI agent sending on" in refused
+        assert "linkedin_account" in await error_text(c, "update_company", company_id=company.id,
+                                                      changes={"outreach": {"linkedin_account": "business"}})
+
+        done = await ok(c, "update_company", company_id=company.id,
+                        changes={"outreach": {"linkedin_account": "premium"}})
+        assert done["profile"]["outreach"]["linkedin_account"] == "premium"
+        out = repo.get_company(company.id).outreach
+        assert (out.linkedin_account, out.agent_sending, out.agent_daily_limit) == ("premium", False, 10)
+        assert out.agent_paused_until is not None and out.agent_pause_reason == "Weekly invitation limit reached"
+        registered = await ok(c, "register_company", name="Premium Co",
+                              profile={"outreach": {"linkedin_account": "premium"}})
+        assert repo.get_company(registered["company_id"]).outreach.linkedin_account == "premium"
+
+
+def test_the_docs_give_linkedins_limits_with_their_sources():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    guide = (root / "docs" / "AI_AGENT_SENDING.md").read_text(encoding="utf-8")
+    flat = " ".join(guide.split())
+    for answer in ("a563153", "a6239760", "a550555", "a551012"):
+        assert f"https://www.linkedin.com/help/linkedin/answer/{answer}" in guide, answer
+    for words in ("| Longest connection note | 200 characters | 300 characters |",
+                  "| Connection requests with a note, in any 30 days | 5 | no limit |",
+                  "| Connection requests, in any 7 days | 80 | 80 |",
+                  "Connection requests this week: X of 80", "Notes this month: X of 5",
+                  "never sends a connection request without its note", "LinkedIn messages still go out",
+                  "approved notes of 201 to 300 characters wait"):
+        assert words in flat, words
+    # Every link to a heading of the guide resolves (GitHub's heading anchors).
+    anchors = {re.sub(r"[^\w\- ]", "", h.strip().lower()).replace(" ", "-")
+               for h in re.findall(r"^#+ (.+)$", guide, re.M)}
+    assert {a for a in re.findall(r"\]\(#([\w-]+)\)", guide)} <= anchors
+    mcp_doc = " ".join((root / "docs" / "CLAUDE_MCP.md").read_text(encoding="utf-8").split())
+    assert "300-character" not in mcp_doc and "200 characters on a free account, 300 on Premium" in mcp_doc
+    assert "outreach.linkedin_account" in mcp_doc and "connect_blocked_reason" in mcp_doc
+
+
+async def test_claude_recording_a_send_as_replied_counts_like_sent(company):
+    """'replied' = sent, then answered. Recorded straight away like that by Claude, it is a send Claude recorded: it
+    counts toward the daily limit (so the agent can't get around it by recording its sends that way) and the
+    connection-request limits."""
+    enable(company, agent_daily_limit=2)
+    connect = approved(person(company))
+    dm = approved(person(company), "Hi, thanks for connecting!", channel="linkedin_dm")
+    async with mcp_client() as c:
+        await ok(c, "update_message", message_id=connect.id, status="replied")
+        await ok(c, "update_message", message_id=dm.id, status="replied")
+    assert [(m.sent_via, m.sent_at is not None) for m in map(repo.get_message, (connect.id, dm.id))] == [
+        ("claude", True), ("claude", True)]
+    state = repo.agent_sending_status(company.id)
+    assert (state["sent_last_24h"], state["marked_by_claude_24h"], state["blocked_reason"]) == (2, 2, "daily_limit")
+    assert (state["connect_sent_7d"], state["connect_notes_30d"]) == (1, 1)
+    # A message already sent, then answered, keeps who sent it and when.
+    mine = approved(person(company), channel="linkedin_connect")
+    repo.update_message(mine.id, status="sent")
+    sent_at = repo.get_message(mine.id).sent_at
+    repo.update_message_as(mine.id, "claude", status="replied")
+    assert (repo.get_message(mine.id).sent_via, repo.get_message(mine.id).sent_at) == ("", sent_at)
+
+
+def test_sends_recorded_as_replied_before_the_upgrade_count_toward_the_connection_limits(company):
+    """Older versions left sent_at empty on a message recorded straight away as 'replied': the upgrade dates it."""
+    enable(company)
+    old = [approved(person(company)) for _ in range(3)]
+    with db.connect() as c:
+        c.executemany("UPDATE messages SET status = 'replied', sent_at = NULL, updated_at = ? WHERE id = ?",
+                      [(repo.iso(repo.utcnow() - timedelta(days=2)), m.id) for m in old])
+    draft = approved(person(company), status="draft")
+    assert repo.agent_sending_status(company.id)["connect_notes_30d"] == 0
+    db.reset_init_cache()
+    db.init_db()  # the next start
+    assert [repo.get_message(m.id).sent_at is not None for m in old] == [True] * 3
+    assert repo.get_message(draft.id).sent_at is None  # unsent messages stay undated
+    state = repo.agent_sending_status(company.id)
+    assert (state["connect_sent_7d"], state["connect_notes_30d"], state["connect_remaining"]) == (3, 3, 2)
+
+
+async def test_claudes_notes_are_measured_as_stored(company):
+    """A note Claude writes with Windows line breaks is stored with one character per line break, and checked so."""
+    lead_id = person(company)
+    lines = ["Hi Omar,", "y" * 187, "Sam"]  # 198 characters and 2 line breaks: 200
+    async with mcp_client() as c:
+        saved = await ok(c, "save_outreach_message", lead_id=lead_id, channel="linkedin_connect",
+                         body="\r\n".join(lines))
+        assert repo.get_message(saved["message_id"]).body == "\n".join(lines)
+        await ok(c, "update_message", message_id=saved["message_id"], body="\r\n".join(lines[::-1]))
+        assert len(repo.get_message(saved["message_id"]).body) == 200
+        too_long = await error_text(c, "save_outreach_message", lead_id=lead_id, channel="linkedin_connect",
+                                    body="\r\n".join([*lines, "!"]))
+        assert "limited to 200 characters; this one has 202" in too_long
+
+
+async def test_onboarding_asks_for_the_linkedin_account():
+    async with mcp_client() as c:
+        text = (await c.get_prompt("onboard_company", {})).messages[0].content.text
+    flat = " ".join(text.split())
+    assert "whether my LinkedIn account is free or Premium (outreach.linkedin_account" in flat
+    assert "leave it free when I don't know" in flat

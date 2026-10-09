@@ -95,7 +95,9 @@ OpenBerry never opens LinkedIn or sends anything itself. If you turn on **AI age
 off by default), an AI agent running in your own browser, logged in to your LinkedIn, can send the LinkedIn messages you
 approved. Claude in Chrome and Playwright MCP's extension mode both work. OpenBerry enforces the rules itself:
 - approved messages only, exactly as approved, and LinkedIn only (never email)
-- a daily limit (default 15 in any 24 hours)
+- a daily limit (default 15 in any 24 hours), and LinkedIn's connection limits: notes of at most 200 characters on a
+  free LinkedIn account (300 on Premium), a note on at most 5 connection requests a month on a free account, and at
+  most 80 connection requests in any 7 days
 - never leads who replied or are on your never-contact list
 - a 24-hour pause, with a Resume button, as soon as the agent reports a LinkedIn warning, check or limit
 

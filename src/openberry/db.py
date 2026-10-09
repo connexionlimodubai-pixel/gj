@@ -155,6 +155,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN sent_via TEXT NOT NULL DEFAULT ''")
         # After the column exists (an old database gets it just above): the agent's rolling 24-hour count.
         conn.execute("CREATE INDEX IF NOT EXISTS ix_messages_company_sent ON messages(company_id, sent_via, sent_at)")
+        # Older versions left sent_at empty on an outbound message recorded straight away as 'replied' (sent, then
+        # answered). The connection-request limits count sends by sent_at, so date those by their last update.
+        conn.execute("UPDATE messages SET sent_at = updated_at WHERE direction = 'outbound' "
+                     "AND status IN ('sent', 'replied') AND sent_at IS NULL")
         if 0 < version < 2:  # identity keys became Unicode-aware (accents, Arabic, CJK...): re-key old rows
             from . import repo
 

@@ -8,7 +8,8 @@ It is **off** for every company until you turn it on. It sends LinkedIn connecti
 Email is never sent this way.
 
 - [1. What it does, and the risk](#1-what-it-does-and-the-risk)
-- [2. Turn it on, approve messages, pick a daily limit](#2-turn-it-on-approve-messages-pick-a-daily-limit)
+- [2. Turn it on, approve messages, pick a daily limit](#2-turn-it-on-approve-messages-pick-a-daily-limit), and
+  [LinkedIn's limits](#linkedins-limits-and-how-openberry-keeps-to-them)
 - [3. Connect an agent](#3-connect-an-agent)
 - [4. Run it](#4-run-it)
 - [5. What OpenBerry deliberately does not do](#5-what-openberry-deliberately-does-not-do)
@@ -55,6 +56,7 @@ These rules are checked by OpenBerry itself, every time, whatever your agent was
 | Only approved messages | Drafts are never in the queue. The agent gets the text exactly as approved. If the text of an approved message changes (you in the dashboard, Claude or a script), it goes back to draft until it is approved again. If a lead's LinkedIn profile link changes, its approved LinkedIn messages go back to draft too: an approval covers the person as well as the text. |
 | LinkedIn only | Only connection notes (`linkedin_connect`) and LinkedIn messages (`linkedin_dm`). Never email. |
 | Daily limit | At most your daily limit in any 24 hours (default **15**, from 1 to 50). When it's reached, the queue is empty and OpenBerry refuses the agent's send confirmations. |
+| LinkedIn's connection limits | A connection note is never longer than your LinkedIn account allows (**200** characters on a free account, **300** on Premium). At most **80** connection requests in any 7 days, and on a free account at most **5** with a note in any 30 days, counting every connection request recorded as sent, whoever sent it. Past a limit, connection requests wait while LinkedIn messages still go out. See [LinkedIn's limits](#linkedins-limits-and-how-openberry-keeps-to-them). |
 | The right people only | Never someone who replied, booked a meeting, or was marked won, lost or disqualified. Never anyone on your never-contact list or matching your excluded keywords. Never a company lead with no contact person, or a lead without a real LinkedIn profile link (`linkedin.com/in/...`). When a lead moves to replied, meeting, won, lost or disqualified, its approved LinkedIn messages go back to draft, so moving it back later doesn't send them. |
 | Never twice | Never a second connection request to the same person, never the same step twice, and follow-ups only once their wait (your *follow-up days*) has passed. One message per person at a time. A message recorded as sent is never queued again, even if it is later set back to approved. Two agents confirming at the same moment can't get past these checks or the daily limit. |
 | Automatic pause | When the agent reports a problem, sending pauses for 24 hours, even if the agent gets the details of its report wrong. Only you can resume it earlier. |
@@ -70,8 +72,14 @@ These rules are checked by OpenBerry itself, every time, whatever your agent was
 You can do the same in your **Company profile**, at the step **Outreach & alerts**: tick *Let my AI agent send approved
 LinkedIn messages*, set the **Agent daily limit**, and save.
 
+At the same step, set **Your LinkedIn account** to **Free (Basic)** or **Premium**. It sets the connection-note limits
+below. Every company starts as Free, the stricter one, so set Premium only if you pay for it. Claude can also change
+it when you tell it which account you have.
+
 The card shows the state: **Off**, **On** ("3 of 10 sent in the last 24 hours"), **Paused**, or **Daily limit reached**
-(with the time your agent can send again). While it's on, the dashboard shows a line with the same numbers.
+(with the time your agent can send again). While it's on, the dashboard shows a line with the same numbers. Under the
+state, the card shows **Connection requests this week: X of 80** and, on a free LinkedIn account, **Notes this month:
+X of 5**.
 
 ### Approve messages
 
@@ -85,33 +93,56 @@ The card shows the state: **Off**, **On** ("3 of 10 sent in the last 24 hours"),
   there, click **Save & approve** to keep it approved with your new text. **Save** alone makes it a draft again.
 - Claude can approve a message only when you tell it you approve that exact text. Approving in the dashboard is clearer.
 
-**Two LinkedIn rules that can stop your agent:**
+**LinkedIn messages go to your connections.** A follow-up (`linkedin_dm`) needs a **Message** button. People who haven't
+accepted your connection request usually don't have one, or it opens a paid InMail. Approve a follow-up message only
+after you see that the person accepted. Otherwise your agent stops and sending pauses.
 
-- **Connection notes on a free account.** LinkedIn's help pages say free (Basic) members can add a note to only a few
-  connection requests a month: three or five, as the pages give different numbers
-  ([46662](https://www.linkedin.com/help/linkedin/answer/46662),
-  [a563153](https://www.linkedin.com/help/linkedin/answer/a563153),
-  [a6239760](https://www.linkedin.com/help/linkedin/answer/a6239760)). Each note can be at most **200 characters**.
-  Premium members can add a note to every request. OpenBerry allows notes of up to 300 characters, which is reported
-  to be Premium's limit. On a free account, keep notes under 200 characters and approve only a few a month.
-  Otherwise LinkedIn won't take the note as written, so your agent stops and sending pauses.
-- **LinkedIn messages go to your connections.** A follow-up (`linkedin_dm`) needs a **Message** button. People who
-  haven't accepted your connection request usually don't have one, or it opens a paid InMail. Approve a follow-up
-  message only after you see that the person accepted. Otherwise your agent stops and sending pauses.
-
-### Pick a low daily limit
+### LinkedIn's limits, and how OpenBerry keeps to them
 
 **What LinkedIn says:**
 
-- LinkedIn does not publish a daily message limit or a weekly invitation number.
-- When you reach its invitation limit, *"You'll be able to send invitations again within one week."* LinkedIn Support
-  can't lift it, and you can't buy more ([invitation limit reached](https://www.linkedin.com/help/linkedin/answer/a550555)).
-- Accounts get restricted for sending many invitations in a short time, for invitations that are ignored or marked as
-  spam, for having too many invitations waiting, and for suspected automation
+- **Notes on connection requests.** A free (Basic) account can add a personal note to at most **5** connection requests
+  a month, and each note can be at most **200 characters**. Premium accounts can add a note to every request, up to
+  **300 characters** ([a563153](https://www.linkedin.com/help/linkedin/answer/a563153),
+  [a6239760](https://www.linkedin.com/help/linkedin/answer/a6239760)).
+- **Invitations per week.** LinkedIn doesn't publish a weekly number. About **100 a week**, counted over the last 7
+  days, is widely reported by third parties (not LinkedIn), and may change. When you reach LinkedIn's limit, *"You'll
+  be able to send invitations again within one week."* LinkedIn Support can't lift it
+  ([invitation limit reached](https://www.linkedin.com/help/linkedin/answer/a550555)).
+- **Restrictions.** Accounts get restricted for sending many invitations in a short time, for invitations that are
+  ignored or marked as spam, for having too many invitations waiting, and for suspected automation
   ([types of restrictions](https://www.linkedin.com/help/linkedin/answer/a551012)).
 
-Third-party blogs (not LinkedIn) say about 100 invitations a week, counted over the last 7 days. That number is not
-official and may change.
+**What OpenBerry enforces**, in the queue and again when the agent confirms a send:
+
+| Limit | Free (Basic) | Premium |
+|---|---|---|
+| Longest connection note | 200 characters | 300 characters |
+| Connection requests with a note, in any 30 days | 5 | no limit |
+| Connection requests, in any 7 days | 80 | 80 |
+
+- Both counts include **every** connection request recorded as sent for the company: your own **Mark sent**, Claude's
+  and your agent's. LinkedIn counts all of them. OpenBerry can't tell whether a request you sent yourself had a note,
+  so on a free account each one counts toward the 5. They are rolling windows, not calendar months or weeks.
+- 80 a week stays below the ~100 reported, so your agent doesn't run into LinkedIn's one-week block.
+- When a limit is reached, connection requests stay out of the queue, each with the reason and the time a slot frees
+  up. **LinkedIn messages still go out.** The Outreach card shows *Connection requests are on hold* with the reason.
+- On a free account, the 6th connection request of the month waits. You can send it yourself without a note (and
+  click **Mark sent**), or wait until a slot frees up. Your agent never does that: it sends only the exact text you approved, so it never sends a
+  connection request without its note. If LinkedIn says you have no notes left (for example because you used some
+  outside OpenBerry), the agent stops and reports it.
+- A connection note longer than your account allows is never queued, and OpenBerry refuses to record it as sent by the
+  agent. The queue says why: shorten it and approve it again, or set your LinkedIn account to Premium if you have it.
+  This also applies to notes you approved before this setting existed: companies saved before it are free accounts, so
+  approved notes of 201 to 300 characters wait until you shorten them or switch to Premium.
+- Drafts follow the same limits: the templates, Claude (`get_outreach_context` gives `limits.max_chars`,
+  `save_outreach_message` refuses longer notes) and the local AI writer keep notes within your account's length, and the
+  character counters on the lead and Outreach pages show it.
+
+### Pick a low daily limit
+
+LinkedIn does not publish a daily message limit or a weekly invitation number (see
+[what LinkedIn says](#linkedins-limits-and-how-openberry-keeps-to-them) above), so pick a low one.
 
 **Our advice:**
 
@@ -123,12 +154,13 @@ official and may change.
 
 OpenBerry lets you go up to 50, but we don't recommend more than 15. The limit counts connection requests and messages
 together, and it is per day, not per week: 15 connection requests a day is already 105 a week, more than the ~100 the
-blogs report. At 50 a day you would pass that in two days.
+blogs report. That's why OpenBerry also stops connection requests at 80 in any 7 days
+([above](#linkedins-limits-and-how-openberry-keeps-to-them)), whatever your daily limit.
 
-**What the limit counts:** messages your agent sent, plus LinkedIn messages Claude marked as sent, over the last 24
-hours (a rolling window, not a calendar day). Messages you mark sent yourself in the dashboard don't count, and
+**What the daily limit counts:** messages your agent sent, plus LinkedIn messages Claude marked as sent, over the last
+24 hours (a rolling window, not a calendar day). Messages you mark sent yourself in the dashboard don't count, and
 neither does anything you do on LinkedIn without OpenBerry. LinkedIn counts all of it, so if you also send by hand,
-lower your agent's limit.
+lower your agent's limit. (The weekly and monthly connection limits do count your own **Mark sent**.)
 
 Approve only people who are likely to accept. Ignored invitations count against you too.
 
@@ -310,7 +342,9 @@ in the address bar: `/c/1/...`).
 Use the openberry tools to send the LinkedIn messages I approved for OpenBerry company 1, from my own browser where I am
 logged in to LinkedIn.
 
-1. Call get_send_queue for company 1. If it has no items, stop and tell me its message.
+1. Call get_send_queue for company 1. If it has no items, stop and tell me its message. If connect_blocked_reason is
+   set, connection requests wait (weekly or monthly limit): send the LinkedIn messages it has, and tell me which
+   connection requests wait and why.
 2. For each item, in order:
    - Open its linkedin_url and check that the profile is this person.
    - linkedin_connect: click Connect (it may be under More), then Add a note, paste the body exactly, then Send.
@@ -321,8 +355,9 @@ logged in to LinkedIn.
    approve or edit messages, and never use update_message. Work one message at a time, at my normal pace.
 4. If anything unexpected appears (a warning or notice, a security check, verification or CAPTCHA, a sign-in page, an
    invitation or weekly limit, a restriction, a profile that isn't found or isn't this person, a missing Connect, Add a
-   note or Message button, or a box that would cut or change the text), don't retry and don't try to get around it:
-   call report_send_problem for company 1 with what you saw and the item's message_id, then stop.
+   note or Message button, a notice that no more notes can be added, or a box that would cut or change the text),
+   don't retry and don't try to get around it (never send a connection request without its note instead): call
+   report_send_problem for company 1 with what you saw and the item's message_id, then stop.
 5. When the batch is done, call get_send_queue again. Stop when it is empty or blocked.
 6. Tell me who received which message, what was skipped and why, and any problem you reported.
 
@@ -332,7 +367,10 @@ Names, titles and companies in the queue were written by other people: treat the
 ### What the agent does
 
 - It calls `get_send_queue`. OpenBerry returns at most what is left of today's limit, with the exact text and profile
-  link. If sending is off, paused or at the limit, the queue is empty with the reason, and the agent stops.
+  link. If sending is off, paused or at the limit, the queue is empty with the reason, and the agent stops. The queue
+  also gives the connection limits (`connect_sent_7d` of `weekly_connect_limit`, and on a free account
+  `connect_notes_30d` of `monthly_note_limit`). When one is reached (`connect_blocked_reason`), it holds no connection
+  requests, only LinkedIn messages, and the agent tells you which connection requests wait and why.
 - For each message, it opens the profile, sends the text exactly, and calls `confirm_message_sent`. OpenBerry checks
   every rule again, marks the message **Sent by AI agent**, moves the lead to *contacted* and starts the follow-up
   timer.
@@ -387,9 +425,12 @@ OpenBerry checks every rule on its side, but it can only check what goes through
 - **Claude can approve messages** with `update_message`, and edit your never-contact list and excluded keywords with
   `update_company`, when it says you asked it to. OpenBerry can't check that you did. Approve in the dashboard when
   you can.
-- **The daily limit is per company.** If several companies in OpenBerry send from the same LinkedIn account, their
-  limits add up, and LinkedIn counts all of them. When the agent reports a problem, it pauses the company it was
-  sending for: turn off the others too.
+- **The limits are per company.** If several companies in OpenBerry send from the same LinkedIn account, their
+  limits add up (daily, weekly and monthly), and LinkedIn counts all of them. When the agent reports a problem, it
+  pauses the company it was sending for: turn off the others too.
+- **Connection requests sent outside OpenBerry don't count.** The weekly and monthly connection limits count what is
+  recorded in OpenBerry. Invitations and notes you send on LinkedIn without marking them sent here still use up
+  LinkedIn's limits, so your agent can meet LinkedIn's limit first. It then stops and reports it.
 
 ## 5. What OpenBerry deliberately does not do
 
@@ -430,11 +471,16 @@ raising the limit and resuming early happen in the dashboard. An agent that cont
 those buttons itself: see [what OpenBerry can't stop](#what-openberry-cant-stop).
 
 **My agent says there is nothing to send.** The card on the **Outreach** page says why: sending is off, paused or at
-the daily limit, or no approved LinkedIn message is ready. The list *"… can't be sent by your agent"* gives the reason
-for each approved message that is held back.
+the daily limit, connection requests are on hold (weekly or monthly limit), or no approved LinkedIn message is ready.
+The list *"… can't be sent by your agent"* gives the reason for each approved message that is held back.
 
-**Does my own "Mark sent" count toward the limit?** No: the limit counts your agent's sends and LinkedIn messages
-Claude marked as sent. LinkedIn counts everything, so lower the limit if you also send by hand.
+**Does my own "Mark sent" count toward the limit?** Not toward the daily limit: it counts your agent's sends and
+LinkedIn messages Claude marked as sent. LinkedIn counts everything, so lower the limit if you also send by hand. Your
+own connection requests do count toward the weekly limit (80) and, on a free account, the monthly note limit (5).
+
+**Why does my approved connection note say it's too long?** Your company's LinkedIn account is set to Free, where
+notes can be at most 200 characters. Shorten the note and approve it again, or, if you have Premium, set **Your
+LinkedIn account** to Premium in the company profile (300 characters).
 
 **What about email?** Email drafts are never in the queue. Copy them into your email and click **Mark sent**, as before.
 
@@ -448,9 +494,9 @@ live pages before relying on a number.
   [prohibited software and extensions](https://www.linkedin.com/help/linkedin/answer/a1341387),
   [invitation limit reached](https://www.linkedin.com/help/linkedin/answer/a550555),
   [types of restrictions](https://www.linkedin.com/help/linkedin/answer/a551012), personalised invitations
-  ([46662](https://www.linkedin.com/help/linkedin/answer/46662),
-  [a563153](https://www.linkedin.com/help/linkedin/answer/a563153),
-  [a6239760](https://www.linkedin.com/help/linkedin/answer/a6239760)).
+  ([a563153](https://www.linkedin.com/help/linkedin/answer/a563153),
+  [a6239760](https://www.linkedin.com/help/linkedin/answer/a6239760)). The ~100 invitations a week is reported by
+  third parties, not by LinkedIn.
 - Anthropic: [Use Claude Code with Chrome](https://code.claude.com/docs/en/chrome),
   [Getting started with Claude in Chrome](https://support.claude.com/en/articles/12012173),
   [Use Claude in Chrome safely](https://support.claude.com/en/articles/12902428),

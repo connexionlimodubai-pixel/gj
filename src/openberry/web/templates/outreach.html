@@ -174,7 +174,8 @@
 <ul class="queue">
   {% for msg in messages %}
   {% set lead = leads.get(msg.lead_id) %}
-  {% set too_long = msg.channel == "linkedin_connect" and msg.body|length > note_max %}
+  {# Only a note still to be sent can be too long: a sent one went out (e.g. from Premium, or by hand). #}
+  {% set too_long = msg.channel == "linkedin_connect" and msg.status in ("draft", "approved") and msg.body|length > note_max %}
   <li class="card queue-item" id="q-{{ msg.id }}">
     <div class="queue-head">
       {% if lead %}
@@ -190,7 +191,7 @@
     {% if msg.subject %}<p class="queue-subject"><span class="muted">Subject:</span> {{ msg.subject }}</p>{% endif %}
     <div class="queue-body" id="q-{{ msg.id }}-body">{{ msg.body }}</div>
     {% if msg.channel == "linkedin_connect" %}
-    <p class="counter{{ ' over' if too_long }}">{{ msg.body|length }} / {{ note_max }} characters{% if too_long %}: too long for a connection note from your {{ linkedin_account_label(company) }} LinkedIn account, shorten it before sending{% endif %}</p>
+    <p class="counter{{ ' over' if too_long }}">{% if msg.status in ("draft", "approved") %}{{ msg.body|length }} / {{ note_max }} characters{% if too_long %}: too long for a connection note from your {{ linkedin_account_label(company) }} LinkedIn account, shorten it before sending{% endif %}{% else %}{{ msg.body|length }} characters{% endif %}</p>
     {% endif %}
     <div class="btn-row">
       {% if msg.status == "draft" %}

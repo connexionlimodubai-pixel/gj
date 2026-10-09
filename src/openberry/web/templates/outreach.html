@@ -2,13 +2,146 @@
 {% import "_macros.html" as m with context %}
 {% block content %}
 {% set base = "/c/" ~ company.id %}
+{% set note_max = connect_note_limit(company) %}
 <div class="page-head">
   <div>
     <p class="eyebrow">{{ company.name }}</p>
     <h1>Outreach</h1>
-    <p class="lede">Review, approve and send. OpenBerry never sends anything: copy each approved message into LinkedIn or your inbox, then mark it sent.</p>
+    <p class="lede">Review, approve and send. OpenBerry never sends anything itself: copy each approved message into LinkedIn or your inbox and mark it sent, or let your own AI agent send your approved LinkedIn messages.</p>
   </div>
 </div>
+
+{% set agent_low, agent_high = AGENT_LIMIT_RANGE %}
+{% set state_labels = {"off": "Off", "on": "On", "paused": "Paused", "limit": "Daily limit reached"} %}
+<section class="card agent-card" id="agent" aria-labelledby="agent-title">
+  <header class="agent-head">
+    <span class="agent-icon" aria-hidden="true">{{ m.icon("bot", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="agent-title" class="title-row">AI agent sending (LinkedIn) <span class="pill pill-agent-{{ agent.state }}">{{ state_labels[agent.state] }}</span></h2>
+      <p class="agent-status">
+        {% if agent.state == "off" %}Off. Approved messages wait for you to send them yourself.
+        {% elif agent.state == "paused" %}Paused until <time datetime="{{ agent.paused_until|iso_dt }}">{{ agent.paused_until|abs_dt }}</time> ({{ agent.paused_until|ago }}) because your agent reported a problem.
+        {% elif agent.state == "limit" %}On, but the daily limit is used up: {{ agent.sent_last_24h }} of {{ agent.daily_limit }} sent in the last 24 hours.{% if agent.limit_frees_at %} Your agent can send again from <time datetime="{{ agent.limit_frees_at|iso_dt }}">{{ agent.limit_frees_at|abs_dt }}</time>.{% endif %}
+        {% else %}On: {{ agent.sent_last_24h }} of {{ agent.daily_limit }} sent in the last 24 hours.
+        {% endif %}
+      </p>
+      <ul class="agent-limits">
+        <li>Connection requests this week: <strong>{{ agent.connect_sent_7d }} of {{ agent.weekly_connect_limit }}</strong></li>
+        {% if agent.monthly_note_limit is not none %}
+        <li>Notes this month: <strong>{{ agent.connect_notes_30d }} of {{ agent.monthly_note_limit }}</strong> <span class="muted">(free LinkedIn account, notes up to {{ note_max }} characters)</span></li>
+        {% else %}
+        <li class="muted">Premium LinkedIn account: a note on every request, up to {{ note_max }} characters</li>
+        {% endif %}
+      </ul>
+    </div>
+  </header>
+
+  {% if agent.connect_blocked_reason and agent.state in ("on", "limit") %}
+  <div class="callout callout-warning agent-connect-hold" role="status">
+    {{ m.icon("alert", 14) }}
+    <p><strong>Connection requests are on hold.</strong>
+      {% if agent.connect_blocked_reason == "monthly_note_limit" %}Free LinkedIn accounts can add a note to only {{ agent.monthly_note_limit }} connection requests a month, and {{ agent.connect_notes_30d }} were sent in the last 30 days. Send the rest yourself without a note, or switch <a href="{{ base }}/settings#f-outreach-linkedin_account">your LinkedIn account</a> to Premium if you have Premium.
+      {% else %}{{ agent.connect_sent_7d }} connection requests were sent in the last 7 days. Your agent sends at most {{ agent.weekly_connect_limit }} a week, to stay below LinkedIn's weekly invitation limit (about 100, as reported).
+      {% endif %}
+      {% if agent.connect_frees_at %}Your agent can send connection requests again from <time datetime="{{ agent.connect_frees_at|iso_dt }}">{{ agent.connect_frees_at|abs_dt }}</time>.{% endif %}
+      LinkedIn messages still go out.</p>
+  </div>
+  {% endif %}
+
+  {% if agent.paused %}
+  <div class="agent-pause" role="alert">
+    {{ m.icon("alert", 18) }}
+    <div class="min0 grow">
+      <p><strong>{% if agent.enabled %}Your agent stopped and reported a problem:{% else %}Paused until {{ agent.paused_until|abs_dt }} after your agent reported a problem:{% endif %}</strong></p>
+      <p class="agent-reason">{{ agent.pause_reason or "No details given." }}</p>
+      <p class="small">Open LinkedIn in your browser and check for warnings, security checks or limits before you resume. Never try to get around them.</p>
+    </div>
+    <form method="post" action="/c/{{ company.id }}/outreach/agent/resume">{{ m.csrf() }}
+      <button class="btn btn-sm" type="submit" data-confirm="Resume agent sending? Only do this after you have checked LinkedIn yourself and everything looks normal.">{{ m.icon("play", 14) }}Resume</button>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="agent-grid">
+    <div class="agent-controls">
+      <form method="post" action="/c/{{ company.id }}/outreach/agent" class="agent-form">{{ m.csrf() }}
+        <div class="field">
+          <label for="agent-limit">Daily limit</label>
+          <input class="input" id="agent-limit" name="agent_daily_limit" type="number" min="{{ agent_low }}" max="{{ agent_high }}" inputmode="numeric" value="{{ agent.daily_limit }}" aria-describedby="agent-limit-help">
+          <p class="help" id="agent-limit-help">Most messages your agent may send in any 24 hours ({{ agent_low }}–{{ agent_high }}).</p>
+        </div>
+        <div class="btn-row">
+          {% if agent.enabled %}
+          <button class="btn" type="submit" name="agent_sending" value="on">{{ m.icon("check", 14) }}Save limit</button>
+          <button class="btn" type="submit" name="agent_sending" value="off" formnovalidate>{{ m.icon("pause", 14) }}Turn off</button>
+          {% else %}
+          <button class="btn btn-primary" type="submit" name="agent_sending" value="on" data-confirm="Turn on AI agent sending? LinkedIn's rules forbid automation and your account could be restricted. Only messages you approve are sent.">{{ m.icon("play", 14) }}Turn on</button>
+          {% endif %}
+        </div>
+      </form>
+      <div class="callout callout-warning agent-warning">
+        {{ m.icon("alert", 14) }}
+        <div>
+          <p><strong>At your own risk.</strong> LinkedIn's rules forbid automation. Even an AI agent working in your own browser, with your own login, can get your LinkedIn account restricted.</p>
+          <ul>
+            <li>Only messages you approve here are sent, exactly as you approved them. Email is never sent this way.</li>
+            <li>Keep the daily limit low.</li>
+            <li>If LinkedIn shows a warning, a security check or a limit, your agent stops and OpenBerry pauses sending for 24 hours.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="agent-side">
+      <h3 class="label-sm">Queued for your agent <span class="count">{{ agent.eligible_total }}</span></h3>
+      {% if agent["items"] %}
+      <ul class="list agent-queue">
+        {% for item in agent["items"] %}
+        <li class="list-item">
+          {{ m.avatar(item.lead_name) }}
+          <div class="min0 grow">
+            <a class="lead-name" href="/c/{{ company.id }}/leads/{{ item.lead_id }}#msg-{{ item.message_id }}">{{ item.lead_name or "Unnamed lead" }}</a>
+            <span class="sub">{{ item.channel|channel_label }} · step {{ item.step }}</span>
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% if agent.eligible_total > agent["items"]|length %}<p class="small muted">{{ agent.eligible_total - agent["items"]|length }} more wait{{ "s" if agent.eligible_total - agent["items"]|length == 1 }} until the daily limit allows them.</p>{% endif %}
+      {% else %}
+      <p class="agent-empty small">
+        {% if agent.state == "off" %}Nothing is queued while agent sending is off.
+        {% elif agent.state == "paused" %}Nothing is queued while sending is paused.
+        {% elif agent.state == "limit" %}Nothing is queued: the daily limit is reached.
+        {% elif agent.eligible_total %}{{ agent.eligible_total|plural("message") }} wait{{ "s" if agent.eligible_total == 1 }} until the daily limit allows them.
+        {% else %}Nothing to send. Approve LinkedIn drafts first: only approved LinkedIn messages to leads who haven't replied are queued.
+        {% endif %}
+      </p>
+      {% endif %}
+      {% if agent.skipped %}
+      <details class="agent-skipped">
+        <summary>{{ agent.skipped|length|plural("approved LinkedIn message") }} can't be sent by your agent</summary>
+        <ul>
+          {% for s in agent.skipped[:agent_skipped_shown] %}
+          {% set lead = agent_leads.get(s.lead_id) %}
+          <li><a href="/c/{{ company.id }}/leads/{{ s.lead_id }}#msg-{{ s.message_id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}Lead {{ s.lead_id }}{% endif %}</a>: {{ s.reason }}</li>
+          {% endfor %}
+          {% if agent.skipped|length > agent_skipped_shown %}<li class="muted">+{{ agent.skipped|length - agent_skipped_shown }} more</li>{% endif %}
+        </ul>
+      </details>
+      {% endif %}
+
+      <h3 class="label-sm">Tell your agent</h3>
+      {% for label, prompt in agent_prompts %}
+      <p class="prompt-label">{{ label }}</p>
+      <div class="prompt"><p id="agent-prompt-{{ loop.index }}">{{ prompt }}</p>{{ m.copy_button("#agent-prompt-" ~ loop.index, "Copy", "btn btn-sm btn-ghost") }}</div>
+      {% endfor %}
+      <p class="small agent-links">
+        <a href="{{ AGENT_DOCS_URL }}" target="_blank" rel="noopener noreferrer">How agent sending works{{ m.icon("external", 12) }}</a>
+        <a href="/help">Connect Claude{{ m.icon("chevron-right", 12) }}</a>
+      </p>
+    </div>
+  </div>
+</section>
 
 <nav class="tabs" aria-label="Outreach queue">
   {% for key, label in tabs %}
@@ -41,7 +174,7 @@
 <ul class="queue">
   {% for msg in messages %}
   {% set lead = leads.get(msg.lead_id) %}
-  {% set too_long = msg.channel == "linkedin_connect" and msg.body|length > LINKEDIN_CONNECT_LIMIT %}
+  {% set too_long = msg.channel == "linkedin_connect" and msg.body|length > note_max %}
   <li class="card queue-item" id="q-{{ msg.id }}">
     <div class="queue-head">
       {% if lead %}
@@ -50,12 +183,14 @@
       {{ m.score(lead.score, lead.tier) }}
       {% endif %}
       {{ m.msg_pill(msg.status) }}
+      {% if msg.id in agent_queued_ids %}<span class="pill pill-agent-on">{{ m.icon("bot", 12) }}Queued for your agent</span>{% endif %}
+      {{ m.sent_via(msg) }}
     </div>
     <p class="queue-meta">{{ msg.channel|channel_label }} · step {{ msg.step }} · {{ m.when(msg.sent_at or msg.created_at) }}</p>
     {% if msg.subject %}<p class="queue-subject"><span class="muted">Subject:</span> {{ msg.subject }}</p>{% endif %}
     <div class="queue-body" id="q-{{ msg.id }}-body">{{ msg.body }}</div>
     {% if msg.channel == "linkedin_connect" %}
-    <p class="counter{{ ' over' if too_long }}">{{ msg.body|length }} / {{ LINKEDIN_CONNECT_LIMIT }} characters{% if too_long %}: too long for a LinkedIn connection note, shorten it before sending{% endif %}</p>
+    <p class="counter{{ ' over' if too_long }}">{{ msg.body|length }} / {{ note_max }} characters{% if too_long %}: too long for a connection note from your {{ linkedin_account_label(company) }} LinkedIn account, shorten it before sending{% endif %}</p>
     {% endif %}
     <div class="btn-row">
       {% if msg.status == "draft" %}
@@ -77,7 +212,7 @@
   {% if tab == "drafts" %}
     {% call m.empty("edit", "No drafts waiting for review") %}<p>Draft from any lead's page, switch the profile to auto-draft, or ask Claude: “Draft LinkedIn connection notes for all hot leads of company {{ company.id }} that have no message yet.”</p>{% endcall %}
   {% elif tab == "approved" %}
-    {% call m.empty("check", "Nothing approved yet") %}<p>Approved messages wait here until you send them and mark them sent.</p>{% endcall %}
+    {% call m.empty("check", "Nothing approved yet") %}<p>Approved messages wait here until you send them and mark them sent{% if agent.enabled %}, or your AI agent sends them{% endif %}.</p>{% endcall %}
   {% elif tab == "sent" %}
     {% call m.empty("send", "Nothing sent yet") %}<p>Messages you mark as sent appear here and start the follow-up timer.</p>{% endcall %}
   {% else %}

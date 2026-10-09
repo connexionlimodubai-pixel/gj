@@ -107,6 +107,9 @@ comes with the app.
    icon next to the clock and choose **Quit**. On a Mac, use **Claude → Quit Claude**.
 5. Ask Claude: *"Use openberry: list my companies."*
 
+To let Claude send the LinkedIn messages you approved from your own Chrome (optional, off by default, at your own
+risk), see [AI agent sending](AI_AGENT_SENDING.md).
+
 The settings look like this. The paths are examples, and your own are in the **Connect Claude** page:
 
 ```json
@@ -252,7 +255,7 @@ How it fits together:
   1. `--version`
   2. `demo`
   3. `serve`: health check, the demo dashboard, the Connect Claude page and a static file.
-  4. An MCP handshake over stdio with `tools/list` (21 tools) and a tool call.
+  4. An MCP handshake over stdio with `tools/list` (24 tools) and a tool call.
   5. `OpenBerry --smoke`: the app starts its server, checks it and stops, without a window.
 
   It exits with an error and says what broke.

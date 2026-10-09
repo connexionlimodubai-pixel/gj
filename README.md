@@ -17,7 +17,8 @@ thinking through MCP, and a web dashboard (with a registration board for your co
 3. **Score every lead** transparently: ICP fit + time-decayed intent + signal stacking, plus Claude's own judgement.
    Every point is explained ("Title matches 'Travel Manager'", "Hiring for a relevant role, 3d ago").
 4. **Draft outreach** with Claude (or a free local Ollama model, or templates): LinkedIn notes, DMs, emails and follow-ups.
-   **Nothing is ever sent automatically.** You review, copy, send and mark as sent.
+   **Nothing is sent without your approval.** You review, copy, send and mark as sent, or, if you choose, let your own
+   AI agent send the LinkedIn messages you approved ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)).
 5. **Alert you** on Slack or Discord when a person lead turns hot, whether a scan, Claude, the API, a CSV import or an edit
    made it hot. Alerts go out after each scan and, while `openberry serve` runs, within a few minutes.
    Export to CSV or use the JSON API with n8n or Activepieces.
@@ -83,10 +84,23 @@ Then ask Claude things like:
 - *"Find the decision-makers at the companies that are hiring, and add them."*
 - *"Draft LinkedIn connection notes for every hot lead that has no message yet."*
 
-Claude gets 21 tools (scan, prospecting plan, add leads, assess, outreach context, save draft, log reply, pipeline report…),
+Claude gets 24 tools (scan, prospecting plan, add leads, assess, outreach context, save draft, log reply, pipeline report…),
 plus prompts such as `daily_lead_hunt`. See [docs/CLAUDE_MCP.md](docs/CLAUDE_MCP.md).
 To let Claude browse LinkedIn and the web too, add free open-source MCP servers next to OpenBerry
 (Playwright, fetch, SearXNG, and optionally a LinkedIn MCP server at your own risk). See [docs/OPEN_SOURCE_STACK.md](docs/OPEN_SOURCE_STACK.md).
+
+## AI agent sending (optional, at your own risk)
+
+OpenBerry never opens LinkedIn or sends anything itself. If you turn on **AI agent sending** for a company (Outreach page,
+off by default), an AI agent running in your own browser, logged in to your LinkedIn, can send the LinkedIn messages you
+approved. Claude in Chrome and Playwright MCP's extension mode both work. OpenBerry enforces the rules itself:
+- approved messages only, exactly as approved, and LinkedIn only (never email)
+- a daily limit (default 15 in any 24 hours)
+- never leads who replied or are on your never-contact list
+- a 24-hour pause, with a Resume button, as soon as the agent reports a LinkedIn warning, check or limit
+
+There are no tricks to hide automation. LinkedIn's User Agreement forbids automated messaging, so your account can be
+restricted. Read [docs/AI_AGENT_SENDING.md](docs/AI_AGENT_SENDING.md) before you turn it on.
 
 ## Configuration
 
@@ -135,8 +149,8 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ## Responsible use
 
-- OpenBerry never sends messages or automates LinkedIn. LinkedIn's User Agreement prohibits automation. If you add a
-  LinkedIn MCP server, that is your decision and your account's risk.
+- OpenBerry never sends messages or automates LinkedIn itself. LinkedIn's User Agreement prohibits automation. If you add a
+  LinkedIn MCP server or turn on [AI agent sending](docs/AI_AGENT_SENDING.md), that is your decision and your account's risk.
 - Each data source has terms. They are summarised in [docs/SIGNALS.md](docs/SIGNALS.md). Google News RSS is for personal,
   non-commercial use, and Reddit requires an agreement for commercial use.
 - Prospect data is personal data. Comply with GDPR, the UAE PDPL, CAN-SPAM and similar laws: contact people with relevant, honest messages and
@@ -146,7 +160,7 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ```bash
 uv sync --extra dev
-uv run pytest            # ~620 tests, no network needed
+uv run pytest            # ~830 tests, no network needed
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

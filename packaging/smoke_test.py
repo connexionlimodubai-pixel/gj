@@ -6,7 +6,7 @@ With a fresh, temporary OPENBERRY_HOME (your own data is never touched) it runs,
   2. `openberry-cli demo`                      the database and the demo data
   3. `openberry-cli serve --port <free>`       /healthz, the demo dashboard /c/1, /help and a static file
   4. `openberry-cli mcp`                       what Claude Desktop starts: an MCP handshake over stdio,
-                                               tools/list (21 tools) and a tool call that sees the demo company
+                                               tools/list (24 tools) and a tool call that sees the demo company
   5. `OpenBerry --smoke` (if given)            the app's executable starts its server, checks it and stops;
                                                a windowed Windows app has no console, so its log file counts too
 
@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import IO, Any
 
 PROTOCOL_VERSION = "2025-06-18"
-EXPECTED_TOOLS = 21
+EXPECTED_TOOLS = 24
 COMMAND_TIMEOUT = 120.0  # seconds; a first start of a packaged app can be slow (antivirus scans on Windows)
 SERVER_TIMEOUT = 90.0
 MCP_TIMEOUT = 60.0
@@ -329,7 +329,7 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
                                      description="Check a built OpenBerry app end to end.")
     parser.add_argument("cli", type=executable, help="the console executable, e.g. dist/OpenBerry/openberry-cli")
     parser.add_argument("app", type=executable, nargs="?", help="the app's executable, e.g. dist/OpenBerry/OpenBerry")
-    parser.add_argument("--expect-tools", type=int, default=EXPECTED_TOOLS, help="MCP tools expected (default: 21)")
+    parser.add_argument("--expect-tools", type=int, default=EXPECTED_TOOLS, help="MCP tools expected (default: 24)")
     return parser.parse_args(argv)
 
 

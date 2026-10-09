@@ -70,6 +70,8 @@ _PATHS = {
              'l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
     "plug": '<path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
     "target": '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+    "bot": '<path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/>'
+           '<path d="M2 14h2M20 14h2M15 13v2M9 13v2"/>',
 }
 
 ICONS: dict[str, Markup] = {name: Markup(path) for name, path in _PATHS.items()}

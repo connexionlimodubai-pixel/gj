@@ -11,7 +11,7 @@ This page lists the GitHub projects we checked (October 2026), what each one add
 
 | Need | Project | Licence | Why |
 |---|---|---|---|
-| **Claude ↔ your leads** | **OpenBerry** (this repo) | MIT | Registration board, signals, scoring, outreach drafts, 21 MCP tools |
+| **Claude ↔ your leads** | **OpenBerry** (this repo) | MIT | Registration board, signals, scoring, outreach drafts, 24 MCP tools |
 | Read web pages | [modelcontextprotocol/servers — fetch](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) | MIT | Zero-setup URL → markdown for company research |
 | Browse like a human (JS sites, careers pages) | [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp) | Apache-2.0 | Persistent browser profile, works with logged-in sites |
 | Web search without paid APIs | [searxng/searxng](https://github.com/searxng/searxng) + [ihor-sokoliuk/mcp-searxng](https://github.com/ihor-sokoliuk/mcp-searxng) | AGPL-3.0 / MIT | Self-hosted metasearch; `site:linkedin.com/in` queries |
@@ -92,4 +92,5 @@ Enable JSON output in the SearXNG settings. Keep volumes modest, because upstrea
 - [debpalash/OpenGTM](https://github.com/debpalash/OpenGTM) (AGPL-3.0): a self-hosted Clay alternative (enrichment tables) with an MCP server.
 
 OpenBerry's design choice is different: **no LinkedIn automation built in, no paid dependencies.** Claude is the agent,
-public data sources supply the signals, and a human presses "send".
+public data sources supply the signals, and a human presses "send". The one exception is opt-in: with
+[AI agent sending](AI_AGENT_SENDING.md), your own agent in your own browser sends the LinkedIn messages you approved.

@@ -36,6 +36,8 @@ EXPECTED_TOOLS = {
     "list_leads", "get_lead", "add_leads", "add_signal", "update_lead", "assess_lead", "get_outreach_context",
     "save_outreach_message", "list_outreach", "update_message", "log_reply", "followups_due", "pipeline_report",
     "get_prospecting_plan", "export_leads_csv", "delete_lead",
+    # AI agent sending (tests/test_agent_sending.py)
+    "get_send_queue", "confirm_message_sent", "report_send_problem",
 }
 
 INIT_REQUEST = {
@@ -93,6 +95,10 @@ async def test_lists_all_tools_with_annotations():
     assert tools["run_signal_scan"].annotations.open_world_hint is True
     assert tools["add_leads"].annotations.read_only_hint is False
     assert tools["add_leads"].annotations.destructive_hint is False
+    assert len(tools) == 24
+    assert tools["get_send_queue"].annotations.read_only_hint is True
+    for name in ("confirm_message_sent", "report_send_problem"):
+        assert tools[name].annotations.read_only_hint is False and tools[name].annotations.destructive_hint is False
     # Rich schemas: nested registration profile and lead/signal shape are advertised.
     assert "CompanyProfile" in json.dumps(tools["register_company"].input_schema)
     assert "SignalIn" in json.dumps(tools["add_leads"].input_schema)
@@ -115,6 +121,8 @@ async def test_server_identity_and_instructions():
     assert server.name == "openberry"
     assert "never" in server.instructions.lower() and "add_leads" in server.instructions
     assert "list_companies" in server.instructions and "human" in server.instructions
+    flat = " ".join(server.instructions.split())
+    assert "200 characters on a free LinkedIn account, 300 on Premium" in flat and "5 connection requests a month" in flat
 
 
 # --------------------------------------------------------------------------------------
@@ -396,13 +404,13 @@ async def test_outreach_flow(company):
         assert (await ok(c, "get_outreach_context", lead_id=no_profile.id))["channel"] == "email"
         warnings = (await ok(c, "get_outreach_context", lead_id=no_profile.id, channel="linkedin_connect"))["warnings"]
         assert any("No LinkedIn profile" in w for w in warnings)
-        assert ctx["limits"]["max_chars"] == 300 and ctx["template_draft"]["body"]
+        assert ctx["limits"]["max_chars"] == 200 and ctx["template_draft"]["body"]  # a free LinkedIn account
         assert ctx["lead"]["name"] == "Omar Haddad" and ctx["signals"][0]["type"] == "keyword_mention"
         assert ctx["style"]["banned_words"] == ["synergy", "game changer"]
         assert ctx["save_with"]["arguments"]["lead_id"] == lead.id
 
-        too_long = "x" * 301
-        assert "limited to 300 characters; this one has 301" in await error_text(
+        too_long = "x" * 201
+        assert "limited to 200 characters; this one has 201" in await error_text(
             c, "save_outreach_message", lead_id=lead.id, body=too_long)
         text = await error_text(c, "save_outreach_message", lead_id=lead.id,
                                 body="Hi Omar, real Synergy here. A game changer!")
@@ -436,7 +444,7 @@ async def test_outreach_flow(company):
         assert [m["id"] for m in drafts["messages"]] == [second["message_id"]]
         assert drafts["messages"][0]["lead_name"] == "Omar Haddad"
 
-        assert "limited to 300" in await error_text(c, "update_message", message_id=second["message_id"],
+        assert "limited to 200" in await error_text(c, "update_message", message_id=second["message_id"],
                                                     body="y" * 400)
         assert "nothing to change" in await error_text(c, "update_message", message_id=second["message_id"])
         sent = await ok(c, "update_message", message_id=second["message_id"], status="sent")
@@ -466,6 +474,51 @@ async def test_outreach_flow(company):
         assert any("replied" in w for w in ctx3["warnings"])
         assert "list_leads" in await error_text(c, "get_outreach_context", lead_id=9999)
         assert "list_outreach" in await error_text(c, "update_message", message_id=9999, status="sent")
+
+
+async def test_connection_note_limits_follow_the_linkedin_account(company):
+    """Free (the default): notes of at most 200 characters and 5 a month. Premium: 300 characters, every request."""
+    lead, _ = repo.upsert_lead(company.id, LeadIn(full_name="Omar Haddad", lead_company="Northwind",
+                                                  linkedin_url="https://www.linkedin.com/in/omar-limits"))
+    async with mcp_client() as c:
+        tools = {t.name: t for t in (await c.list_tools()).tools}
+        assert "200 characters free, 300 Premium" in " ".join(tools["save_outreach_message"].description.split())
+        assert "linkedin_account" in " ".join(tools["update_company"].description.split())
+        ctx = await ok(c, "get_outreach_context", lead_id=lead.id, channel="linkedin_connect")
+        assert ctx["limits"] == {"max_chars": 200, "linkedin_account": "free", "monthly_note_limit": 5,
+                                 "notes_sent_30d": 0}
+        assert "Hard limit 200 characters" in ctx["channel_guidance"] and "free LinkedIn account" in ctx["channel_guidance"]
+        assert any("only 5 connection requests a month" in rule for rule in ctx["rules"])
+        assert len(ctx["template_draft"]["body"]) <= 200
+        text = await error_text(c, "save_outreach_message", lead_id=lead.id, channel="linkedin_connect",
+                                body="x" * 201)
+        assert "limited to 200 characters; this one has 201" in text and "free" in text and "Premium: 300" in text
+        saved = await ok(c, "save_outreach_message", lead_id=lead.id, channel="linkedin_connect", body="y" * 200)
+        assert saved["chars"] == 200
+        assert "limited to 200" in await error_text(c, "update_message", message_id=saved["message_id"],
+                                                    body="z" * 250)
+        email = await ok(c, "get_outreach_context", lead_id=lead.id, channel="email")
+        assert email["limits"] == {} and "Hard limit" not in email["channel_guidance"]
+
+        # Five notes sent this month (by anyone): Claude is told before writing a sixth.
+        other, _ = repo.upsert_lead(company.id, LeadIn(full_name="Earlier Lead",
+                                                       linkedin_url="https://www.linkedin.com/in/earlier"))
+        for _ in range(5):
+            repo.create_message(other.id, "Hi, happy to connect!", channel="linkedin_connect", status="sent")
+        full = await ok(c, "get_outreach_context", lead_id=lead.id, channel="linkedin_connect")
+        assert full["limits"]["notes_sent_30d"] == 5
+        assert any("LinkedIn allows a note on only 5 connection requests a month" in w for w in full["warnings"])
+
+        await ok(c, "update_company", company_id=company.id, changes={"outreach": {"linkedin_account": "Premium"}})
+        premium = await ok(c, "get_outreach_context", lead_id=lead.id, channel="linkedin_connect")
+        assert premium["limits"]["max_chars"] == 300 and premium["limits"]["monthly_note_limit"] is None
+        assert "Hard limit 300 characters" in premium["channel_guidance"]
+        assert not any("a month" in rule for rule in premium["rules"]) and not any("a month" in w for w in premium["warnings"])
+        long_note = await ok(c, "save_outreach_message", lead_id=lead.id, channel="linkedin_connect", body="p" * 300)
+        assert long_note["chars"] == 300
+        await ok(c, "update_message", message_id=long_note["message_id"], body="q" * 290)
+        assert "limited to 300 characters; this one has 301" in await error_text(
+            c, "save_outreach_message", lead_id=lead.id, channel="linkedin_connect", body="r" * 301)
 
 
 async def test_steps_follow_the_highest_step_sent(company):
@@ -733,7 +786,8 @@ async def test_resources(demo_id):
 async def test_prompts(demo_id):
     async with mcp_client() as c:
         prompts = {p.name: p for p in (await c.list_prompts()).prompts}
-        assert set(prompts) == {"onboard_company", "daily_lead_hunt", "write_outreach", "weekly_report"}
+        assert set(prompts) == {"onboard_company", "daily_lead_hunt", "write_outreach", "weekly_report",
+                                "send_approved_messages"}
         assert [a.name for a in prompts["daily_lead_hunt"].arguments] == ["company_id"]
 
         onboard = await c.get_prompt("onboard_company", {})

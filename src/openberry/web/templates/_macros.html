@@ -151,3 +151,15 @@
 {{ help_err(name, help) }}
 </fieldset>
 {%- endmacro %}
+
+{% macro check_card(name, label, title, description="", help="", attrs={}) -%}
+{# One checkbox (form field kind "bool"): ticked submits "true", unticked submits nothing. #}
+<div class="field{% if errors.get(name) %} has-error{% endif %}" data-label="{{ label }}">
+<label class="radio-card check-card"><input type="checkbox" id="{{ fid(name) }}" name="{{ name }}" value="true"{% if values.get(name) %} checked{% endif %}{{ aria(name, help) }}{{ attrs_of(attrs) }}><span class="radio-title">{{ title }}</span>{% if description %}<span class="radio-desc">{{ description }}</span>{% endif %}</label>
+{{ help_err(name, help) }}
+</div>
+{%- endmacro %}
+
+{% macro sent_via(msg) -%}
+{% set label = msg|sent_via %}{% if label %}<span class="pill pill-sent-via">{{ icon("bot" if msg.sent_via == "agent" else "sparkles", 12) }}{{ label }}</span>{% endif %}
+{%- endmacro %}

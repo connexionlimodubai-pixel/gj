@@ -12,7 +12,8 @@ from starlette.responses import Response
 
 from .. import leads_csv, outreach, repo
 from ..config import get_settings
-from ..models import LEAD_STATUSES, MESSAGE_CHANNELS, TIERS, Company, Lead
+from ..models import AGENT_CHANNELS, LEAD_STATUSES, MESSAGE_CHANNELS, TIERS, Company, Lead, Message
+from ..repo import AGENT_QUEUE_MAX
 from . import forms
 from .auth import checked_form, require_login
 from .pages import redirect
@@ -196,8 +197,13 @@ def lead_profile(request: Request, company_id: int, lead_id: int, form: FormData
     if not fields.get("full_name", lead.full_name) and not fields.get("lead_company", lead.lead_company):
         flash(request, "A lead needs a name or a company.", "error")
     else:
+        approved = len(repo.list_messages(company_id, status="approved", lead_id=lead_id))
         repo.update_lead(lead_id, fields)
-        flash(request, "Profile saved and lead rescored.")
+        if len(repo.list_messages(company_id, status="approved", lead_id=lead_id)) < approved:
+            flash(request, "Profile saved and lead rescored. The LinkedIn profile changed, so approved LinkedIn "
+                           "messages to this lead are drafts again: approve them for the new profile.", "info")
+        else:
+            flash(request, "Profile saved and lead rescored.")
     return redirect(f"/c/{company_id}/leads/{lead_id}")
 
 
@@ -267,6 +273,18 @@ def lead_reply(request: Request, company_id: int, lead_id: int, form: FormData =
 # Messages
 # --------------------------------------------------------------------------------------
 
+def _approved_note(company_id: int, message: Message) -> str:
+    """What happens to a message just approved: the user sends it, or their AI agent may."""
+    if message.channel not in AGENT_CHANNELS or not repo.get_company(company_id).outreach.agent_sending:
+        return "Approved. Copy it and send it from LinkedIn or your inbox."
+    queue = repo.send_queue(company_id, limit=AGENT_QUEUE_MAX)
+    why_not = next((s["reason"] for s in queue.get("skipped") or [] if s["message_id"] == message.id), "")
+    if why_not:
+        return (f"Approved. It isn't in your AI agent's queue right now ({why_not}); you can copy it and send it "
+                "yourself.")
+    return "Approved. Your AI agent will send it exactly as it is, or copy it and send it yourself."
+
+
 @router.post("/c/{company_id}/messages/{message_id}")
 def message_action(request: Request, company_id: int, message_id: int,
                    form: FormData = Depends(checked_form)) -> Response:
@@ -288,12 +306,16 @@ def message_action(request: Request, company_id: int, message_id: int,
     if "subject" in form and message.direction == "outbound":
         edits["subject"] = _form_text(form, "subject")
     try:
-        repo.update_message(message_id, status=MESSAGE_ACTIONS[action], **edits)
+        updated = repo.update_message(message_id, status=MESSAGE_ACTIONS[action], **edits)
     except ValueError as exc:
         flash(request, str(exc), "error")
         return redirect(back)
+    if message.status == "approved" and updated.status == "draft" and action == "save":
+        # repo.update_message: an approval covers the exact text, so changed text waits for approval again.
+        flash(request, "Saved as a draft: you changed the approved text. Approve it again when it's ready.", "info")
+        return redirect(back)
     flash(request, {
-        "save": "Message saved.", "approve": "Approved. Copy it and send it from LinkedIn or your inbox.",
+        "save": "Message saved.", "approve": _approved_note(company_id, message),
         "sent": "Marked as sent. The follow-up timer has started.", "skip": "Message skipped.",
         "draft": "Moved back to drafts.",
     }[action])

@@ -7,6 +7,7 @@ OpenBerry ships an MCP server, so Claude can work on your pipeline as an AI SDR.
 - qualify leads
 - draft personal outreach
 - write pipeline reports
+- optionally, send the LinkedIn messages you approved from your own browser ([AI agent sending](AI_AGENT_SENDING.md), off by default)
 
 Everything Claude saves shows up in the dashboard, and the dashboard's data is what Claude sees.
 
@@ -51,6 +52,8 @@ A standalone HTTP server, with the same auth, is `openberry mcp --http --port 80
 
 ## 2. Tools
 
+OpenBerry gives Claude 24 tools.
+
 | Tool | What Claude uses it for |
 |---|---|
 | `list_companies` | See registered companies with lead/hot counts |
@@ -65,14 +68,17 @@ A standalone HTTP server, with the same auth, is `openberry mcp --http --port 80
 | `assess_lead` | Give Claude's 0-100 fit/timing judgement and rationale (blended 30% into the score) |
 | `get_outreach_context` | Everything needed to write one message: sender, tone, offer, lead, signals, thread. Without a channel and step it prepares the next message in the sequence |
 | `save_outreach_message` | Store a draft. Enforces the LinkedIn 300-character limit and your banned words. **Never sends.** |
-| `list_outreach` / `update_message` | Review the queue, edit drafts, mark sent |
+| `list_outreach` / `update_message` | Review the queue, edit drafts, mark sent. Claude sets *approved* only when you approve that exact text; editing an approved message makes it a draft again |
 | `log_reply` | Record the lead's reply. This stops the follow-up sequence. |
 | `followups_due` | Leads waiting for their next follow-up, with the step and channel to use |
 | `pipeline_report` | Numbers and suggestions for a weekly report |
 | `export_leads_csv` | CSV for a CRM or an outreach tool |
+| `get_send_queue` | [AI agent sending](AI_AGENT_SENDING.md) only. The approved LinkedIn messages your browser agent may send now, with the exact text and profile link. Empty, with the reason, while sending is off, paused or at the daily limit |
+| `confirm_message_sent` | The agent records each message right after sending it. OpenBerry checks every rule again and counts it toward the daily limit |
+| `report_send_problem` | The kill switch. On any LinkedIn warning, check or limit, it pauses agent sending for 24 hours and puts the message back to approved |
 
 Resources: `openberry://companies`, `openberry://company/{id}/profile`, `openberry://company/{id}/hot-leads`.
-Prompts: `onboard_company`, `daily_lead_hunt`, `write_outreach`, `weekly_report`.
+Prompts: `onboard_company`, `daily_lead_hunt`, `write_outreach`, `weekly_report`, `send_approved_messages` (AI agent sending).
 
 Slack/Discord alerts and `auto_draft` drafts also cover leads Claude makes hot: they go out within one scheduler tick
 (5 minutes by default) while `openberry serve` runs, or with the next signal scan.
@@ -86,6 +92,8 @@ Slack/Discord alerts and `auto_draft` drafts also cover leads Claude makes hot: 
 - *"Draft LinkedIn connection notes for every hot lead with no message yet. Keep them under 300 characters and in our tone."*
 - *"Here's a reply from Omar: '…'. Log it and draft an answer that books a call."*
 - *"Write my weekly pipeline report for company 1."*
+- With AI agent sending on, and Claude able to use your browser: *"Use the openberry tools: run the send_approved_messages
+  prompt for company 1."* In Claude Code, `/mcp__openberry__send_approved_messages 1` does the same.
 
 ## 4. With a LinkedIn MCP server (optional, at your own risk)
 
@@ -96,5 +104,22 @@ Add [stickerdaniel/linkedin-mcp-server](https://github.com/stickerdaniel/linkedi
 > the influencers listed, find people who commented and match our ICP, and add them with `add_leads`
 > (signal type `competitor_engagement` or `influencer_engagement`, with the post URL). Go slowly: at most 30 profiles."*
 
-LinkedIn prohibits automated access and may restrict your account. Keep volumes low and do all sending manually.
-OpenBerry never sends messages.
+LinkedIn prohibits automated access and may restrict your account. Keep volumes low, and don't send messages through
+the LinkedIn MCP server. OpenBerry itself never sends messages: to have an agent in your own browser send the ones you
+approved, see the next section.
+
+## 5. AI agent sending (optional, at your own risk)
+
+Turn it on per company on the **Outreach** page. Claude, in your own browser (Claude in Chrome, or Playwright MCP in
+extension mode), then sends only the LinkedIn messages you approved, exactly as approved:
+
+1. `get_send_queue(company_id)` returns the approved `linkedin_connect` and `linkedin_dm` messages it may send now.
+2. Claude sends each one from your browser, then calls `confirm_message_sent(message_id)`.
+3. At any warning, verification, CAPTCHA, limit or anything unexpected, it calls `report_send_problem` and stops.
+   Sending pauses for 24 hours, and the Outreach page shows the reason and a **Resume** button.
+
+OpenBerry enforces the rules itself: off by default, approved messages only, LinkedIn only (never email), a rolling
+24-hour limit (default 15), never leads who replied or are excluded, and never a step twice. Changing an approved
+text, or the lead's LinkedIn profile, makes the message a draft again. Claude can turn agent
+sending off or lower its limit when you ask, but can't turn it on, raise the limit or lift a pause. Setup, risks and
+limits: [AI_AGENT_SENDING.md](AI_AGENT_SENDING.md).

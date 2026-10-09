@@ -479,7 +479,7 @@ def test_smoke_test_passes_against_the_app(tmp_path: Path, capsys: pytest.Captur
     assert smoke.main([str(app), str(app)]) == 0
     out = capsys.readouterr().out
     for check in ("version: openberry " + openberry.__version__, "demo:", "serve: served /c/1, /help",
-                  "mcp: protocol 2025-06-18, 21 tools, list_companies sees 1 company", "app --smoke: --smoke passed"):
+                  "mcp: protocol 2025-06-18, 24 tools, list_companies sees 1 company", "app --smoke: --smoke passed"):
         assert check in out
     assert "Smoke test passed" in out
 

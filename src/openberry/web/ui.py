@@ -29,14 +29,23 @@ from ..models import (
     Company,
     Lead,
 )
-from ..outreach import LINKEDIN_CONNECT_LIMIT
+from ..outreach import (
+    LINKEDIN_CONNECT_LIMIT,
+    LINKEDIN_CONNECT_LIMIT_FREE,
+    LINKEDIN_FREE_NOTES_PER_MONTH,
+    account_label,
+    connect_note_limit,
+)
+from .forms import AGENT_LIMIT_RANGE
 from .icons import ICONS, LOGO
 from .session import csrf_token, is_logged_in, pop_flashes
 
 WEB_DIR = Path(__file__).parent
 TEMPLATE_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
-DOCS_URL = "https://github.com/connexionlimodubai-pixel/gj#readme"
+REPO_URL = "https://github.com/connexionlimodubai-pixel/gj"
+DOCS_URL = REPO_URL + "#readme"
+AGENT_DOCS_URL = REPO_URL + "/blob/main/docs/AI_AGENT_SENDING.md"
 
 CHANNEL_LABELS = {
     "linkedin_connect": "LinkedIn connection note",
@@ -55,6 +64,7 @@ LEAD_SOURCES = SIGNAL_SOURCES
 SCAN_STATUS_LABELS = {"running": "Running", "ok": "Ok", "failed": "Failed",
                       "nothing_configured": "No sources configured", "no_data": "No data"}
 STATUS_LABELS = {s: s.replace("_", " ").capitalize() for s in LEAD_STATUSES}
+LINKEDIN_ACCOUNT_OPTIONS = [("free", "Free (Basic)"), ("premium", "Premium")]
 
 
 def _asset_version() -> str:
@@ -189,6 +199,18 @@ def scan_status_label(status: str) -> str:
     return SCAN_STATUS_LABELS.get(status) or (status or "unknown").replace("_", " ").capitalize()
 
 
+# Message.sent_via -> who recorded the send, shown next to sent messages ("" = the user, shown as nothing).
+SENT_VIA_LABELS = {"agent": "Sent by AI agent", "claude": "Marked sent by Claude"}
+
+
+def sent_via_label(message: Any) -> str:
+    """'Sent by AI agent' for a message the user's own AI agent confirmed as sent (repo.send_queue), etc.
+
+    Messages sent by hand, or stored before agent sending existed, have no marker and get ''.
+    """
+    return SENT_VIA_LABELS.get(str(getattr(message, "sent_via", "") or "").strip().lower(), "")
+
+
 def initials(name: str) -> str:
     words = [w for w in re.split(r"[\s\-_.]+", name or "") if w and w[0].isalnum()]
     return "".join(w[0] for w in words[:2]).upper() or "?"
@@ -256,16 +278,22 @@ def _build_env() -> jinja2.Environment:
         channel_label=lambda c: CHANNEL_LABELS.get(c, c),
         source_label=lambda s: SOURCE_LABELS.get(s, (s or "").replace("_", " ").title()),
         status_label=lambda s: STATUS_LABELS.get(s, (s or "").capitalize()),
-        company_status=company_status_label, scan_status=scan_status_label,
+        company_status=company_status_label, scan_status=scan_status_label, sent_via=sent_via_label,
     )
     env.globals.update(
         SIGNAL_TYPES=SIGNAL_TYPES, SENIORITIES=SENIORITIES, COMPANY_SIZES=COMPANY_SIZES, COMPANY_TYPES=COMPANY_TYPES,
         TONES=TONES, LEAD_STATUSES=LEAD_STATUSES, MESSAGE_CHANNELS=MESSAGE_CHANNELS, TIERS=TIERS,
         LEAD_SOURCES=LEAD_SOURCES, SIGNAL_SOURCES=SIGNAL_SOURCES, CHANNEL_LABELS=CHANNEL_LABELS,
-        LINKEDIN_CONNECT_LIMIT=LINKEDIN_CONNECT_LIMIT, query_with=query_with, version=__version__,
+        LINKEDIN_CONNECT_LIMIT=LINKEDIN_CONNECT_LIMIT, LINKEDIN_CONNECT_LIMIT_FREE=LINKEDIN_CONNECT_LIMIT_FREE,
+        LINKEDIN_FREE_NOTES_PER_MONTH=LINKEDIN_FREE_NOTES_PER_MONTH,
+        # The longest connection note the company's LinkedIn account takes (200 free, 300 Premium), and its name.
+        connect_note_limit=connect_note_limit, linkedin_account_label=account_label,
+        LINKEDIN_ACCOUNT_OPTIONS=LINKEDIN_ACCOUNT_OPTIONS,
+        query_with=query_with, version=__version__,
         select_options=select_options, check_options=check_options, pending_review=pending_review,
         SCAN_STATUS_LABELS=SCAN_STATUS_LABELS,
-        DOCS_URL=DOCS_URL, ICONS=ICONS, LOGO=LOGO,
+        DOCS_URL=DOCS_URL, AGENT_DOCS_URL=AGENT_DOCS_URL, ICONS=ICONS, LOGO=LOGO,
+        AGENT_LIMIT_RANGE=AGENT_LIMIT_RANGE,
         SIZE_OPTIONS=[(s, f"{s} employees") for s in COMPANY_SIZES],
         SIZE_CHIPS=[(s, s) for s in COMPANY_SIZES],
         COMPANY_TYPE_OPTIONS=[(t, "SMB" if t == "smb" else t.capitalize()) for t in COMPANY_TYPES],

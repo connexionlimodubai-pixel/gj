@@ -77,7 +77,7 @@
               ("GET", "/api/companies", "List registered companies"),
               ("POST", "/api/companies", "Register a company (registration-board JSON)"),
               ("GET", "/api/companies/{id}", "One company profile"),
-              ("PATCH", "/api/companies/{id}", "Update part of a profile, e.g. {\"icp\": {\"locations\": [\"UAE\"]}}"),
+              ("PATCH", "/api/companies/{id}", "Update part of a profile, e.g. {\"icp\": {\"locations\": [\"UAE\"]}}. AI agent sending is turned on and resumed on the Outreach page only"),
               ("GET", "/api/companies/{id}/leads", "Leads; filters: tier, status, kind, source, search, min_score, sort, limit, offset"),
               ("POST", "/api/companies/{id}/leads", "Add a lead (merged with an existing one when it matches)"),
               ("GET", "/api/leads/{id}", "One lead with its signals and messages"),

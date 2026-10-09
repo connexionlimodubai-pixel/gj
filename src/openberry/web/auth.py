@@ -23,11 +23,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..config import Settings, get_settings
 from ..models import split_list
+from .ratelimit import client_key, limits, retry_header
 from .session import csrf_valid, is_logged_in, log_in, safe_next
 from .ui import render
 
 SITE_SUMMARY_PATH = "/api/site-summary"
 FAILED_LOGIN_DELAY = 0.5
+MAX_FAILED_LOGIN_DELAY = 5.0
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 # /healthz serves container health checks (any Host); /mcp applies the same Host policy itself.
@@ -87,6 +89,11 @@ def _bearer_ok(request: Request, settings: Settings) -> bool:
             and hmac.compare_digest(token.encode(), settings.api_token.encode()))
 
 
+def is_anonymous(request: Request) -> bool:
+    """Neither logged in nor holding the API token: a public-registration visitor."""
+    return not is_logged_in(request) and not _bearer_ok(request, get_settings())
+
+
 def _from_browser(request: Request) -> bool:
     """Browsers send Origin with every POST and Sec-Fetch-Site with every request; scripts send neither."""
     return "origin" in request.headers or "sec-fetch-site" in request.headers
@@ -132,6 +139,22 @@ def login_page(request: Request, next: str = "/") -> Response:
     return render(request, "login.html", {"next": safe_next(next), "title": "Log in"}, public=True)
 
 
+def failed_login_delay(recent_failures: int) -> float:
+    """0.5 s, plus 0.5 s for every 5 failed logins (from anyone) in the window, up to MAX_FAILED_LOGIN_DELAY.
+
+    Attempts are checked one at a time, so this caps how fast guesses from many addresses go too.
+    """
+    return min(MAX_FAILED_LOGIN_DELAY, FAILED_LOGIN_DELAY * (1 + recent_failures // 5))
+
+
+def _too_many_logins(request: Request, target: str, wait: float) -> Response:
+    minutes = max(1, round(wait / 60))
+    return render(request, "login.html", {
+        "next": target, "title": "Log in",
+        "error": f"Too many wrong passwords from your address. Try again in {minutes} minute{'s' * (minutes != 1)}.",
+    }, status_code=429, public=True, headers=retry_header(wait))
+
+
 @router.post("/login", include_in_schema=False)
 async def login(request: Request, form: FormData = Depends(checked_form)) -> Response:
     settings = get_settings()
@@ -139,10 +162,22 @@ async def login(request: Request, form: FormData = Depends(checked_form)) -> Res
     target = safe_next(form.get("next"))
     if not settings.password:
         return RedirectResponse("/", status_code=303)
-    if isinstance(password, str) and hmac.compare_digest(password.encode(), settings.password.encode()):
+    lim, client = limits(request), client_key(request)
+    if wait := lim.login_failures.retry_after(client):  # refuse before queueing for the lock
+        return _too_many_logins(request, target, wait)
+    # One check at a time, and a failure's delay holds the lock: parallel guesses can't run ahead
+    # of it, and a right guess among them is only answered after the wrong ones before it.
+    async with lim.login_lock:
+        if wait := lim.login_failures.retry_after(client):
+            return _too_many_logins(request, target, wait)
+        ok = isinstance(password, str) and hmac.compare_digest(password.encode(), settings.password.encode())
+        if not ok:
+            lim.login_failures.hit(client)
+            await asyncio.sleep(failed_login_delay(lim.login_failures.count()))
+    if ok:
+        lim.login_failures.clear(client)
         log_in(request)
         return RedirectResponse(target, status_code=303)
-    await asyncio.sleep(FAILED_LOGIN_DELAY)  # slows down password guessing
     return render(request, "login.html", {"next": target, "error": "That password is not right.", "title": "Log in"},
                   status_code=401, public=True)
 

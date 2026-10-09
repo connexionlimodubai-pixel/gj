@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
@@ -52,6 +52,13 @@ MESSAGE_DIRECTIONS = ("outbound", "inbound")
 COMPANY_TYPES = ("startup", "smb", "mid-market", "enterprise", "agency", "public sector", "nonprofit")
 TONES = ("friendly", "professional", "casual", "direct")
 TIERS = ("hot", "warm", "cold")
+# ScanRun.status -> label. 'failed': it crashed, or every source failed or came back empty with problems.
+SCAN_STATUSES: dict[str, str] = {
+    "running": "Running",
+    "ok": "Ok",
+    "failed": "Failed",
+    "nothing_configured": "No sources configured",
+}
 JOB_BOARD_PROVIDERS = ("greenhouse", "lever", "ashby")
 
 
@@ -193,7 +200,7 @@ class OutreachConfig(_Model):
     followup_days: Annotated[list[int], BeforeValidator(lambda v: [int(x) for x in split_list(v)] if isinstance(v, str) else v)] = Field(
         default_factory=lambda: [3, 7], description="Days to wait after each sent message before the next follow-up is due")
     mode: Literal["review", "auto_draft"] = Field(
-        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot lead after a scan. Nothing is ever sent automatically.")
+        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot lead, however it turned hot (scan, Claude, import or edit). Nothing is ever sent automatically.")
     banned_words: StrList = Field(default_factory=list, description="Words/phrases messages must never use")
     extra_instructions: str = Field(default="", description="Anything Claude must respect when writing messages")
 
@@ -265,6 +272,15 @@ class SignalIn(_Model):
     @classmethod
     def _known_type(cls, v: str) -> str:
         return v if v in SIGNAL_TYPES else "custom"
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _not_in_future(cls, v: datetime | None) -> datetime | None:
+        # A future date (an event's date, a typo) would never decay and would rank as the latest activity.
+        if v is None:
+            return None
+        now = datetime.now(timezone.utc)
+        return now if (v if v.tzinfo else v.replace(tzinfo=timezone.utc)) > now else v
 
 
 class LeadIn(_Model):

@@ -13,30 +13,26 @@
   <section class="card" aria-labelledby="h-code">
     <h2 id="h-code" class="title-icon">{{ m.icon("terminal") }}Claude Code</h2>
     <p>Run this once in a terminal on this machine:</p>
-    <div class="code-block"><pre id="cmd-code">claude mcp add openberry -e OPENBERRY_DB="{{ db_path }}" -- openberry mcp</pre>{{ m.copy_button("#cmd-code", "Copy", "btn btn-sm btn-ghost") }}</div>
+    <div class="code-block"><pre id="cmd-code">claude mcp add openberry{% for key, value in launch.env.items() %} -e {{ key }}="{{ value }}"{% endfor %} -- {{ launch_shell }}</pre>{{ m.copy_button("#cmd-code", "Copy", "btn btn-sm btn-ghost") }}</div>
     <p class="small muted">The MCP server and this dashboard share the same SQLite database, so whatever Claude adds appears here immediately.</p>
+    {% if not launch.docker %}
+    <p class="small muted">Running OpenBerry with Docker Compose instead? Use <code id="cmd-docker">claude mcp add openberry -- {{ docker_shell }}</code>.</p>
+    {% endif %}
   </section>
 
   <section class="card" aria-labelledby="h-desktop">
     <h2 id="h-desktop" class="title-icon">{{ m.icon("sparkles") }}Claude Desktop</h2>
     <p>Add this to <code>claude_desktop_config.json</code> (Settings → Developer → Edit config), then restart Claude:</p>
-    <div class="code-block"><pre id="cfg-desktop">{
-  "mcpServers": {
-    "openberry": {
-      "command": "openberry",
-      "args": ["mcp"],
-      "env": { "OPENBERRY_DB": {{ db_path|tojson }} }
-    }
-  }
-}</pre>{{ m.copy_button("#cfg-desktop", "Copy", "btn btn-sm btn-ghost") }}</div>
-    <p class="small muted">If <code>openberry</code> isn't on Claude's PATH, use the full path to the executable in your virtual environment.</p>
+    <div class="code-block"><pre id="cfg-desktop">{{ desktop_config }}</pre>{{ m.copy_button("#cfg-desktop", "Copy", "btn btn-sm btn-ghost") }}</div>
+    <p class="small muted">{% if launch.docker %}This runs <code>openberry mcp</code> inside the <code>openberry</code> container, so Docker must be running on the machine where Claude is.{% else %}The command is a full path because Claude Desktop doesn't use your terminal's PATH. Moved the folder or the virtual environment? Reopen this page for an updated snippet.{% endif %}</p>
   </section>
 
   <section class="card" aria-labelledby="h-remote">
     <h2 id="h-remote" class="title-icon">{{ m.icon("globe") }}Remote server (HTTP)</h2>
     {% if http_mcp %}
-    <p>This dashboard also serves MCP over Streamable HTTP at <code>{{ base_url }}/mcp</code>.</p>
-    <div class="code-block"><pre id="cmd-http">claude mcp add --transport http openberry {{ base_url }}/mcp --header "Authorization: Bearer $OPENBERRY_API_TOKEN"</pre>{{ m.copy_button("#cmd-http", "Copy", "btn btn-sm btn-ghost") }}</div>
+    <p>This dashboard also serves MCP over Streamable HTTP at <code>{{ page_url }}/mcp</code>.</p>
+    <div class="code-block"><pre id="cmd-http">claude mcp add --transport http openberry "{{ page_url }}/mcp" --header "Authorization: Bearer $OPENBERRY_API_TOKEN"</pre>{{ m.copy_button("#cmd-http", "Copy", "btn btn-sm btn-ghost") }}</div>
+    {% if base_url_differs %}<p class="callout callout-warning">{{ m.icon("alert", 14) }}<span>You opened this page at <code>{{ page_url }}</code>, but <code>OPENBERRY_BASE_URL</code> is <code>{{ base_url }}</code>. Links in Claude's replies use <code>OPENBERRY_BASE_URL</code>: set it to the address you use in the browser.</span></p>{% endif %}
     {% if auth_enabled and not api_token_set %}<p class="callout callout-warning">{{ m.icon("alert", 14) }}Set <code>OPENBERRY_API_TOKEN</code>: with a dashboard password and no token, the HTTP endpoint and the JSON API stay closed.</p>{% endif %}
     {% else %}
     <p>The HTTP endpoint is turned off (<code>OPENBERRY_HTTP_MCP=false</code>). Use the local command above, or run <code>openberry mcp --http</code>.</p>
@@ -57,6 +53,16 @@
       {% endfor %}
     </ul>
     <p class="small muted">For research on LinkedIn and the web, add an open-source browser MCP server next to openberry, for example Playwright MCP (<code>npx @playwright/mcp@latest</code>) or the reference Fetch server (<code>uvx mcp-server-fetch</code>). Respect each site's terms.</p>
+  </section>
+
+  <section class="card span-all" id="server-sources" aria-labelledby="h-server-sources">
+    <h2 id="h-server-sources" class="title-icon">{{ m.icon("zap") }}Sources set up on the server</h2>
+    <p>Most sources only need the company profile. These also need a setting in the server's <code>.env</code> file (restart OpenBerry after changing it):</p>
+    <ul class="small">
+      <li><strong>Reddit</strong> ({{ "set up" if reddit_ready else "not set up" }}): create a Reddit API app and set <code>REDDIT_CLIENT_ID</code>, <code>REDDIT_CLIENT_SECRET</code> and <code>REDDIT_USERNAME</code>. Commercial use needs Reddit's agreement.</li>
+      <li><strong>SEC EDGAR</strong>: <code>OPENBERRY_CONTACT_EMAIL</code>, or a contact e-mail in the company profile (the SEC asks for one).</li>
+      <li><strong>GitHub</strong> (optional): <code>GITHUB_TOKEN</code> raises the limit from 60 to 5,000 requests an hour.</li>
+    </ul>
   </section>
 
   <section class="card span-all" aria-labelledby="h-api">
@@ -86,7 +92,7 @@
         </tbody>
       </table>
     </div>
-    <div class="code-block"><pre id="curl-example">curl -s {{ base_url }}/api/companies/{{ example_company }}/leads?tier=hot \
+    <div class="code-block"><pre id="curl-example">curl -s "{{ page_url }}/api/companies/{{ example_company }}/leads?tier=hot" \
   -H "Authorization: Bearer $OPENBERRY_API_TOKEN"</pre>{{ m.copy_button("#curl-example", "Copy", "btn btn-sm btn-ghost") }}</div>
   </section>
 </div>

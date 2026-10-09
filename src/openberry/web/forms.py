@@ -220,11 +220,20 @@ def build_company(values: dict[str, Any], keep: CompanyIn | None = None) -> tupl
         return None, errors_by_field(exc)
 
 
+def step_of(name: str) -> str:
+    """The wizard step a field is on (form-level errors belong to the first step)."""
+    field = FIELD_BY_NAME.get(name)
+    return field.step if field else STEPS[0][0]
+
+
+def error_steps(errors: dict[str, str]) -> dict[str, str]:
+    """Field name -> wizard step, so the error summary can say where each problem is and open that step."""
+    return {name: step_of(name) for name in errors}
+
+
 def first_error_step(errors: dict[str, str]) -> str:
-    for step, _ in STEPS:
-        if any(FIELD_BY_NAME.get(name, Field(name, "text", "company")).step == step for name in errors):
-            return step
-    return STEPS[0][0]
+    steps = set(error_steps(errors).values())
+    return next((step for step, _ in STEPS if step in steps), STEPS[0][0])
 
 
 # --------------------------------------------------------------------------------------

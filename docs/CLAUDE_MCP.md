@@ -27,9 +27,11 @@ Everything Claude saves shows up in the dashboard, and the dashboard's data is w
    ```
    [`claude_desktop_config.example.json`](../claude_desktop_config.example.json) also adds the free `fetch` and `playwright` servers.
 3. Restart Claude Desktop. The tools appear under the 🔌 menu.
+   Claude Desktop doesn't always see your shell's `PATH`: if the server doesn't start, put uv's full path (`which uv`)
+   in `"command"`. The dashboard's **Connect Claude** page (`/help`) shows the exact command and config for your install.
 
-The dashboard and Claude share the same database, `~/.openberry/openberry.db`. If you set `OPENBERRY_DB`, use an absolute path
-and set it in both places (for Claude, add `"env": {"OPENBERRY_DB": "/abs/path.db"}` to the config).
+The dashboard and Claude share the same database, `~/.openberry/openberry.db`. If you set `OPENBERRY_DB` (or `OPENBERRY_HOME`),
+use an absolute path and set it in both places (for Claude, add `"env": {"OPENBERRY_DB": "/abs/path.db"}` to the config).
 
 ### Claude Code
 This repo includes a project-scoped [`.mcp.json`](../.mcp.json). Run `claude` inside the repo folder and approve the `openberry` server. From anywhere else:
@@ -43,7 +45,8 @@ The dashboard serves MCP at `/mcp`. With a token set (`OPENBERRY_API_TOKEN`):
 claude mcp add --transport http openberry http://localhost:8000/mcp \
   --header "Authorization: Bearer $OPENBERRY_API_TOKEN"
 ```
-You can also use stdio through the container: `docker exec -i openberry openberry mcp`.
+Without a token (local mode) it only answers on localhost and the host of `OPENBERRY_BASE_URL`; add other host names or a
+LAN IP to `OPENBERRY_ALLOWED_HOSTS`. You can also use stdio through the container: `docker exec -i openberry openberry mcp`.
 A standalone HTTP server, with the same auth, is `openberry mcp --http --port 8001`.
 
 ## 2. Tools
@@ -52,24 +55,27 @@ A standalone HTTP server, with the same auth, is `openberry mcp --http --port 80
 |---|---|
 | `list_companies` | See registered companies with lead/hot counts |
 | `get_company_profile` | Read the ICP, offer, signal setup, and which sources are configured |
-| `register_company` / `update_company` | Onboard a company from a chat, or change its ICP, keywords or outreach style |
+| `register_company` / `update_company` | Onboard a company from a chat, or change its ICP, keywords or outreach style (`update_company` replaces lists and `signals.weights` whole). Alert webhooks must be Slack or Discord incoming-webhook URLs |
 | `run_signal_scan` | Run the free collectors now (HN, job boards, news, RSS, GitHub, SEC, Reddit) |
 | `get_prospecting_plan` | Get concrete LinkedIn/Google searches, competitor and influencer pages, lookalikes, and events to research |
 | `list_leads` / `get_lead` | Browse leads by tier, status or score; see the score reasons, signals and messages |
-| `add_leads` | Save people found with other tools (LinkedIn MCP, browser, search), with the signal that explains *why now* |
+| `add_leads` | Save people found with other tools (LinkedIn MCP, browser, search), with the signal that explains *why now*. People who turn hot trigger the company's alert |
 | `add_signal` | Record a new intent signal on an existing lead |
 | `update_lead` / `delete_lead` | Change status, notes, tags or profile fields |
 | `assess_lead` | Give Claude's 0-100 fit/timing judgement and rationale (blended 30% into the score) |
-| `get_outreach_context` | Everything needed to write one message: sender, tone, offer, lead, signals, thread |
+| `get_outreach_context` | Everything needed to write one message: sender, tone, offer, lead, signals, thread. Without a channel and step it prepares the next message in the sequence |
 | `save_outreach_message` | Store a draft. Enforces the LinkedIn 300-character limit and your banned words. **Never sends.** |
 | `list_outreach` / `update_message` | Review the queue, edit drafts, mark sent |
 | `log_reply` | Record the lead's reply. This stops the follow-up sequence. |
-| `followups_due` | Leads waiting for their next follow-up |
+| `followups_due` | Leads waiting for their next follow-up, with the step and channel to use |
 | `pipeline_report` | Numbers and suggestions for a weekly report |
 | `export_leads_csv` | CSV for a CRM or an outreach tool |
 
 Resources: `openberry://companies`, `openberry://company/{id}/profile`, `openberry://company/{id}/hot-leads`.
 Prompts: `onboard_company`, `daily_lead_hunt`, `write_outreach`, `weekly_report`.
+
+Slack/Discord alerts and `auto_draft` drafts also cover leads Claude makes hot: they go out within one scheduler tick
+(5 minutes by default) while `openberry serve` runs, or with the next signal scan.
 
 ## 3. Things to ask Claude
 

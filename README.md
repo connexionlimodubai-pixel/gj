@@ -18,7 +18,9 @@ thinking through MCP, and a web dashboard (with a registration board for your co
    Every point is explained ("Title matches 'Travel Manager'", "Hiring for a relevant role, 3d ago").
 4. **Draft outreach** with Claude (or a free local Ollama model, or templates): LinkedIn notes, DMs, emails and follow-ups.
    **Nothing is ever sent automatically.** You review, copy, send and mark as sent.
-5. **Alert you** on Slack or Discord when a lead turns hot. Export to CSV or use the JSON API with n8n or Activepieces.
+5. **Alert you** on Slack or Discord when a person lead turns hot, whether a scan, Claude, the API, a CSV import or an edit
+   made it hot. Alerts go out after each scan and, while `openberry serve` runs, within a few minutes.
+   Export to CSV or use the JSON API with n8n or Activepieces.
 
 | Registration board | Register a company | Lead detail |
 |---|---|---|
@@ -37,7 +39,7 @@ uv run openberry serve    # → open http://127.0.0.1:8000
 ```
 
 Click **Register company**, fill in the form, then **Run scan now** on your dashboard.
-Data lives in `~/.openberry/openberry.db`.
+Data lives in `~/.openberry/openberry.db` (move it with `OPENBERRY_HOME` or `OPENBERRY_DB`).
 
 ### With Docker
 ```bash
@@ -58,6 +60,9 @@ Add OpenBerry to **Claude Desktop** (*Settings → Developer → Edit Config*):
   }
 }
 ```
+Claude Desktop doesn't always see your shell's `PATH`: if it can't start `uv`, put uv's full path (`which uv`) in `"command"`.
+The dashboard's **Connect Claude** page (`/help`) shows the exact command and config for your install, Docker included.
+
 For **Claude Code**: run `claude` inside this folder (the included `.mcp.json` registers the server), or run
 `claude mcp add openberry -- uv --directory /ABSOLUTE/PATH/TO/openberry run openberry mcp`.
 
@@ -74,18 +79,23 @@ To let Claude browse LinkedIn and the web too, add free open-source MCP servers 
 
 ## Configuration
 
-Everything is optional for local use. See [`.env.example`](.env.example) for the full list.
+Everything is optional for local use. Put settings in `.env` (read from the current folder and `~/.openberry/.env`)
+or in the environment. See [`.env.example`](.env.example) for the other settings.
 
 | Variable | Purpose |
 |---|---|
 | `OPENBERRY_PASSWORD`, `OPENBERRY_SECRET_KEY` | Dashboard login. **Required** if anyone but you can reach the server. |
 | `OPENBERRY_API_TOKEN` | Bearer token for `/api` and the HTTP MCP endpoint `/mcp` |
-| `OPENBERRY_BASE_URL` | Public URL, used for links in Claude replies and alerts |
-| `OPENBERRY_PUBLIC_REGISTRATION=true` | Let clients fill in the registration form themselves (agency intake) |
+| `OPENBERRY_BASE_URL` | Public URL of the dashboard: links in Claude replies, an allowed host name, and Secure login cookies when it starts with `https://` |
+| `OPENBERRY_ALLOWED_HOSTS` | Extra host names to answer to in local mode (no password), e.g. a LAN IP so `/mcp` works there |
+| `OPENBERRY_PUBLIC_REGISTRATION=true` | Let clients fill in the registration form themselves (agency intake). Their companies wait, paused, for your review |
 | `OPENBERRY_CONTACT_EMAIL` | Contact e-mail for SEC EDGAR's required User-Agent |
 | `GITHUB_TOKEN` | Higher GitHub limits; stargazers of repos you admin |
 | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME` | Optional Reddit source (see its terms) |
-| `OPENBERRY_OLLAMA_URL`, `OPENBERRY_OLLAMA_MODEL` | Free local LLM for "Draft with local AI" |
+| `OPENBERRY_OLLAMA_URL`, `OPENBERRY_OLLAMA_MODEL` | Free local LLM: the "Local AI (Ollama)" writer in a lead's *Draft a message* card |
+| `OPENBERRY_SCHEDULER=false` | Turn off automatic scans and the background hot-lead alerts |
+| `OPENBERRY_HOME` | Data folder for `openberry.db` and the fallback `.env` (default `~/.openberry`). Environment only, not `.env` |
+| `OPENBERRY_ENV_FILE` | Read settings only from this file instead of `./.env` and `~/.openberry/.env`. Environment only |
 
 ## Commands
 
@@ -97,6 +107,8 @@ openberry scan [--company 1] [--source hackernews]
 openberry demo | rescore | init-db
 ```
 (Prefix with `uv run` if you haven't installed it with `pip install .`.)
+If you change `--host` or `--port`, set `OPENBERRY_BASE_URL` to the URL you open in the browser: Claude's links use it,
+and without a password the server only answers to that host, `localhost` and IP addresses.
 
 ## How it works
 
@@ -122,7 +134,7 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ```bash
 uv sync --extra dev
-uv run pytest            # ~490 tests, no network needed
+uv run pytest            # ~620 tests, no network needed
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

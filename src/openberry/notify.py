@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from urllib.parse import urlsplit
 
 import httpx
 
 from .config import get_settings
 from .models import Company, Lead
-from .website import UnsafeURL, assert_public_host
+from .netguard import UnsafeURL, assert_public_host, public_client
 
 log = logging.getLogger(__name__)
+
+WEBHOOK_TIMEOUT = 20.0  # seconds per webhook in total
 
 
 def format_hot_leads(company: Company, leads: list[Lead]) -> str:
@@ -39,17 +43,27 @@ async def notify_hot_leads(company: Company, leads: list[Lead], client: httpx.As
     text = format_hot_leads(company, leads)
     sent: list[str] = []
     own = client is None
-    client = client or httpx.AsyncClient(timeout=10, headers={"User-Agent": get_settings().user_agent})
+    client = client or public_client(timeout=10, headers={"User-Agent": get_settings().user_agent})
     try:
         for name, url, key in targets:
             try:
-                await assert_public_host(url)  # webhooks must never reach the private network
-                resp = await client.post(url, json={key: text[:1900]}, follow_redirects=False)
-                resp.raise_for_status()
+                async with asyncio.timeout(WEBHOOK_TIMEOUT):
+                    await assert_public_host(url)  # webhooks must never reach the private network
+                    async with client.stream("POST", url, json={key: text[:1900]}, follow_redirects=False) as resp:
+                        resp.raise_for_status()  # the response body is never read
                 sent.append(name)
-            except (httpx.HTTPError, UnsafeURL) as exc:
-                log.warning("%s webhook failed: %s", name, exc)
+            except (httpx.HTTPError, UnsafeURL, TimeoutError) as exc:
+                log.warning("%s webhook (%s) failed: %s", name, urlsplit(url).hostname, _failure(exc))
     finally:
         if own:
             await client.aclose()
     return sent
+
+
+def _failure(exc: Exception) -> str:
+    """Why a webhook failed, without its URL: webhook URLs are secrets and httpx puts them in messages."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, UnsafeURL):
+        return str(exc)  # names the host only
+    return type(exc).__name__

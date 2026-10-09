@@ -16,7 +16,8 @@ Sources
         Only entries whose title, summary or categories mention one of `signals.keywords`, a competitor,
         or a news query (all its words, Google-style: "quoted phrases", OR, -exclusions) are kept,
         otherwise every article would become a signal.
-    Feeds are downloaded with the shared httpx client and parsed from bytes with feedparser
+    Google News is downloaded with the shared httpx client, user-supplied feeds with a client that only
+    connects to public addresses (netguard.public_client), and both are parsed from bytes with feedparser
     (feedparser.parse() on a plain string fetches URLs and reads local files, so it is never given one).
 
 What it emits (classified from the headline)
@@ -50,8 +51,9 @@ Limits and politeness
     failures in a row; a feed host answering 403/429 is skipped for the rest of the scan and RSS stops
     after 5 failed feeds in a row. Redirects (at most MAX_REDIRECTS) are followed by hand so every
     hop is checked: http(s) only and, unless `Settings.allow_private_feeds` is set, public IP addresses
-    only (in public-registration mode anyone can submit feed URLs; this stops them probing the
-    server's own network). No conditional GET (ETag/If-Modified-Since): nothing is cached between scans.
+    only, checked again when connecting so DNS rebinding can't get around it (in public-registration
+    mode anyone can submit feed URLs; this stops them probing the server's own network).
+    No conditional GET (ETag/If-Modified-Since): nothing is cached between scans.
 
 Terms of use
     Google News RSS is not an official API. The feed's own <copyright> says it is made available
@@ -71,6 +73,7 @@ import io
 import math
 import re
 import time
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -80,7 +83,7 @@ import feedparser
 import httpx
 
 from ..models import Company, LeadIn, SignalIn
-from ..website import UnsafeURL, assert_public_host
+from ..netguard import UnsafeURL, assert_public_host, public_client
 from .base import CollectContext, Collector, RawSignal, find_terms, parse_time, strip_html, truncate
 
 GOOGLE_NEWS_URL = "https://news.google.com/rss/search"
@@ -242,6 +245,14 @@ class _FetchError(Exception):
         self.kind = kind
 
 
+def _feed_client(ctx: CollectContext, public_only: bool) -> AbstractAsyncContextManager[httpx.AsyncClient]:
+    """The shared client, or for public-only feeds one that checks every address it connects to
+    (the host check before each request can be dodged by DNS rebinding). Tests swap this out."""
+    if not public_only:
+        return nullcontext(ctx.client)
+    return public_client(headers=ctx.client.headers)
+
+
 class _FeedFetcher:
     """Sequential, capped feed downloads. Never raises: every problem becomes one ctx warning."""
 
@@ -306,26 +317,29 @@ class _FeedFetcher:
 
     async def _download(self, url: str, params: dict[str, str] | None) -> tuple[bytes, str, str]:
         current, current_params = url, params
-        for _ in range(MAX_REDIRECTS + 1):
-            timeout = self._hop_timeout()
-            await self._check_target(current, timeout)
-            try:
-                async with self.ctx.client.stream("GET", current, params=current_params,
-                                                  headers={"Accept": FEED_ACCEPT}, follow_redirects=False,
-                                                  timeout=httpx.Timeout(timeout)) as resp:
-                    location = resp.headers.get("location")
-                    if resp.status_code in REDIRECT_STATUSES and location:
-                        current, current_params = urljoin(str(resp.url), location.strip()), None
-                        continue
-                    self._check_status(resp)
-                    body = await self._read(resp)
-                    return body, str(resp.url), resp.headers.get("content-type", "")
-            except _FetchError:
-                raise
-            except httpx.TimeoutException as exc:
-                raise _FetchError("timed out") from exc
-            except Exception as exc:  # transport errors, invalid URLs, broken streams...
-                raise _FetchError(f"failed ({type(exc).__name__})") from exc
+        async with _feed_client(self.ctx, self.public_only) as client:
+            for _ in range(MAX_REDIRECTS + 1):
+                timeout = self._hop_timeout()
+                await self._check_target(current, timeout)
+                try:
+                    async with client.stream("GET", current, params=current_params,
+                                             headers={"Accept": FEED_ACCEPT}, follow_redirects=False,
+                                             timeout=httpx.Timeout(timeout)) as resp:
+                        location = resp.headers.get("location")
+                        if resp.status_code in REDIRECT_STATUSES and location:
+                            current, current_params = urljoin(str(resp.url), location.strip()), None
+                            continue
+                        self._check_status(resp)
+                        body = await self._read(resp)
+                        return body, str(resp.url), resp.headers.get("content-type", "")
+                except _FetchError:
+                    raise
+                except UnsafeURL as exc:  # refused when connecting: the host now resolves to a non-public address
+                    raise _FetchError(f"skipped: {exc} (only public hosts are fetched)", "skip") from exc
+                except httpx.TimeoutException as exc:
+                    raise _FetchError("timed out") from exc
+                except Exception as exc:  # transport errors, invalid URLs, broken streams...
+                    raise _FetchError(f"failed ({type(exc).__name__})") from exc
         raise _FetchError(f"redirected more than {MAX_REDIRECTS} times")
 
     def _hop_timeout(self) -> float:

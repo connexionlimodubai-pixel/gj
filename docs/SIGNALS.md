@@ -15,7 +15,7 @@ panel shows which collectors are enabled and what each one still needs.
 | **GitHub** | `owner/repo` of competitor or related repos | `competitor_engagement` (issue/PR authors), `github_star` (forks; stars only on repos you admin) | the GitHub user, enriched from their public profile | Free. `GITHUB_TOKEN` raises limits |
 | **Job boards** (Greenhouse / Lever / Ashby) | `provider:token:Company` lines + hiring keywords (or ICP titles) | `hiring` | the company (account) | Free public job-board APIs |
 | **Google News** | news queries, e.g. `Dubai office opening`, `raises Series A fintech` | `funding`, `job_change`, `company_news` | the company, or the person appointed | Free. Google's feed terms allow personal, non-commercial use only. Prefer publisher feeds for business use. |
-| **RSS / Atom feeds** | feed URLs (e.g. `https://techcrunch.com/feed/`) + keywords to match | `funding`, `job_change`, `company_news`, `keyword_mention` | the company / person when named | Free |
+| **RSS / Atom feeds** | feed URLs (e.g. `https://techcrunch.com/feed/`) + keywords, competitors or news queries to match | `funding`, `job_change`, `company_news`, `keyword_mention` | the company / person when named | Free |
 | **SEC EDGAR** (US) | SEC queries + a contact e-mail (`OPENBERRY_CONTACT_EMAIL` or the company contact) | `funding` (Form D), `job_change` (8-K item 5.02) | the company | Free; SEC requires a declared User-Agent |
 | **Reddit** (optional) | `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` from a Reddit app, keywords/competitors, subreddits | `keyword_mention`, `competitor_engagement` | the Reddit user | ⚠️ Since 2026 Reddit requires OAuth and an agreement for commercial use, and is closing public API access in 2027 |
 
@@ -49,14 +49,21 @@ The usual flow:
 
 - **ICP fit (0-100):** how well title, seniority, industry, company size, location and keywords match. Criteria you left empty are ignored.
   Unknown fields get partial credit, and excluded keywords or never-contact companies disqualify.
-- **Intent (0-100):** the sum of signal weights × strength, losing half its value every 21 days. It gets +15% when 2+ kinds of signal happen within 30 days.
-  People get 60% of their company's account signals.
+- **Intent (0-100):** each signal is worth its type weight × strength/50 (at most 2×), halved every 21 days.
+  People get 60% of their company's account signals. The values are added, and the sum gets +15% when 2+ kinds of signal
+  happened in the last 30 days. The result is squashed to 0-100 as 100·(1 − e^(−sum/60)), so extra signals add less and less:
+  one fresh hiring signal of typical strength (weight 25) gives 34, and 49 with weight 40. A type weighted 0 is ignored.
 - **Score:** ½ fit + ½ intent. Once Claude has run `assess_lead`, it becomes 35% fit + 35% intent + 30% Claude.
-  **Hot** ≥ 70 · **Warm** ≥ 45 · **Cold** < 45.
+  **Hot** ≥ 70 · **Warm** ≥ 45 · **Cold** < 45. Excluded keywords, never-contact companies and the *Disqualified*
+  pipeline status cap the score at 15.
 
+Default weights: competitor engagement and profile visits 35, funding and job changes 30, topic posts and hiring 25,
+GitHub stars/forks and influencer engagement 20, events, company news and other signals 15.
 You can change the weight of each signal type per company (`signals.weights`, e.g. `{"hiring": 40}`) through the API or Claude.
+Sending `weights` replaces the whole map, so include every override you want to keep.
 
 ## Adding a new source
 
 Create `src/openberry/collectors/<name>.py` with a `Collector` subclass (see `collectors/base.py`) and add it to `ALL` in
-`collectors/__init__.py`. Return `RawSignal`s. `services.ingest` does the merging, scoring and alerting.
+`collectors/__init__.py`. Return `RawSignal`s. `services.ingest` does the merging and scoring, and the scan then
+alerts on people who turned hot.

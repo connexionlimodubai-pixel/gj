@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, Response
@@ -18,7 +18,8 @@ from starlette.responses import JSONResponse, Response
 from .. import repo, website
 from ..models import CompanyIn, LeadIn
 from . import scans
-from .auth import require_api_auth
+from .auth import is_anonymous, require_api_auth
+from .ratelimit import client_key, limits, retry_header
 
 router = APIRouter(prefix="/api", tags=["api"], dependencies=[Depends(require_api_auth)])
 
@@ -134,7 +135,10 @@ def api_scan_status(company_id: int) -> dict[str, Any]:
 # --------------------------------------------------------------------------------------
 
 @router.post("/site-summary")
-async def api_site_summary(body: SiteSummaryIn) -> dict[str, Any]:
+async def api_site_summary(body: SiteSummaryIn, request: Request) -> dict[str, Any]:
+    if is_anonymous(request) and (wait := limits(request).site_summary.allow(client_key(request))):
+        raise HTTPException(429, "Too many website look-ups. Wait a minute and try again, or fill in the form by hand.",
+                            headers=retry_header(wait))
     try:
         summary = await website.fetch_site_summary(body.url)
     except website.UnsafeURL as exc:

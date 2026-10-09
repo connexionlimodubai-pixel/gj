@@ -9,6 +9,7 @@ an Atom blog with relative links, a malformed feed and an HTML block page.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import time
 import re
@@ -21,7 +22,7 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
-from openberry import repo
+from openberry import netguard, repo
 from openberry.collectors import COLLECTORS
 from openberry.collectors import news
 from openberry.collectors.base import CollectContext, RawSignal
@@ -47,6 +48,7 @@ TC_FEED = "https://techcrunch.com/feed/"
 BLOG_FEED = "https://blog.example.org/feed.atom"
 CONF_FEED = "https://feeds.example.com/news.xml"   # the conftest company's feed
 PRIVATE_HOSTS = {"intranet.local", "10.0.0.5", "169.254.169.254", "localhost"}
+REAL_FEED_CLIENT = news._feed_client  # the autouse fixture below swaps it for the mock client
 
 SERIES_A = "Series A fintech"
 DUBAI = "Dubai office opening"
@@ -116,7 +118,10 @@ class FakeWeb:
 
 @pytest.fixture(autouse=True)
 def frozen_clock_and_dns(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Freeze 'now' and replace DNS-based public-host checks (the sandbox has no network)."""
+    """Freeze 'now' and replace DNS-based public-host checks (the sandbox has no network).
+
+    Public-only feeds normally get their own connect-time-checked client (netguard); here every
+    request goes through the test's mock client instead."""
     monkeypatch.setattr(news, "_utcnow", lambda: NOW)
 
     async def fake_assert_public_host(url: str) -> None:
@@ -125,6 +130,7 @@ def frozen_clock_and_dns(monkeypatch: pytest.MonkeyPatch) -> None:
             raise UnsafeURL(f"{host} resolves to a non-public address")
 
     monkeypatch.setattr(news, "assert_public_host", fake_assert_public_host)
+    monkeypatch.setattr(news, "_feed_client", lambda ctx, public_only: contextlib.nullcontext(ctx.client))
 
 
 async def run(collector: GoogleNewsCollector | RssCollector, company: Company, handler: FakeWeb, *,
@@ -631,6 +637,18 @@ async def test_rss_private_hosts_allowed_when_settings_say_so(company):
     finally:
         del settings.allow_private_feeds
     assert handler.urls == ["http://localhost/rsshub/feed"] and signals and ctx.warnings == []
+
+
+async def test_public_only_feeds_get_a_client_that_checks_addresses_when_connecting():
+    """A host check before each request can be dodged by DNS rebinding (see tests/test_netguard.py)."""
+    async with httpx.AsyncClient(headers={"User-Agent": "OpenBerry-test"}) as shared:
+        ctx = CollectContext(client=shared, since=SINCE, settings=get_settings())
+        async with REAL_FEED_CLIENT(ctx, False) as client:  # Google News, or allow_private_feeds
+            assert client is shared
+        async with REAL_FEED_CLIENT(ctx, True) as client:
+            assert client is not shared and client.headers["User-Agent"] == "OpenBerry-test"
+            assert isinstance(client._transport, netguard.PublicOnlyTransport) and not client._mounts
+        assert not shared.is_closed
 
 
 async def test_rss_follows_safe_redirects(company):

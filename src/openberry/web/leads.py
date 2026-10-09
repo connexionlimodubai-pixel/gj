@@ -10,7 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import FormData, UploadFile
 from starlette.responses import Response
 
-from .. import leads_csv, outreach, repo, services
+from .. import leads_csv, outreach, repo
 from ..config import get_settings
 from ..models import LEAD_STATUSES, MESSAGE_CHANNELS, TIERS, Company, Lead
 from . import forms
@@ -79,6 +79,15 @@ def leads_export(company_id: int, tier: str = "", status: str = "", kind: str = 
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+def _nothing_imported_reason(stats: dict[str, Any]) -> str:
+    if stats["errors"] and not stats["skipped"]:
+        return "every row failed (the first problems are listed below)."
+    if stats["skipped"]:
+        rows = f"{stats['skipped']} row{'s' * (stats['skipped'] != 1)}"
+        return f"none of its {rows} had a name or company. Are the column headers the first line of the file?"
+    return "it has no rows under the header line."
+
+
 @router.post("/c/{company_id}/leads/import")
 def leads_import(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
     repo.get_company(company_id)
@@ -100,8 +109,11 @@ def leads_import(request: Request, company_id: int, form: FormData = Depends(che
     except ValueError as exc:
         flash(request, f"Import failed: {exc}", "error")
         return redirect(back)
-    flash(request, f"Imported {upload.filename}: {stats['created']} new, {stats['merged']} merged into existing "
-                   f"leads, {stats['skipped']} skipped.")
+    if stats["created"] + stats["merged"]:
+        flash(request, f"Imported {upload.filename}: {stats['created']} new, {stats['merged']} merged into existing "
+                       f"leads, {stats['skipped']} skipped.")
+    else:
+        flash(request, f"Nothing was imported from {upload.filename}: {_nothing_imported_reason(stats)}", "warning")
     for err in stats["errors"][:5]:
         flash(request, err, "warning")
     return redirect(back)
@@ -145,17 +157,17 @@ def lead_page(request: Request, company_id: int, lead_id: int) -> Response:
     remember_company(request, company_id)
     signals, signal_total = repo.list_signals(company_id, lead_id=lead_id, include_account=True, limit=100)
     messages = sorted(repo.list_messages(company_id, lead_id=lead_id, limit=500), key=lambda m: (m.created_at, m.id))
-    sent_steps = [m.step for m in messages if m.direction == "outbound" and m.status == "sent"]
     contacts = repo.contacts_at_account(lead)
-    channel = services.default_channel(company, lead)
+    channel, step = outreach.next_touch(company, lead, messages)
     return render(request, "lead.html", {
         "company": company, "lead": lead, "active": "leads", "title": lead.display_name,
         "signals": signals, "signal_total": signal_total, "messages": messages, "contacts": contacts,
-        "default_channel": channel, "next_step": max(sent_steps, default=0) + 1,
+        "default_channel": channel, "next_step": step,
         "claude_prompt": f"Use openberry: get the outreach context for lead {lead.id} and write a "
-                         f"{channel} message, then save it.",
-        "decision_maker_prompt": f"Use openberry: find the decision-maker at {lead.lead_company or 'this account'} "
-                                 f"for lead {lead.id} of company {company_id} and add them as a lead.",
+                         f"{channel} message{f' for step {step}' if step > 1 else ''}, then save it.",
+        # Copied prompts become the user's own words, so they name records by id only (never lead text).
+        "decision_maker_prompt": f"Use openberry: find the decision-maker for account lead {lead.id} of company "
+                                 f"{company_id} (read it with get_lead) and add them as a lead.",
         "values": {"signal_type": "custom", "signal_strength": "50", "signal_date": date.today().isoformat()},
     })
 
@@ -215,13 +227,15 @@ async def lead_draft(request: Request, company_id: int, lead_id: int,
                      form: FormData = Depends(checked_form)) -> Response:
     company, lead = await run_in_threadpool(_company_lead, company_id, lead_id)
     back = f"/c/{company_id}/leads/{lead_id}#outreach"
-    channel = choice(_form_text(form, "channel"), MESSAGE_CHANNELS) or services.default_channel(company, lead)
-    step = int_param(_form_text(form, "step"), default=1, high=10)
+    previous = await run_in_threadpool(lambda: repo.list_messages(company_id, lead_id=lead_id, limit=500))
+    # The "Draft follow-up" buttons post only the step: continue the sequence (LinkedIn DM after a connection note).
+    next_channel, next_step = outreach.next_touch(company, lead, previous)
+    channel = choice(_form_text(form, "channel"), MESSAGE_CHANNELS) or next_channel
+    step = int_param(_form_text(form, "step"), default=next_step, high=10)
     engine = "ollama" if _form_text(form, "engine") == "ollama" else "template"
     signals, _ = await run_in_threadpool(lambda: repo.list_signals(company_id, lead_id=lead_id,
                                                                    include_account=True, limit=20))
     if engine == "ollama":
-        previous = await run_in_threadpool(lambda: repo.list_messages(company_id, lead_id=lead_id, limit=50))
         context = outreach.outreach_context(company, lead, signals, previous, channel, step)
         try:
             subject, body = await outreach.draft_with_ollama(get_settings(), context)

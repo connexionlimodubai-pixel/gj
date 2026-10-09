@@ -12,7 +12,7 @@ services:
     volumes:
       - openberry-data:/data
 
-  # Optional: free local LLM for "Draft with local AI" in the dashboard.
+  # Optional: free local LLM for the "Local AI (Ollama)" writer in the lead page's Draft a message card.
   # Enable with:  docker compose --profile ollama up -d
   # then:         docker exec -it ollama ollama pull llama3.1
   # and set OPENBERRY_OLLAMA_URL=http://ollama:11434 in .env

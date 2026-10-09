@@ -7,7 +7,7 @@ This table shows how each piece is replicated for free in OpenBerry. "Claude" me
 | Gojiberry feature | OpenBerry | How |
 |---|---|---|
 | Onboarding from your website URL | ✅ | The registration board's "Auto-fill from website" button. Claude's `onboard_company` prompt can also interview you and read your site. |
-| ICP: titles, industries, sizes, locations, keywords, exclusions | ✅ | Registration board step 3 (adds seniorities, company types and a never-contact list) |
+| ICP: titles, industries, sizes, locations, keywords, exclusions | ✅ | Registration board step 3 (adds seniorities, a never-contact list, and company types that guide Claude's prospecting) |
 | Signal agents running 24/7 | ✅ | A built-in scheduler scans each company every *N* hours. Claude runs `daily_lead_hunt` on demand. |
 | Competitor engagement | ✅ / ⚠️ | Competitor mentions on Hacker News and Reddit (Reddit needs your own API app), plus issue authors and forkers on competitor GitHub repos. On LinkedIn: Claude + an optional LinkedIn MCP server (ToS risk) |
 | Topic / keyword posts | ✅ | Hacker News, Reddit and RSS. LinkedIn post search through Claude + a LinkedIn MCP server |
@@ -22,15 +22,15 @@ This table shows how each piece is replicated for free in OpenBerry. "Claude" me
 | Account-level intent | ✅ | Hiring, funding and news create *account* leads. People at that company inherit their intent. |
 | AI-personalised messages | ✅ | Claude (`get_outreach_context` → `save_outreach_message`), local Ollama, or a template |
 | Sequences / follow-ups | ✅ | Follow-up schedule (e.g. day 3, day 7). The "Follow-ups due" queue stops when a reply is logged. |
-| Review / Copilot mode | ✅ | Always on. `auto_draft` mode drafts for every new hot lead, but **nothing is ever sent automatically**. |
+| Review / Copilot mode | ✅ | Always on. `auto_draft` mode drafts a first message for every person lead that turns hot (in a scan, through Claude, the API, an import or an edit), but **nothing is ever sent automatically**. |
 | Unified inbox | ⚠️ | Log replies on the lead page or with `log_reply`. Claude drafts the answer from the full thread. |
 | Automated LinkedIn sending | ❌ (by design) | LinkedIn's User Agreement forbids automation. You copy the draft and send it yourself. |
 | Email waterfall enrichment (15+ providers) | ⚠️ | Not built in. Claude + fetch can find public emails, and [Reacher](https://github.com/reacherhq/check-if-email-exists) verifies them for free. |
 | CRM sync (HubSpot, Pipedrive) | ✅ / ⚠️ | CSV export, the JSON API (`/api`) for n8n/Activepieces, and Twenty CRM's MCP server next to OpenBerry |
-| Slack alerts | ✅ | Slack and Discord webhooks for new hot leads (threshold set per company) |
+| Slack alerts | ✅ | Slack and Discord webhooks when a person lead turns hot (70+, or a higher threshold set per company), however it got there. Sent after each scan and, while `openberry serve` runs, within minutes. |
 | Hosted MCP server | ✅ | `openberry mcp` (stdio) or `/mcp` (Streamable HTTP, bearer token) |
 | Dashboard / analytics | ✅ | KPI tiles, signals per day, signal mix, hot leads, scan history, reply rate |
-| Multiple brands / clients | ✅ | Each registered company has its own ICP, signals and pipeline. Public registration mode lets clients fill in the form themselves. |
+| Multiple brands / clients | ✅ | Each registered company has its own ICP, signals and pipeline. Public registration mode lets clients fill in the form themselves; their companies wait, paused, for your review. |
 
 ✅ = built in · ⚠️ = possible with Claude plus a companion tool, or partially · ❌ = intentionally not built
 

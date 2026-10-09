@@ -5,7 +5,7 @@
 <div class="page-head">
   <div class="min0">
     <p class="eyebrow">Dashboard</p>
-    <h1 class="title-row">{{ company.name }} <span class="pill pill-company-{{ company.status }}">{{ "Active" if company.status == "active" else "Paused" }}</span></h1>
+    <h1 class="title-row">{{ company.name }} <span class="pill pill-company-{{ 'pending' if pending_review(company) else company.status }}">{{ company|company_status }}</span></h1>
     <p class="meta-inline">
       {% if company.website|safe_url %}<a href="{{ company.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("globe", 14) }}{{ company.website|host }}</a>{% endif %}
       {% if company.industry %}<span>{{ m.icon("target", 14) }}{{ company.industry }}</span>{% endif %}
@@ -26,8 +26,13 @@
   <span class="spinner" aria-hidden="true"></span>
   <p><strong>Scanning free sources…</strong> <span class="muted">This page refreshes by itself when the new signals are in.</span></p>
 </div>
-{% elif scan.last_result and not scan.last_result.ok and scan.last_result.error %}
-<div class="flash flash-error">{{ m.icon("alert") }}<p>The last scan failed: {{ scan.last_result.error }}</p></div>
+{% elif scan.last_result and not scan.last_result.ok %}
+{% set problem = scan.last_result.error or "see Scan history below for each source's errors." %}
+{% if scan.last_result.status == "failed" or not scan.last_result.status %}
+<div class="flash flash-error">{{ m.icon("alert") }}<p>The last scan failed: {{ problem }}</p></div>
+{% else %}
+<div class="flash flash-warning">{{ m.icon("alert") }}<p>Last scan: {{ scan.last_result.status|scan_status }}. {{ problem }}</p></div>
+{% endif %}
 {% endif %}
 
 <section class="kpis" aria-label="Key numbers">
@@ -198,7 +203,7 @@
               {% if s.enabled %}<span class="pill pill-on">{{ "Via Claude" if s.via_claude else "Enabled" }}</span>
               {% elif s.configured %}<span class="pill pill-off">Signal types off</span>
               {% else %}<span class="pill pill-off">Needs setup</span>{% endif %}</p>
-            {% if not s.enabled %}<p class="small muted">Needs {{ s.requires }}. <a href="{{ base }}/settings#step-signals">Set up</a></p>{% endif %}
+            {% if not s.enabled %}<p class="small muted">Needs {{ s.requires }}. <a href="{{ s.setup_url or base ~ '/settings#step-signals' }}">Set up</a></p>{% endif %}
           </div>
         </li>
         {% endfor %}
@@ -207,7 +212,7 @@
   </div>
 
   <section class="card span-3" aria-labelledby="runs-title">
-    <header class="card-head"><div><h2 id="runs-title">Scan history</h2><p class="card-sub">Automatic scans run every {{ company.scan_interval_hours }}h while the company is active</p></div></header>
+    <header class="card-head"><div><h2 id="runs-title">Scan history</h2><p class="card-sub">{% if scheduler_enabled %}Automatic scans run every {{ company.scan_interval_hours }}h while the company is active{% else %}Automatic scans are off on this server (OPENBERRY_SCHEDULER=false): use Run scan now, or schedule <code>openberry scan</code>{% endif %}</p></div></header>
     {% if runs %}
     <div class="table-wrap">
       <table class="table">
@@ -217,14 +222,15 @@
           <tr>
             <td class="nowrap">{{ m.when(r.run.started_at) }}</td>
             <td>{{ r.run.trigger|capitalize }}</td>
-            <td><span class="pill pill-run-{{ r.run.status }}">{{ r.run.status|capitalize }}</span></td>
+            <td><span class="pill pill-run-{{ r.run.status if r.run.status in SCAN_STATUS_LABELS else 'other' }}">{{ r.run.status|scan_status }}</span></td>
             <td class="num">{{ r.signals_new if r.signals_new is not none else "—" }}</td>
             <td class="num">{{ r.leads_new if r.leads_new is not none else "—" }}</td>
             <td class="hide-sm">{% if r.duration is not none %}{{ r.duration }}s{% else %}—{% endif %}</td>
             <td>
               {% if r.errors or r.warnings %}
               <details class="issues"><summary>{% if r.errors %}{{ r.errors|length|plural("error") }}{% endif %}{% if r.errors and r.warnings %}, {% endif %}{% if r.warnings %}{{ r.warnings|length|plural("warning") }}{% endif %}</summary>
-                <ul>{% for e in r.errors[:8] %}<li class="error-text">{{ e }}</li>{% endfor %}{% for w in r.warnings[:8] %}<li>{{ w }}</li>{% endfor %}</ul>
+                <ul>{% for e in r.errors[:8] %}<li class="error-text">{{ e }}</li>{% endfor %}{% for w in r.warnings[:8] %}<li>{{ w }}</li>{% endfor %}
+                {% if r.errors|length > 8 or r.warnings|length > 8 %}<li class="muted">+{{ [r.errors|length - 8, 0]|max + [r.warnings|length - 8, 0]|max }} more</li>{% endif %}</ul>
               </details>
               {% else %}<span class="muted">None</span>{% endif %}
             </td>

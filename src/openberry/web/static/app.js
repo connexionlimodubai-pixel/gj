@@ -315,6 +315,28 @@
       show(target, true);
     }
 
+    // Error summary links point at fields on other, hidden steps: open that step, then the field.
+    $$(".form-alert a[data-error-step]", form).forEach((link) => {
+      let target = null;
+      try { target = form.querySelector(link.getAttribute("href")); } catch (_) { target = null; }
+      const wrap = target && target.closest("[data-label]");
+      const where = $(".error-where", link);
+      if (wrap && where) where.textContent = where.textContent.replace(/:$/, "") + " › " + wrap.getAttribute("data-label") + ":";
+      link.addEventListener("click", (e) => {
+        const index = target ? steps.findIndex((s) => s.contains(target)) : keys.indexOf(link.getAttribute("data-error-step"));
+        if (index < 0) return;
+        e.preventDefault();
+        show(index, false);
+        const field = target && (target.matches("input, select, textarea") ? target : $("input, select, textarea", target));
+        if (field) {
+          field.focus({ preventScroll: true });
+          field.scrollIntoView({ behavior: "smooth", block: "center" });
+        } else {
+          steps[index].focus();
+        }
+      });
+    });
+
     next.addEventListener("click", () => advanceTo(current + 1));
     back.addEventListener("click", () => show(current - 1, true));
     dots.forEach((dot, i) => dot.addEventListener("click", () => (i <= current ? show(i, true) : advanceTo(i))));

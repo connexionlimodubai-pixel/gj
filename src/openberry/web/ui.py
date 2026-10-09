@@ -26,6 +26,7 @@ from ..models import (
     SIGNAL_TYPES,
     TIERS,
     TONES,
+    Company,
     Lead,
 )
 from ..outreach import LINKEDIN_CONNECT_LIMIT
@@ -49,7 +50,10 @@ SOURCE_LABELS = {
     "web": "Web", "manual": "Manual", "claude": "Claude", "csv": "CSV import", "demo": "Demo",
     "sec_edgar": "SEC EDGAR",
 }
-LEAD_SOURCES = (*SIGNAL_SOURCES, "demo")
+LEAD_SOURCES = SIGNAL_SOURCES
+# ScanRun.status -> label; other statuses are shown humanized with a neutral badge.
+SCAN_STATUS_LABELS = {"running": "Running", "ok": "Ok", "failed": "Failed",
+                      "nothing_configured": "No sources configured", "no_data": "No data"}
 STATUS_LABELS = {s: s.replace("_", " ").capitalize() for s in LEAD_STATUSES}
 
 
@@ -166,6 +170,25 @@ def top_reason(lead: Lead) -> tuple[str, str] | None:
     return reasons[0] if reasons else None
 
 
+def pending_review(company: Company) -> bool:
+    """Paused since it was registered and never edited or scanned: how public registrations arrive.
+
+    (A company created paused through the API or Claude shows the same way until it is edited.)
+    """
+    return (company.status == "paused" and company.last_scan_at is None
+            and as_utc(company.created_at) == as_utc(company.updated_at))
+
+
+def company_status_label(company: Company) -> str:
+    if pending_review(company):
+        return "Pending review"
+    return "Active" if company.status == "active" else "Paused"
+
+
+def scan_status_label(status: str) -> str:
+    return SCAN_STATUS_LABELS.get(status) or (status or "unknown").replace("_", " ").capitalize()
+
+
 def initials(name: str) -> str:
     words = [w for w in re.split(r"[\s\-_.]+", name or "") if w and w[0].isalnum()]
     return "".join(w[0] for w in words[:2]).upper() or "?"
@@ -233,13 +256,15 @@ def _build_env() -> jinja2.Environment:
         channel_label=lambda c: CHANNEL_LABELS.get(c, c),
         source_label=lambda s: SOURCE_LABELS.get(s, (s or "").replace("_", " ").title()),
         status_label=lambda s: STATUS_LABELS.get(s, (s or "").capitalize()),
+        company_status=company_status_label, scan_status=scan_status_label,
     )
     env.globals.update(
         SIGNAL_TYPES=SIGNAL_TYPES, SENIORITIES=SENIORITIES, COMPANY_SIZES=COMPANY_SIZES, COMPANY_TYPES=COMPANY_TYPES,
         TONES=TONES, LEAD_STATUSES=LEAD_STATUSES, MESSAGE_CHANNELS=MESSAGE_CHANNELS, TIERS=TIERS,
         LEAD_SOURCES=LEAD_SOURCES, SIGNAL_SOURCES=SIGNAL_SOURCES, CHANNEL_LABELS=CHANNEL_LABELS,
         LINKEDIN_CONNECT_LIMIT=LINKEDIN_CONNECT_LIMIT, query_with=query_with, version=__version__,
-        select_options=select_options, check_options=check_options,
+        select_options=select_options, check_options=check_options, pending_review=pending_review,
+        SCAN_STATUS_LABELS=SCAN_STATUS_LABELS,
         DOCS_URL=DOCS_URL, ICONS=ICONS, LOGO=LOGO,
         SIZE_OPTIONS=[(s, f"{s} employees") for s in COMPANY_SIZES],
         SIZE_CHIPS=[(s, s) for s in COMPANY_SIZES],
@@ -280,6 +305,7 @@ def render(request: Request, name: str, context: dict[str, Any] | None = None, *
         ollama_enabled=bool(settings.ollama_url),
         base_url=settings.base_url,
         public_registration=settings.public_registration,
+        scheduler_enabled=settings.scheduler_enabled,
     )
     return templates.TemplateResponse(request, name, ctx, status_code=status_code, headers=headers)
 

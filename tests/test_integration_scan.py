@@ -6,6 +6,7 @@ APIs); this test routes one shared httpx client to all of them by host.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import sys
 from datetime import datetime, timezone
@@ -70,6 +71,8 @@ def scan_ready(company, settings, monkeypatch):
         return None
 
     monkeypatch.setattr(news, "assert_public_host", public)
+    # user feeds normally get their own address-checking client; route them through the mock instead
+    monkeypatch.setattr(news, "_feed_client", lambda ctx, public_only: contextlib.nullcontext(ctx.client))
     for collector in ALL:
         monkeypatch.setattr(type(collector), "request_interval", 0, raising=False)
     monkeypatch.setattr(settings, "reddit_client_id", "id")

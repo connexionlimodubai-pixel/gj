@@ -65,7 +65,8 @@
       <form method="post" action="{{ base }}/messages/{{ msg.id }}">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button></form>
       {% endif %}
       {{ m.copy_button("#q-" ~ msg.id ~ "-body") }}
-      {% if msg.direction == "outbound" %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{{ m.icon("edit", 14) }}Edit</a>
+      {% if msg.direction == "outbound" and msg.status in ("draft", "approved") %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{{ m.icon("edit", 14) }}Edit</a>
+      {% elif msg.direction == "outbound" %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">Open</a>
       {% else %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#outreach">{{ m.icon("reply", 14) }}Answer</a>{% endif %}
     </div>
   </li>

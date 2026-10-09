@@ -22,6 +22,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 from .. import __version__, repo
 from ..config import Settings, get_settings, set_settings
 from . import api, auth, leads, pages, scans
+from .ratelimit import Limits
 from .ui import STATIC_DIR, render
 
 log = logging.getLogger(__name__)
@@ -33,7 +34,8 @@ LifespanHook = Callable[[], AbstractAsyncContextManager[Any]]
 
 ERROR_TITLES = {
     400: "That didn't work", 401: "Please log in", 403: "Not allowed", 404: "Page not found",
-    405: "Not allowed", 413: "That upload is too large", 422: "Check your input", 500: "Something went wrong",
+    405: "Not allowed", 413: "That upload is too large", 422: "Check your input", 429: "Slow down",
+    500: "Something went wrong",
 }
 
 
@@ -125,6 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         docs_url=None, redoc_url=None, openapi_url="/api/openapi.json",
     )
     app.state.settings = settings
+    app.state.limits = Limits()  # login and anonymous-form rate limits (see ratelimit.py)
     hooks: list[LifespanHook] = []  # entered in _lifespan; mcp_server.mount_http appends to it
     app.state.lifespan_hooks = hooks
 

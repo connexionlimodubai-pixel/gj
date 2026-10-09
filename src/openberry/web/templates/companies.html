@@ -4,7 +4,7 @@
 <div class="page-head">
   <div>
     <h1>Registration board</h1>
-    <p class="lede">Every company registered on this OpenBerry. Each one has its own profile, signals, leads and outreach queue.</p>
+    <p class="lede">Every company registered on this OpenBerry. Each one has its own profile, signals, leads and outreach queue.{% if public_registration %} Registrations from the public form wait, paused, until you review and activate them.{% endif %}</p>
   </div>
   <div class="page-actions">
     <a class="btn btn-primary" href="/register">{{ m.icon("plus") }}Register a company</a>
@@ -24,7 +24,7 @@
         <a class="muted-link small" href="{{ c.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ c.website|host or c.website }}</a>
         {% else %}<span class="muted small">No website</span>{% endif %}
       </div>
-      <span class="pill pill-company-{{ c.status }}">{{ "Active" if c.status == "active" else "Paused" }}</span>
+      <span class="pill pill-company-{{ 'pending' if pending_review(c) else c.status }}">{{ c|company_status }}</span>
     </div>
     <p class="company-meta">
       {% if c.industry %}<span>{{ m.icon("target", 14) }}{{ c.industry }}</span>{% endif %}
@@ -44,7 +44,11 @@
     <div class="company-foot">
       <span class="contact">{{ m.icon("user", 14) }}{% if c.contact_name %}{{ c.contact_name }}{% else %}<span class="muted">No contact person</span>{% endif %}{% if c.contact_email %}<span class="muted"> · {{ c.contact_email }}</span>{% endif %}</span>
       <span class="btn-row">
-        <a class="btn btn-sm btn-ghost" href="/c/{{ c.id }}/settings">Edit</a>
+        {% if c.status == "paused" %}
+        <form method="post" action="/c/{{ c.id }}/status">{{ m.csrf() }}<input type="hidden" name="status" value="active"><input type="hidden" name="next" value="/companies">
+          <button class="btn btn-sm" type="submit">{{ m.icon("play", 14) }}Activate</button></form>
+        {% endif %}
+        <a class="btn btn-sm btn-ghost" href="/c/{{ c.id }}/settings">{{ "Review" if pending_review(c) else "Edit" }}</a>
         <a class="btn btn-sm" href="/c/{{ c.id }}">Open{{ m.icon("chevron-right", 14) }}</a>
       </span>
     </div>

@@ -10,6 +10,7 @@ import sys
 import time
 import types
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from html.parser import HTMLParser
 from typing import Any
 
@@ -867,6 +868,19 @@ def test_failed_scan_is_reported(client, company, monkeypatch):
     assert "The last scan failed: RuntimeError: collector exploded" in client.get(f"/c/{company.id}").text
 
 
+def test_scan_started_elsewhere_in_the_same_instant_is_shown_as_running(client, company, monkeypatch):
+    async def lose_the_race(company_id, *, trigger="manual", sources=None, client=None):
+        repo.start_scan_run(company_id, "schedule")  # the scheduler won the start
+        repo.start_scan_run(company_id, trigger)  # raises ScanInProgress, like the real run_scan
+
+    monkeypatch.setattr(services, "run_scan", lose_the_race)
+    post(client, f"/c/{company.id}/scan")
+    wait_until(lambda: not scans.task_running(company.id))
+    current = scans.status(company.id)
+    assert current["running"] is True and current["last_result"] is None
+    assert "The last scan failed" not in client.get(f"/c/{company.id}").text
+
+
 def test_scan_interrupted_by_shutdown_does_not_block_the_next_one(web_settings, company, monkeypatch):
     async def hanging_scan(company_id, *, trigger="manual", sources=None, client=None):
         repo.start_scan_run(company_id, trigger)
@@ -939,3 +953,313 @@ def test_chart_scales_and_labels():
     bars = charts.type_bars(rows)
     assert len(bars["bars"]) == 7 and bars["bars"][-1]["label"] == "Other (3 types)"
     assert bars["bars"][0]["frac"] == 1
+
+
+# --------------------------------------------------------------------------------------
+# Public registration: review, rate limits, unique names; login throttling
+# --------------------------------------------------------------------------------------
+
+def test_public_registrations_wait_paused_without_visitor_chosen_urls(client, web_settings, monkeypatch):
+    web_settings.password = "pw"
+    web_settings.public_registration = True
+    form = client.get("/register").text
+    assert 'name="signals.rss_feeds"' not in form and 'name="notify.slack_webhook_url"' not in form
+    resp = post(client, "/register", {
+        "name": "Prospect Inc", "scan_interval_hours": "1", "signals.keywords": "chauffeur",
+        "signals.rss_feeds": "https://attacker.example/feed.xml", "notify.min_score": "0",
+        "notify.slack_webhook_url": "https://attacker.example/collect",
+        "notify.discord_webhook_url": "https://attacker.example/discord",
+    }, page="/register")
+    assert resp.status_code == 303 and resp.headers["location"] == "/register/thanks"
+    [stored] = repo.list_companies()
+    assert stored.status == "paused" and stored.signals.rss_feeds == [] and stored.signals.keywords == ["chauffeur"]
+    assert stored.notify.slack_webhook_url == "" and stored.notify.discord_webhook_url == ""
+    assert repo.companies_due_for_scan() == []
+    # The operator sees it as pending review on the board and activates it there.
+    post(client, "/login", {"password": "pw"}, page="/login")
+    board = client.get("/companies").text
+    assert "Pending review" in board and "pill-company-pending" in board
+    resp = post(client, f"/c/{stored.id}/status", {"status": "active", "next": "/companies"})
+    assert resp.headers["location"] == "/companies" and repo.get_company(stored.id).status == "active"
+    assert "Pending review" not in client.get("/companies").text
+    # The explicit status is idempotent (a double click doesn't pause it again); no status still toggles.
+    post(client, f"/c/{stored.id}/status", {"status": "active"})
+    assert repo.get_company(stored.id).status == "active"
+    later = repo.utcnow() + timedelta(minutes=5)  # timestamps have one-second resolution
+    monkeypatch.setattr(repo, "utcnow", lambda: later)
+    post(client, f"/c/{stored.id}/status")
+    assert repo.get_company(stored.id).status == "paused"
+    assert "Pending review" not in client.get("/companies").text  # reviewed since: just paused
+
+
+def test_registration_refuses_a_duplicate_company_name(client, web_settings, company):
+    resp = post(client, "/register", {"name": "  acme CHAUFFEURS "})
+    assert resp.status_code == 422 and "already registered" in resp.text
+    web_settings.password = "pw"
+    web_settings.public_registration = True
+    anon = TestClient(client.app)
+    assert post(anon, "/register", {"name": "Acme Chauffeurs"}, page="/register").status_code == 422
+    assert [c.name for c in repo.list_companies()] == ["Acme Chauffeurs"]
+
+
+def test_anonymous_registrations_and_site_lookups_are_rate_limited(client, web_settings, monkeypatch):
+    web_settings.password = "pw"
+    web_settings.public_registration = True
+    for i in range(5):
+        assert post(client, "/register", {"name": f"Spam {i}"}, page="/register").status_code == 303
+    blocked = post(client, "/register", {"name": "Spam 5", "description": "keep me"}, page="/register")
+    assert blocked.status_code == 429 and int(blocked.headers["retry-after"]) > 0
+    assert "Too many registrations" in blocked.text and "keep me" in blocked.text
+    assert len(repo.list_companies()) == 5
+    other = TestClient(client.app, client=("203.0.113.9", 4000))  # another address has its own budget
+    assert post(other, "/register", {"name": "Real Client"}, page="/register").status_code == 303
+
+    async def fake_fetch(url):
+        return {"url": url, "site_name": "Acme", "description": "", "headings": [], "text": ""}
+
+    monkeypatch.setattr(website, "fetch_site_summary", fake_fetch)
+    headers = {"X-CSRF-Token": token(client, "/register")}
+    codes = [client.post("/api/site-summary", json={"url": "acme.example"}, headers=headers).status_code
+             for _ in range(6)]
+    assert codes == [200] * 5 + [429]
+    # The operator and API scripts are not limited.
+    web_settings.api_token = "tok"
+    assert all(client.post("/api/site-summary", json={"url": "acme.example"},
+                           headers={"Authorization": "Bearer tok"}).status_code == 200 for _ in range(6))
+
+
+def test_rate_limit_windows_and_global_cap():
+    from openberry.web.ratelimit import RateLimit
+
+    limit = RateLimit(per_client=2, window=60, total=3)
+    assert limit.allow("a", now=0) == 0 and limit.allow("a", now=1) == 0
+    assert limit.allow("a", now=2) == pytest.approx(58)  # a's oldest event expires at 60
+    assert limit.allow("b", now=3) == 0
+    assert limit.allow("c", now=4) == pytest.approx(56)  # everyone together: 3 per window
+    assert limit.allow("a", now=61) == 0 and limit.count(now=61) == 2  # b@3 and a@61 are left
+
+
+def test_failed_logins_are_limited_per_client(client, web_settings, monkeypatch):
+    from openberry.web import auth
+
+    monkeypatch.setattr(auth, "FAILED_LOGIN_DELAY", 0)
+    web_settings.password = "s3cret"
+    for _ in range(5):
+        assert post(client, "/login", {"password": "guess"}, page="/login").status_code == 401
+    # Even the right password is refused for a while: guessing can't continue from this address.
+    blocked = post(client, "/login", {"password": "s3cret"}, page="/login")
+    assert blocked.status_code == 429 and "Too many wrong passwords" in blocked.text
+    assert int(blocked.headers["retry-after"]) > 0
+    assert client.get("/companies", follow_redirects=False).status_code == 303
+    other = TestClient(client.app, client=("198.51.100.7", 4000))
+    assert post(other, "/login", {"password": "s3cret"}, page="/login").status_code == 303
+
+
+def test_failed_login_delay_grows_with_everyone_s_failures():
+    from openberry.web import auth
+
+    assert auth.failed_login_delay(0) == auth.FAILED_LOGIN_DELAY
+    assert auth.failed_login_delay(5) == 2 * auth.FAILED_LOGIN_DELAY
+    assert auth.failed_login_delay(10_000) == auth.MAX_FAILED_LOGIN_DELAY
+
+
+def test_parallel_login_guesses_wait_for_each_other(web_settings, monkeypatch):
+    import httpx
+
+    from openberry.web import auth
+
+    monkeypatch.setattr(auth, "FAILED_LOGIN_DELAY", 0.1)
+    web_settings.password = "s3cret"
+    app = create_app(web_settings)
+
+    async def guesses() -> tuple[list[int], float]:
+        transport = httpx.ASGITransport(app=app, client=("192.0.2.1", 1234))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            csrf = CSRF_META.search((await c.get("/login")).text).group(1)
+            started = time.monotonic()
+            responses = await asyncio.gather(*(c.post("/login", data={"password": f"guess{i}", "csrf_token": csrf})
+                                               for i in range(4)))
+            return [r.status_code for r in responses], time.monotonic() - started
+
+    codes, elapsed = asyncio.run(guesses())
+    assert codes == [401] * 4
+    assert elapsed >= 0.35  # one after another; in parallel all four would answer after ~0.1 s
+
+
+# --------------------------------------------------------------------------------------
+# Connect Claude page
+# --------------------------------------------------------------------------------------
+
+def _help_blocks(page: str) -> dict[str, str]:
+    return {pid: html_lib.unescape(m.group(1)) for pid in ("cmd-code", "cfg-desktop", "cmd-http", "curl-example")
+            if (m := re.search(rf'<pre id="{pid}">(.*?)</pre>', page, re.S))}
+
+
+def test_help_mcp_command_matches_how_openberry_is_installed(client, web_settings, monkeypatch, tmp_path):
+    db_path = str(web_settings.db_path.resolve())
+    monkeypatch.setattr(pages, "in_container", lambda: False)
+    # A clone run with uv, as in the README: Claude Desktop needs uv's full path (it has no shell PATH).
+    monkeypatch.setattr(pages, "source_checkout", lambda: tmp_path / "open berry")
+    monkeypatch.setattr(pages.shutil, "which", lambda name: "/home/me/.local/bin/uv" if name == "uv" else None)
+    blocks = _help_blocks(client.get("/help").text)
+    assert blocks["cmd-code"] == (f'claude mcp add openberry -e OPENBERRY_DB="{db_path}" -- /home/me/.local/bin/uv '
+                                  f'--directory "{tmp_path / "open berry"}" run openberry mcp')
+    server = json.loads(blocks["cfg-desktop"])["mcpServers"]["openberry"]
+    assert server == {"command": "/home/me/.local/bin/uv",
+                      "args": ["--directory", str(tmp_path / "open berry"), "run", "openberry", "mcp"],
+                      "env": {"OPENBERRY_DB": db_path}}
+    # An installed package (pip/pipx): this server's own Python runs the module.
+    monkeypatch.setattr(pages, "source_checkout", lambda: None)
+    server = json.loads(_help_blocks(client.get("/help").text)["cfg-desktop"])["mcpServers"]["openberry"]
+    assert server["command"] == sys.executable and server["args"] == ["-m", "openberry", "mcp"]
+    # In the Docker image: run it inside the container; the host has neither the command nor /data.
+    monkeypatch.setattr(pages, "in_container", lambda: True)
+    page = client.get("/help").text
+    blocks = _help_blocks(page)
+    assert blocks["cmd-code"] == "claude mcp add openberry -- docker exec -i openberry openberry mcp"
+    assert json.loads(blocks["cfg-desktop"])["mcpServers"]["openberry"] == {
+        "command": "docker", "args": ["exec", "-i", "openberry", "openberry", "mcp"]}
+    assert "OPENBERRY_DB" not in page.split('id="h-remote"')[0]
+
+
+def test_this_checkout_is_detected_as_a_source_checkout():
+    root = pages.source_checkout()
+    assert root is not None and (root / "pyproject.toml").is_file() and (root / "src" / "openberry").is_dir()
+
+
+def test_help_uses_the_address_the_page_was_opened_on(client, web_settings):
+    web_settings.http_mcp_enabled = True  # read when the page renders; the app was built without the mount
+    assert web_settings.base_url == "http://127.0.0.1:8000"
+    other_port = TestClient(client.app, base_url="http://127.0.0.1:8977")
+    page = other_port.get("/help").text
+    blocks = _help_blocks(page)
+    assert '"http://127.0.0.1:8977/mcp"' in blocks["cmd-http"]
+    # Quoted, so zsh doesn't treat the "?" as a glob.
+    assert blocks["curl-example"].startswith('curl -s "http://127.0.0.1:8977/api/companies/1/leads?tier=hot" ')
+    assert "8000" not in blocks["cmd-http"] + blocks["curl-example"]
+    assert "but <code>OPENBERRY_BASE_URL</code> is <code>http://127.0.0.1:8000</code>" in page
+    same = TestClient(client.app, base_url="http://127.0.0.1:8000").get("/help").text
+    assert "OPENBERRY_BASE_URL</code> is" not in same
+
+
+# --------------------------------------------------------------------------------------
+# Wizard errors, form copy, dashboard copy
+# --------------------------------------------------------------------------------------
+
+def test_registration_error_summary_names_the_step_and_links_to_real_fields(client):
+    resp = post(client, "/register", {"name": "Acme", "signals.github_repos": "not a repo",
+                                      "contact_email": "omar@falconline"})
+    assert resp.status_code == 422
+    html = resp.text
+    assert re.search(r'<a href="#f-signals-github_repos" data-error-step="signals"><span class="error-where">'
+                     r'Signals &amp; requirements:</span>', html)
+    assert 'class="wizard-dot has-error" data-step-to="signals"' in html
+    assert 'class="wizard-dot has-error" data-step-to="company"' in html
+    assert 'class="wizard-dot" data-step-to="offer"' in html
+    # Pydantic errors on checkbox and radio groups link to their fieldset.
+    resp = post(client, "/register", {"name": "Acme", "outreach.mode": "spam_everyone"})
+    assert resp.status_code == 422 and 'data-error-step="outreach"' in resp.text
+    for target in re.findall(r'<div class="form-alert".*?</ul>', resp.text, re.S)[0].split('href="#')[1:]:
+        assert f'id="{target.split(chr(34))[0]}"' in resp.text
+
+
+def test_contact_email_field_rejects_what_the_server_rejects(client):
+    page = client.get("/register").text
+    tag = re.search(r'<input[^>]*id="f-contact_email"[^>]*>', page).group(0)
+    pattern = html_lib.unescape(re.search(r'pattern="([^"]+)"', tag).group(1))
+    assert re.fullmatch(pattern, "omar@falconline") is None  # the browser now stops it on step 1
+    assert re.fullmatch(pattern, "omar@falconline.ae")
+    assert forms.build_company({**forms.default_values(), "name": "A", "contact_email": "omar@falconline"})[1]
+
+
+def test_form_copy_matches_what_alerts_and_scoring_do(client, company):
+    settings_page = client.get(f"/c/{company.id}/settings").text
+    tag = re.search(r'<input[^>]*id="f-notify-min_score"[^>]*>', settings_page).group(0)
+    assert 'min="0"' in tag and 'max="100"' in tag
+    assert "when it turns hot (70+) with at least this score" in settings_page
+    assert "Guides Claude&#39;s prospecting; it doesn&#39;t change scores." in settings_page
+
+
+def test_dashboard_says_whether_automatic_scans_run(client, web_settings, company):
+    web_settings.scheduler_enabled = False  # read at render time; this app runs no scheduler either way
+    assert "Automatic scans are off on this server" in client.get(f"/c/{company.id}").text
+    web_settings.scheduler_enabled = True
+    page = client.get(f"/c/{company.id}").text
+    assert "Automatic scans run every 24h" in page and "Automatic scans are off" not in page
+
+
+def test_scan_history_shows_any_status_and_why(client, company):
+    for status, stats in (("nothing_configured", {"error": "No signal source is configured for this company"}),
+                          ("mystery_state", {"warnings": [], "collectors": {"rss": {"warnings": ["feed timed out"]}}})):
+        repo.finish_scan_run(repo.start_scan_run(company.id, "schedule"), status, stats)
+    page = client.get(f"/c/{company.id}").text
+    assert '<span class="pill pill-run-nothing_configured">No sources configured</span>' in page
+    assert '<span class="pill pill-run-other">Mystery state</span>' in page
+    assert "No signal source is configured for this company" in page and "rss: feed timed out" in page
+
+
+def test_dashboard_scan_that_found_no_sources_is_not_reported_as_fine(client, company, monkeypatch):
+    async def nothing(company_id, **kwargs):
+        return {"status": "nothing_configured", "error": "No signal source is configured for this company.",
+                "signals_new": 0, "leads_new": 0}
+
+    monkeypatch.setattr(services, "run_scan", nothing)
+    post(client, f"/c/{company.id}/scan")
+    wait_until(lambda: not scans.task_running(company.id))
+    assert scans.status(company.id)["last_result"]["ok"] is False
+    page = client.get(f"/c/{company.id}").text
+    assert "Last scan: No sources configured. No signal source is configured for this company." in page
+
+
+def test_people_tile_counts_people_added_this_week():
+    from openberry.seed import seed_demo
+
+    stats = repo.company_stats(seed_demo())
+    assert stats["accounts"] > 0 and stats["new_leads_7d"] == stats["people"] + stats["accounts"]
+    assert stats["new_people_7d"] == stats["people"]  # accounts aren't counted under the People tile
+    assert pages.kpi_tiles(1, stats)[0]["sub"] == f"{stats['people']} added in 7 days"
+
+
+def test_source_filter_lists_each_source_once(client, company):
+    assert len(ui.LEAD_SOURCES) == len(set(ui.LEAD_SOURCES))
+    assert client.get(f"/c/{company.id}/leads").text.count('<option value="demo"') == 1
+    assert client.get(f"/c/{company.id}/signals").text.count('<option value="demo"') == 1
+
+
+def test_source_copy_uses_form_labels_and_points_reddit_at_the_server_setup(client, company):
+    page = client.get(f"/c/{company.id}").text
+    assert "Needs sec_queries" not in page and "Needs SEC EDGAR queries" in page
+    assert 'Needs Reddit API app credentials' in page and 'href="/help#server-sources"' in page
+    assert 'id="server-sources"' in client.get("/help").text
+    repo.delete_company(company.id)
+    welcome = client.get("/").text
+    assert "out of the box: Hacker News, GitHub" in welcome and "Reddit works once the server has Reddit API" in welcome
+
+
+def test_sent_messages_offer_open_not_edit(client, company):
+    lead, _ = repo.upsert_lead(company.id, LeadIn(full_name="Omar Haddad", lead_company="Northwind"))
+    draft = repo.create_message(lead.id, "Hi Omar")
+    sent = repo.create_message(lead.id, "Hi again Omar", step=2)
+    repo.update_message(sent.id, status="sent")
+    base = f"/c/{company.id}"
+
+    def actions(tab: str, msg_id: int) -> str:
+        page = client.get(f"{base}/outreach?tab={tab}").text
+        item = re.search(rf'<li class="card queue-item" id="q-{msg_id}">.*?</li>', page, re.S)
+        return re.sub(r"<[^>]+>", " ", item.group(0))
+
+    assert "Edit" in actions("drafts", draft.id)
+    assert "Edit" not in actions("sent", sent.id) and "Open" in actions("sent", sent.id)
+
+
+def test_csv_import_that_adds_nothing_is_a_warning_with_the_reason(client, company):
+    base = f"/c/{company.id}"
+    nameless = "Name,Email\n,a@example.com\n,b@example.com\n"
+    resp = post(client, f"{base}/leads/import", files={"file": ("contacts.csv", nameless.encode(), "text/csv")})
+    page = client.get(resp.headers["location"]).text
+    assert "Imported contacts.csv" not in page
+    assert re.search(r'flash-warning.*?Nothing was imported from contacts.csv: none of its 2 rows had a name or '
+                     r'company', page, re.S)
+    resp = post(client, f"{base}/leads/import", files={"file": ("empty.csv", b"Name,Company\n", "text/csv")})
+    assert "Nothing was imported from empty.csv: it has no rows under the header line." in client.get(
+        resp.headers["location"]).text

@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def _dotenv_value(raw: str) -> str:
+    """The value part of a KEY=value line.
+
+    Quoted values are kept as written (`"a # b"`). In an unquoted value a `#` after whitespace
+    starts a comment (`myname  # note` -> `myname`), as in docker compose; a `#` inside a word
+    stays (`pa#ss`).
+    """
+    value = raw.strip()
+    if value[:1] in {'"', "'"} and (end := value.find(value[0], 1)) > 0:
+        return value[1:end]
+    return re.split(r"\s#", raw, maxsplit=1)[0].strip().strip('"').strip("'")
 
 
 def _load_dotenv(path: Path) -> None:
@@ -17,8 +31,7 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        os.environ.setdefault(key.strip(), _dotenv_value(value))
 
 
 # Fixed per-user home so the dashboard and Claude Desktop (which starts `openberry mcp` from an
@@ -44,7 +57,8 @@ def _int(name: str, default: int) -> int:
 @dataclass
 class Settings:
     db_path: Path = field(default_factory=lambda: OPENBERRY_HOME / "openberry.db")
-    # Public URL of the dashboard, used for links in MCP replies and alerts.
+    # Public URL of the dashboard: links in MCP replies, an allowed Host name, and Secure
+    # session cookies when it is https://.
     base_url: str = "http://127.0.0.1:8000"
     # Dashboard login. Empty = no login (fine on localhost, NOT for a public server).
     password: str = ""
@@ -54,12 +68,13 @@ class Settings:
     api_token: str = ""
     # Let anyone open /register (agency mode: clients fill in their own details).
     public_registration: bool = False
-    # Background scheduler that runs signal scans every company's scan interval.
+    # Background scheduler: runs each company's signal scan on its interval and, every tick
+    # (seconds, min 30), alerts on people who turned hot outside a scan.
     scheduler_enabled: bool = True
     scheduler_tick_seconds: int = 300
     # Expose the MCP server over Streamable HTTP at /mcp in the web app.
     http_mcp_enabled: bool = True
-    # Optional free local LLM (https://ollama.com) used by the dashboard's "Draft with AI".
+    # Optional free local LLM (https://ollama.com): the "Local AI (Ollama)" writer on a lead page.
     ollama_url: str = ""
     ollama_model: str = "llama3.1"
     # Optional GitHub token: raises the API limit from 60 to 5000 requests/hour.
@@ -76,8 +91,9 @@ class Settings:
     contact_email: str = ""
     user_agent: str = "OpenBerry/0.1 (+https://github.com/connexionlimodubai-pixel/gj)"
     http_timeout: float = 20.0
-    # Extra Host names accepted by the HTTP MCP endpoint and, in local mode, the dashboard
-    # (besides localhost, IP addresses and base_url's host). "*" disables the check.
+    # Extra Host names accepted by the HTTP MCP endpoint (without an API token) and, in local
+    # mode, the dashboard (besides localhost and base_url's host; the dashboard also accepts
+    # any IP address, /mcp does not). "*" disables the check.
     allowed_hosts: list[str] = field(default_factory=list)
 
     @classmethod

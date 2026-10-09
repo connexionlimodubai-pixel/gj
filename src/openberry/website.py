@@ -1,15 +1,14 @@
 """Read a company's public website to pre-fill the registration form (name, description, offer).
 
-Only public http(s) hosts are fetched: private, loopback and link-local addresses are refused
-so the dashboard can't be used to probe the network it runs in.
+Only public http(s) hosts are fetched (see netguard): private, loopback and link-local addresses
+are refused so the dashboard can't be used to probe the network it runs in. Downloads are capped
+in size and total time.
 """
 
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import re
-import socket
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -17,13 +16,11 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from .config import get_settings
+from .netguard import UnsafeURL, assert_public_host, public_client
 
 MAX_BYTES = 1_500_000
 MAX_REDIRECTS = 4
-
-
-class UnsafeURL(ValueError):
-    pass
+FETCH_TIMEOUT = 30.0  # seconds for the whole fetch, redirects included
 
 
 def normalize_url(url: str) -> str:
@@ -36,18 +33,6 @@ def normalize_url(url: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise UnsafeURL("only http(s) URLs are allowed")
     return url
-
-
-async def assert_public_host(url: str) -> None:
-    host = urlparse(url).hostname or ""
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise UnsafeURL(f"cannot resolve {host}") from exc
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if not ip.is_global or ip.is_multicast:
-            raise UnsafeURL(f"{host} resolves to a non-public address")
 
 
 class _PageParser(HTMLParser):
@@ -117,22 +102,42 @@ async def fetch_site_summary(url: str, client: httpx.AsyncClient | None = None) 
     """Fetch a homepage and return {url, site_name, title, description, headings, text}."""
     url = normalize_url(url)
     own = client is None
-    client = client or httpx.AsyncClient(timeout=15, headers={"User-Agent": get_settings().user_agent})
+    client = client or public_client(timeout=15, headers={"User-Agent": get_settings().user_agent})
     try:
-        for _ in range(MAX_REDIRECTS + 1):
-            await assert_public_host(url)
-            resp = await client.get(url, follow_redirects=False)
+        async with asyncio.timeout(FETCH_TIMEOUT):  # httpx timeouts are per read: a slow drip never ends
+            return await _fetch_page(client, url)
+    except TimeoutError as exc:
+        raise httpx.ReadTimeout(f"no complete answer within {FETCH_TIMEOUT:g} seconds") from exc
+    finally:
+        if own:
+            await client.aclose()
+
+
+async def _fetch_page(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
+    for _ in range(MAX_REDIRECTS + 1):
+        await assert_public_host(url)  # readable error; public_client() checks the connection itself too
+        async with client.stream("GET", url, follow_redirects=False) as resp:
             if resp.is_redirect and resp.headers.get("location"):
                 url = normalize_url(urljoin(url, resp.headers["location"]))
                 continue
             resp.raise_for_status()
             if "html" not in resp.headers.get("content-type", "html"):
                 raise UnsafeURL("URL did not return an HTML page")
-            return parse_page(resp.text[:MAX_BYTES], str(resp.url))
-        raise UnsafeURL("too many redirects")
-    finally:
-        if own:
-            await client.aclose()
+            body = await _read_capped(resp, MAX_BYTES)
+            return parse_page(body.decode(resp.encoding or "utf-8", errors="replace"), str(resp.url))
+    raise UnsafeURL("too many redirects")
+
+
+async def _read_capped(resp: httpx.Response, limit: int) -> bytes:
+    """The first `limit` bytes of the body; the rest is never downloaded."""
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in resp.aiter_bytes():
+        chunks.append(chunk)
+        size += len(chunk)
+        if size >= limit:
+            break
+    return b"".join(chunks)[:limit]
 
 
 def suggest_profile(summary: dict[str, Any]) -> dict[str, str]:

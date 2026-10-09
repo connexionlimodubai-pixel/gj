@@ -128,7 +128,7 @@
 {%- endmacro %}
 
 {% macro checks(name, label, options, help="", cls="") -%}
-<fieldset class="field checks-field{% if cls %} {{ cls }}{% endif %}{% if errors.get(name) %} has-error{% endif %}" data-label="{{ label }}"{{ aria(name, help) }}>
+<fieldset class="field checks-field{% if cls %} {{ cls }}{% endif %}{% if errors.get(name) %} has-error{% endif %}" id="{{ fid(name) }}" data-label="{{ label }}"{{ aria(name, help) }}>
 <legend>{{ label }}</legend>
 <div class="chips">
 {% for value, text, checked in check_options(options, values.get(name, [])) %}
@@ -141,7 +141,7 @@
 
 {% macro radios(name, label, options, help="") -%}
 {% set current = values.get(name, "") %}
-<fieldset class="field radio-cards{% if errors.get(name) %} has-error{% endif %}" data-label="{{ label }}"{{ aria(name, help) }}>
+<fieldset class="field radio-cards{% if errors.get(name) %} has-error{% endif %}" id="{{ fid(name) }}" data-label="{{ label }}"{{ aria(name, help) }}>
 <legend>{{ label }}</legend>
 <div class="radio-grid">
 {% for value, title, description in options %}

@@ -8,7 +8,7 @@
     <p class="lede">Everything entered on the registration board. Claude reads this profile before it prospects, qualifies or writes.</p>
   </div>
   <div class="page-actions">
-    <span class="pill pill-company-{{ company.status }}">{{ "Active" if company.status == "active" else "Paused" }}</span>
+    <span class="pill pill-company-{{ 'pending' if pending_review(company) else company.status }}">{{ company|company_status }}</span>
     <form method="post" action="/c/{{ company.id }}/status">{{ m.csrf() }}
       <button class="btn" type="submit">{% if company.status == "active" %}{{ m.icon("pause") }}Pause scans{% else %}{{ m.icon("play") }}Activate{% endif %}</button>
     </form>

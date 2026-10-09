@@ -16,7 +16,7 @@ This page lists the GitHub projects we checked (October 2026), what each one add
 | Browse like a human (JS sites, careers pages) | [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp) | Apache-2.0 | Persistent browser profile, works with logged-in sites |
 | Web search without paid APIs | [searxng/searxng](https://github.com/searxng/searxng) + [ihor-sokoliuk/mcp-searxng](https://github.com/ihor-sokoliuk/mcp-searxng) | AGPL-3.0 / MIT | Self-hosted metasearch; `site:linkedin.com/in` queries |
 | LinkedIn research (optional, **ToS risk**) | [stickerdaniel/linkedin-mcp-server](https://github.com/stickerdaniel/linkedin-mcp-server) | Apache-2.0 | Profiles, company posts, people search through your own logged-in session |
-| Local LLM for the dashboard | [ollama/ollama](https://github.com/ollama/ollama) | MIT | "Draft with local AI" button; no API costs |
+| Local LLM for the dashboard | [ollama/ollama](https://github.com/ollama/ollama) | MIT | "Local AI (Ollama)" writer when drafting on a lead page; no API costs |
 
 The Claude Desktop config with OpenBerry plus fetch and Playwright is in
 [`claude_desktop_config.example.json`](../claude_desktop_config.example.json).

@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS leads (
     notes TEXT NOT NULL DEFAULT '',
     tags TEXT NOT NULL DEFAULT '[]',
     last_signal_at TEXT,
+    alerted_at TEXT,  -- when the hot-lead alert / auto-draft handled this lead; NULL again once it goes cold
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -135,7 +136,29 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 CREATE INDEX IF NOT EXISTS ix_scan_runs_company ON scan_runs(company_id, started_at DESC);
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring a database written by an older version up to SCHEMA (CREATE IF NOT EXISTS adds no columns)."""
+    conn.execute("BEGIN IMMEDIATE")  # two processes starting at once must not both add the column
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)")}
+        if "alerted_at" not in columns:
+            conn.execute("ALTER TABLE leads ADD COLUMN alerted_at TEXT")
+            # Leads already hot were alerted by the scan that made them hot: don't alert them all again.
+            conn.execute("UPDATE leads SET alerted_at = updated_at WHERE tier = 'hot'")
+        if 0 < version < 2:  # identity keys became Unicode-aware (accents, Arabic, CJK...): re-key old rows
+            from . import repo
+
+            conn.row_factory = sqlite3.Row
+            repo.refresh_identity_keys(conn)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def db_path() -> Path:
@@ -146,12 +169,11 @@ def init_db(path: Path | None = None) -> Path:
     path = path or db_path()
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)  # another process may be upgrading the same file
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        conn.commit()
+        _migrate(conn)
     finally:
         conn.close()
     return path

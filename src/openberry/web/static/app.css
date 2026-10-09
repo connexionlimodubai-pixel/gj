@@ -223,6 +223,8 @@ img, svg { vertical-align: middle; }
 .pill-company-paused, .pill-msg-skipped, .pill-lost, .pill-disqualified { background: var(--surface-3); color: var(--text-2); }
 .pill-run-failed { background: var(--danger-bg); color: var(--danger); }
 .pill-run-running, .pill-contacted, .pill-msg-approved { background: var(--info-bg); color: var(--info); }
+.pill-run-nothing_configured, .pill-run-no_data, .pill-company-pending { background: var(--warning-bg); color: var(--warning); }
+.pill-run-other { background: var(--surface-2); color: var(--text-2); }
 .pill-qualified, .pill-msg-draft { background: var(--accent-soft); color: var(--accent-text); }
 .pill-new { background: var(--surface-2); color: var(--text-2); }
 
@@ -263,6 +265,7 @@ img, svg { vertical-align: middle; }
 .flash-info { background: var(--info-bg); border-color: transparent; color: var(--info); }
 .flash p, .flash-success p, .flash-error p { color: var(--text); }
 .form-alert { display: flex; gap: var(--s3); padding: var(--s4); margin-bottom: var(--s4); border-radius: var(--radius-sm); background: var(--danger-bg); color: var(--danger); }
+.form-alert .error-where { font-weight: 600; }
 .form-alert div { color: var(--text); }
 .form-alert ul { margin-top: var(--s1); list-style: disc; padding-left: 18px; }
 .form-alert a { color: var(--text); text-decoration: underline; }
@@ -345,6 +348,7 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .wizard-dot:hover { color: var(--text); }
 .wizard-dot.is-done { border-top-color: var(--accent-soft-2); color: var(--text-2); }
 .wizard-dot[aria-current="step"] { border-top-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+.wizard-dot.has-error { border-top-color: var(--danger); color: var(--danger); }
 .wizard-nav { position: sticky; bottom: var(--s3); z-index: 5; padding: var(--s3) var(--s4); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
 .save-bar { position: sticky; bottom: var(--s3); z-index: 5; padding: var(--s3) var(--s4); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
 .review { display: grid; gap: var(--s4); }

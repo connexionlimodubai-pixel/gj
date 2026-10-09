@@ -61,8 +61,11 @@ async def _run(company_id: int, trigger: str) -> None:
     started = repo.utcnow()
     try:
         stats = await services.run_scan(company_id, trigger=trigger)
+        status = str(stats.get("status") or "ok")
         _results[company_id] = {
-            "ok": stats.get("status", "ok") != "failed",
+            "ok": status == "ok",  # 'failed', 'nothing_configured' and any newer status are worth a banner
+            "status": status,
+            "error": str(stats.get("error") or ""),
             "finished_at": repo.iso(),
             "signals_new": stats.get("signals_new", 0),
             "leads_new": stats.get("leads_new", 0),
@@ -70,6 +73,8 @@ async def _run(company_id: int, trigger: str) -> None:
     except asyncio.CancelledError:
         _close_interrupted(company_id, trigger, started)
         raise
+    except services.ScanInProgress as exc:  # another process started one since we looked: its row shows it
+        log.info("dashboard scan not started: %s", exc)
     except Exception as exc:  # report on the dashboard instead of crashing the task
         log.exception("dashboard scan failed for company %s", company_id)
         _results[company_id] = {"ok": False, "finished_at": repo.iso(), "error": f"{type(exc).__name__}: {exc}"}

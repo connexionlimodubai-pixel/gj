@@ -2,6 +2,8 @@
    Expects: form_action, wizard, submit_label, steps, values, errors, first_step, public_mode, honeypot. #}
 {% import "_macros.html" as m with context %}
 {% set step_count = steps|length if wizard else steps|length - 1 %}
+{% set step_labels = dict(steps) %}
+{% set error_steps = error_steps|default({}) %}
 <form method="post" action="{{ form_action }}" class="company-form{{ ' is-wizard' if wizard }}"{% if wizard %} data-wizard data-first-step="{{ first_step }}"{% endif %}>
 {{ m.csrf() }}
 {% if public_mode %}
@@ -11,7 +13,7 @@
 {% if wizard %}
 <ol class="wizard-progress" data-wizard-progress>
   {% for key, label in steps %}
-  <li><button type="button" class="wizard-dot" data-step-to="{{ key }}"><span class="dot-num">{{ loop.index }}</span><span class="dot-label">{{ label }}</span></button></li>
+  <li><button type="button" class="wizard-dot{{ ' has-error' if key in error_steps.values() }}" data-step-to="{{ key }}"><span class="dot-num">{{ loop.index }}</span><span class="dot-label">{{ label }}</span>{% if key in error_steps.values() %}<span class="sr-only"> (needs attention)</span>{% endif %}</button></li>
   {% endfor %}
 </ol>
 {% endif %}
@@ -20,7 +22,7 @@
 <div class="form-alert" role="alert">
   {{ m.icon("alert", 18) }}
   <div><strong>{{ errors|length }} field{{ "s" if errors|length != 1 }} need{{ "" if errors|length != 1 else "s" }} attention.</strong>
-  <ul>{% for name, message in errors.items() %}<li><a href="#{{ m.fid(name) }}">{{ message }}</a></li>{% endfor %}</ul></div>
+  <ul>{% for name, message in errors.items() %}{% set step = error_steps.get(name, "") %}<li><a href="#{{ m.fid(name) }}" data-error-step="{{ step }}">{% if step in step_labels %}<span class="error-where">{{ step_labels[step] }}:</span> {% endif %}{{ message }}</a></li>{% endfor %}</ul></div>
 </div>
 {% endif %}
 
@@ -47,7 +49,7 @@
   <h3 class="sub-head">Contact person</h3>
   <div class="grid-3">
     {{ m.input("contact_name", "Name", attrs={"autocomplete": "name"}) }}
-    {{ m.input("contact_email", "Email", type="email", attrs={"autocomplete": "email"}) }}
+    {{ m.input("contact_email", "Email", type="email", attrs={"autocomplete": "email", "pattern": "[^@\\s]+@[^@\\s]+\\.[^@\\s]+", "title": "An email address such as name@company.com"}) }}
     {{ m.input("contact_phone", "Phone", type="tel", attrs={"autocomplete": "tel"}) }}
   </div>
 </fieldset>
@@ -76,7 +78,7 @@
   </div>
   {{ m.checks("icp.seniorities", "Seniority", SENIORITIES.items()) }}
   {{ m.checks("icp.company_sizes", "Company size (employees)", SIZE_CHIPS) }}
-  {{ m.checks("icp.company_types", "Company type", COMPANY_TYPE_OPTIONS) }}
+  {{ m.checks("icp.company_types", "Company type", COMPANY_TYPE_OPTIONS, help="Guides Claude's prospecting; it doesn't change scores.") }}
   <div class="grid-2">
     {{ m.listarea("icp.locations", "Locations", help="Countries, regions or cities. 'UAE', 'GCC', 'Europe' and 'USA' are understood.") }}
     {{ m.listarea("icp.keywords", "Fit keywords", help="Topics in a profile that indicate fit.") }}
@@ -97,7 +99,9 @@
     {{ m.textarea("signals.job_boards", "Job boards of target accounts", help="One per line: provider:board-token:Company (greenhouse, lever or ashby).", rows=3, placeholder="greenhouse:stripe:Stripe\nlever:northwind:Northwind") }}
     {{ m.listarea("signals.hiring_keywords", "Hiring keywords", help="Job titles at target accounts that signal a need.", placeholder="Executive Assistant\nTravel Manager") }}
     {{ m.listarea("signals.news_queries", "News queries", help="Google News searches.", placeholder="raises Series A fintech") }}
+    {% if not public_mode %}
     {{ m.listarea("signals.rss_feeds", "RSS / Atom feeds", help="Feed URLs to scan for your keywords.") }}
+    {% endif %}
     {% if "signals.sec_queries" in values %}
     {{ m.listarea("signals.sec_queries", "SEC EDGAR queries", help="US companies: new Form D funding filings and 8-K executive changes.") }}
     {% endif %}
@@ -132,7 +136,7 @@
   </div>
   {{ m.radios("outreach.mode", "Drafting mode", [
       ("review", "Review", "You draft on demand from a lead's page or by asking Claude."),
-      ("auto_draft", "Auto-draft", "A first-touch draft is created for every new hot lead after a scan."),
+      ("auto_draft", "Auto-draft", "A first-touch draft is created for every person lead that turns hot (in a scan, through Claude, the API, an import or an edit)."),
     ], help="Nothing is ever sent automatically: you approve, copy and send every message yourself.") }}
   <div class="grid-2">
     {{ m.textarea("outreach.signature", "Signature", rows=2) }}
@@ -140,11 +144,15 @@
   </div>
   {{ m.textarea("outreach.extra_instructions", "Extra instructions for Claude", rows=2, placeholder="e.g. Never mention pricing in the first message.") }}
   <h3 class="sub-head">Hot-lead alerts</h3>
+  {% if public_mode %}
+  <p class="help">Slack or Discord alerts and RSS feeds are connected by the team after they review your registration.</p>
+  {% else %}
   <div class="grid-3">
     {{ m.input("notify.slack_webhook_url", "Slack webhook URL", type="url", placeholder="https://hooks.slack.com/…", attrs={"pattern": "https://.*"}) }}
     {{ m.input("notify.discord_webhook_url", "Discord webhook URL", type="url", placeholder="https://discord.com/api/webhooks/…", attrs={"pattern": "https://.*"}) }}
-    {{ m.input("notify.min_score", "Alert at score ≥", type="number", attrs={"min": "0", "max": "100", "inputmode": "numeric"}) }}
+    {{ m.input("notify.min_score", "Alert at score ≥", type="number", help="Each person lead is alerted once, when it turns hot (70+) with at least this score. Below 70 works like 70.", attrs={"min": "0", "max": "100", "inputmode": "numeric"}) }}
   </div>
+  {% endif %}
 </fieldset>
 
 {# ------------------------------------------------------------------ 6. Review #}

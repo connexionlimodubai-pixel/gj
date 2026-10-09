@@ -1,0 +1,153 @@
+{# Shared UI pieces. Import with: {% import "_macros.html" as m with context %} #}
+
+{% macro icon(name, size=16, cls="") -%}
+<svg class="icon{% if cls %} {{ cls }}{% endif %}" width="{{ size }}" height="{{ size }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">{{ ICONS.get(name, "") }}</svg>
+{%- endmacro %}
+
+{% macro csrf() -%}
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+{%- endmacro %}
+
+{% macro when(dt, empty="never") -%}
+{% if dt %}<time datetime="{{ dt|iso_dt }}" title="{{ dt|abs_dt }}">{{ dt|ago }}</time>{% else %}<span class="muted">{{ empty }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro tier_badge(tier) -%}
+<span class="tier tier-{{ tier }}">{{ icon({"hot": "flame", "warm": "sun", "cold": "snowflake"}.get(tier, "minus"), 12) }}{{ tier|capitalize }}</span>
+{%- endmacro %}
+
+{% macro score(value, tier) -%}
+<span class="score score-{{ tier }}" title="Score {{ value }} of 100">
+<span class="score-num">{{ value }}</span><span class="meter" aria-hidden="true"><span class="meter-fill" style="width: {{ [[value, 0]|max, 100]|min }}%"></span></span>
+</span>
+{%- endmacro %}
+
+{% macro status_pill(status) -%}
+<span class="pill pill-{{ status }}">{{ status|status_label }}</span>
+{%- endmacro %}
+
+{% macro msg_pill(status) -%}
+<span class="pill pill-msg-{{ status }}">{{ {"draft": "Draft", "approved": "Approved", "sent": "Sent", "replied": "Replied", "skipped": "Skipped", "received": "Reply"}.get(status, status) }}</span>
+{%- endmacro %}
+
+{% macro avatar(name, kind="person", size="") -%}
+<span class="avatar{% if kind == 'account' %} avatar-account{% endif %}{% if size %} avatar-{{ size }}{% endif %}" aria-hidden="true">{% if kind == "account" %}{{ icon("building", 15 if size else 13) }}{% else %}{{ name|initials }}{% endif %}</span>
+{%- endmacro %}
+
+{% macro lead_title(lead) -%}
+{% if lead.kind == "account" %}{{ lead.lead_company or "Unknown company" }}{% else %}{{ lead.full_name }}{% endif %}
+{%- endmacro %}
+
+{% macro lead_sub(lead) -%}
+{% if lead.kind == "account" %}Account · find the decision-maker{% else %}{{ lead.title or "Title unknown" }}{% endif %}
+{%- endmacro %}
+
+{% macro copy_button(target, label="Copy", cls="btn btn-sm") -%}
+<button type="button" class="{{ cls }}" data-copy="{{ target }}">{{ icon("copy", 14) }}<span data-copy-label>{{ label }}</span></button>
+{%- endmacro %}
+
+{% set REASON_ICONS = {"match": "check", "miss": "x", "unknown": "help", "block": "ban", "signal": "zap", "ai": "sparkles", "info": "info"} %}
+{% set REASON_LABELS = {"match": "Match", "miss": "Miss", "unknown": "Unknown", "block": "Disqualifier", "signal": "Signal", "ai": "AI", "info": "Note"} %}
+
+{% macro reason(parts, size=14) -%}
+{% set kind, text = parts %}
+<span class="reason reason-{{ kind }}"><span class="reason-icon">{{ icon(REASON_ICONS.get(kind, "info"), size) }}<span class="sr-only">{{ REASON_LABELS.get(kind, "Note") }}:</span></span><span class="reason-text">{{ text }}</span></span>
+{%- endmacro %}
+
+{% macro empty(icon_name, title) -%}
+<div class="empty">
+<div class="empty-icon">{{ icon(icon_name, 20) }}</div>
+<p class="empty-title">{{ title }}</p>
+{% if caller %}<div class="empty-body">{{ caller() }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro pager(p) -%}
+<nav class="pager" aria-label="Pagination">
+<span class="muted">{% if p.total %}{{ p.start }}–{{ p.end }} of {{ p.total|compact }}{% else %}No results{% endif %}</span>
+{% if p.pages > 1 %}
+<span class="pager-links">
+{% if p.page > 1 %}<a class="btn btn-sm" href="{{ query_with(request, page=p.page - 1) }}" rel="prev">{{ icon("chevron-left", 14) }}Previous</a>{% endif %}
+<span class="muted small">Page {{ p.page }} of {{ p.pages }}</span>
+{% if p.page < p.pages %}<a class="btn btn-sm" href="{{ query_with(request, page=p.page + 1) }}" rel="next">Next{{ icon("chevron-right", 14) }}</a>{% endif %}
+</span>
+{% endif %}
+</nav>
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- form fields #}
+
+{% macro fid(name) -%}f-{{ name|replace(".", "-") }}{%- endmacro %}
+
+{% macro aria(name, help) -%}
+{% set ids = [] %}{% if help %}{% set _ = ids.append(fid(name) ~ "-help") %}{% endif %}{% if errors.get(name) %}{% set _ = ids.append(fid(name) ~ "-err") %}{% endif %}{% if ids %} aria-describedby="{{ ids|join(' ') }}"{% endif %}{% if errors.get(name) %} aria-invalid="true"{% endif %}
+{%- endmacro %}
+
+{% macro attrs_of(attrs) -%}
+{% for key, value in attrs.items() %} {{ key }}="{{ value }}"{% endfor %}
+{%- endmacro %}
+
+{% macro help_err(name, help) -%}
+{% if help %}<p class="help" id="{{ fid(name) }}-help">{{ help }}</p>{% endif %}
+{% if errors.get(name) %}<p class="field-error" id="{{ fid(name) }}-err">{{ icon("alert", 14) }}<span>{{ errors[name] }}</span></p>{% endif %}
+{%- endmacro %}
+
+{% macro label_for(name, label, required=false) -%}
+<label for="{{ fid(name) }}">{{ label }}{% if required %}<span class="req" aria-hidden="true"> *</span>{% endif %}</label>
+{%- endmacro %}
+
+{% macro input(name, label, type="text", help="", required=false, placeholder="", attrs={}, cls="") -%}
+<div class="field{% if cls %} {{ cls }}{% endif %}{% if errors.get(name) %} has-error{% endif %}" data-label="{{ label }}">
+{{ label_for(name, label, required) }}
+<input class="input" id="{{ fid(name) }}" name="{{ name }}" type="{{ type }}" value="{{ values.get(name, '') }}"{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if required %} required{% endif %}{{ aria(name, help) }}{{ attrs_of(attrs) }}>
+{{ help_err(name, help) }}
+</div>
+{%- endmacro %}
+
+{% macro textarea(name, label, help="", rows=3, placeholder="", required=false, attrs={}, cls="") -%}
+<div class="field{% if cls %} {{ cls }}{% endif %}{% if errors.get(name) %} has-error{% endif %}" data-label="{{ label }}">
+{{ label_for(name, label, required) }}
+<textarea class="input" id="{{ fid(name) }}" name="{{ name }}" rows="{{ rows }}"{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if required %} required{% endif %}{{ aria(name, help) }}{{ attrs_of(attrs) }}>{{ values.get(name, '') }}</textarea>
+{{ help_err(name, help) }}
+</div>
+{%- endmacro %}
+
+{% macro listarea(name, label, help="", rows=3, placeholder="", cls="") -%}
+{{ textarea(name, label, (help ~ " " if help else "") ~ "One per line or comma-separated.", rows, placeholder, cls=cls) }}
+{%- endmacro %}
+
+{% macro select(name, label, options, help="", blank=none, cls="") -%}
+<div class="field{% if cls %} {{ cls }}{% endif %}{% if errors.get(name) %} has-error{% endif %}" data-label="{{ label }}">
+{{ label_for(name, label) }}
+<select class="input" id="{{ fid(name) }}" name="{{ name }}"{{ aria(name, help) }}>
+{% if blank is not none %}<option value="">{{ blank }}</option>{% endif %}
+{% for value, text, selected in select_options(options, values.get(name, "")) %}<option value="{{ value }}"{% if selected %} selected{% endif %}>{{ text }}</option>{% endfor %}
+</select>
+{{ help_err(name, help) }}
+</div>
+{%- endmacro %}
+
+{% macro checks(name, label, options, help="", cls="") -%}
+<fieldset class="field checks-field{% if cls %} {{ cls }}{% endif %}{% if errors.get(name) %} has-error{% endif %}" id="{{ fid(name) }}" data-label="{{ label }}"{{ aria(name, help) }}>
+<legend>{{ label }}</legend>
+<div class="chips">
+{% for value, text, checked in check_options(options, values.get(name, [])) %}
+<label class="chip"><input type="checkbox" name="{{ name }}" value="{{ value }}"{% if checked %} checked{% endif %}><span class="chip-box" aria-hidden="true">{{ icon("check", 12) }}</span><span>{{ text }}</span></label>
+{% endfor %}
+</div>
+{{ help_err(name, help) }}
+</fieldset>
+{%- endmacro %}
+
+{% macro radios(name, label, options, help="") -%}
+{% set current = values.get(name, "") %}
+<fieldset class="field radio-cards{% if errors.get(name) %} has-error{% endif %}" id="{{ fid(name) }}" data-label="{{ label }}"{{ aria(name, help) }}>
+<legend>{{ label }}</legend>
+<div class="radio-grid">
+{% for value, title, description in options %}
+<label class="radio-card"><input type="radio" name="{{ name }}" value="{{ value }}"{% if current == value %} checked{% endif %}><span class="radio-title">{{ title }}</span><span class="radio-desc">{{ description }}</span></label>
+{% endfor %}
+</div>
+{{ help_err(name, help) }}
+</fieldset>
+{%- endmacro %}

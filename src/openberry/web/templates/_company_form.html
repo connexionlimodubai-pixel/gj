@@ -1,0 +1,180 @@
+{# The registration-board form. Used by /register (wizard=true) and the company profile page.
+   Expects: form_action, wizard, submit_label, steps, values, errors, first_step, public_mode, honeypot. #}
+{% import "_macros.html" as m with context %}
+{% set step_count = steps|length if wizard else steps|length - 1 %}
+{% set step_labels = dict(steps) %}
+{% set error_steps = error_steps|default({}) %}
+<form method="post" action="{{ form_action }}" class="company-form{{ ' is-wizard' if wizard }}"{% if wizard %} data-wizard data-first-step="{{ first_step }}"{% endif %}>
+{{ m.csrf() }}
+{% if public_mode %}
+<div class="hp" aria-hidden="true"><label for="hp-field">Leave this empty</label><input id="hp-field" name="{{ honeypot }}" tabindex="-1" autocomplete="off"></div>
+{% endif %}
+
+{% if wizard %}
+<ol class="wizard-progress" data-wizard-progress>
+  {% for key, label in steps %}
+  <li><button type="button" class="wizard-dot{{ ' has-error' if key in error_steps.values() }}" data-step-to="{{ key }}"><span class="dot-num">{{ loop.index }}</span><span class="dot-label">{{ label }}</span>{% if key in error_steps.values() %}<span class="sr-only"> (needs attention)</span>{% endif %}</button></li>
+  {% endfor %}
+</ol>
+{% endif %}
+
+{% if errors %}
+<div class="form-alert" role="alert">
+  {{ m.icon("alert", 18) }}
+  <div><strong>{{ errors|length }} field{{ "s" if errors|length != 1 }} need{{ "" if errors|length != 1 else "s" }} attention.</strong>
+  <ul>{% for name, message in errors.items() %}{% set step = error_steps.get(name, "") %}<li><a href="#{{ m.fid(name) }}" data-error-step="{{ step }}">{% if step in step_labels %}<span class="error-where">{{ step_labels[step] }}:</span> {% endif %}{{ message }}</a></li>{% endfor %}</ul></div>
+</div>
+{% endif %}
+
+{# ------------------------------------------------------------------ 1. Company #}
+<fieldset class="step card" id="step-company" data-step="company">
+  <legend class="step-title">{% if wizard %}<span class="step-kicker">Step 1 of {{ step_count }}</span>{% endif %}Company</legend>
+  <p class="step-intro">Start with your website: OpenBerry can read it and pre-fill the rest.</p>
+  <div class="field website-field{% if errors.get('website') %} has-error{% endif %}" data-label="Website">
+    {{ m.label_for("website", "Website") }}
+    <div class="input-row">
+      <input class="input" id="{{ m.fid('website') }}" name="website" type="text" inputmode="url" autocomplete="url" value="{{ values.get('website', '') }}" placeholder="yourcompany.com" aria-describedby="autofill-status">
+      <button type="button" class="btn" data-autofill="/api/site-summary">{{ m.icon("wand", 15) }}<span>Auto-fill from website</span></button>
+    </div>
+    <p class="help" id="autofill-status" aria-live="polite">Fills only empty fields from your homepage. You review everything before saving.</p>
+    {% if errors.get("website") %}<p class="field-error">{{ m.icon("alert", 14) }}<span>{{ errors.website }}</span></p>{% endif %}
+  </div>
+  <div class="grid-2">
+    {{ m.input("name", "Company name", required=true, attrs={"autocomplete": "organization", "maxlength": "200"}) }}
+    {{ m.input("industry", "Industry", placeholder="e.g. Ground transportation") }}
+    {{ m.input("location", "Headquarters / main market", placeholder="e.g. Dubai, UAE") }}
+    {{ m.select("company_size", "Company size", SIZE_OPTIONS, blank="Select a size") }}
+  </div>
+  {{ m.textarea("description", "What does your company do?", rows=3, placeholder="One or two sentences, in your customers' words.") }}
+  <h3 class="sub-head">Contact person</h3>
+  <div class="grid-3">
+    {{ m.input("contact_name", "Name", attrs={"autocomplete": "name"}) }}
+    {{ m.input("contact_email", "Email", type="email", attrs={"autocomplete": "email", "pattern": "[^@\\s]+@[^@\\s]+\\.[^@\\s]+", "title": "An email address such as name@company.com"}) }}
+    {{ m.input("contact_phone", "Phone", type="tel", attrs={"autocomplete": "tel"}) }}
+  </div>
+</fieldset>
+
+{# ------------------------------------------------------------------ 2. Offer #}
+<fieldset class="step card" id="step-offer" data-step="offer">
+  <legend class="step-title">{% if wizard %}<span class="step-kicker">Step 2 of {{ step_count }}</span>{% endif %}Offer</legend>
+  <p class="step-intro">What you sell and why it matters. Claude uses this to qualify leads and write messages that sound like you.</p>
+  {{ m.textarea("products", "Products / services", rows=2, placeholder="e.g. Corporate accounts, airport transfers, event transport") }}
+  {{ m.textarea("value_proposition", "Value proposition", help="One sentence: why customers choose you.", rows=2) }}
+  <div class="grid-2">
+    {{ m.textarea("pain_points", "Pain points you solve", rows=3) }}
+    {{ m.textarea("proof_points", "Proof points", help="Results, case studies and notable clients Claude may cite.", rows=3) }}
+    {{ m.listarea("competitors", "Competitors", help="People engaging with them become leads.", placeholder="Competitor A\nCompetitor B") }}
+    {{ m.listarea("best_customers", "Best customers", help="Names or domains: seeds for lookalike prospecting.") }}
+  </div>
+</fieldset>
+
+{# ------------------------------------------------------------------ 3. ICP #}
+<fieldset class="step card" id="step-icp" data-step="icp">
+  <legend class="step-title">{% if wizard %}<span class="step-kicker">Step 3 of {{ step_count }}</span>{% endif %}Ideal customer</legend>
+  <p class="step-intro">Who should be a lead. Leave a criterion empty to ignore it in scoring.</p>
+  <div class="grid-2">
+    {{ m.listarea("icp.job_titles", "Target job titles", rows=4, placeholder="Head of Sales\nFounder") }}
+    {{ m.listarea("icp.industries", "Industries", rows=4, placeholder="Finance\nConsulting") }}
+  </div>
+  {{ m.checks("icp.seniorities", "Seniority", SENIORITIES.items()) }}
+  {{ m.checks("icp.company_sizes", "Company size (employees)", SIZE_CHIPS) }}
+  {{ m.checks("icp.company_types", "Company type", COMPANY_TYPE_OPTIONS, help="Guides Claude's prospecting; it doesn't change scores.") }}
+  <div class="grid-2">
+    {{ m.listarea("icp.locations", "Locations", help="Countries, regions or cities. 'UAE', 'GCC', 'Europe' and 'USA' are understood.") }}
+    {{ m.listarea("icp.keywords", "Fit keywords", help="Topics in a profile that indicate fit.") }}
+    {{ m.listarea("icp.exclude_keywords", "Exclude keywords", help="Disqualify leads that mention these, e.g. student, recruiter.") }}
+    {{ m.listarea("icp.exclude_companies", "Never-contact companies", help="Existing customers, partners and competitors.") }}
+  </div>
+</fieldset>
+
+{# ------------------------------------------------------------------ 4. Signals & requirements #}
+<fieldset class="step card" id="step-signals" data-step="signals">
+  <legend class="step-title">{% if wizard %}<span class="step-kicker">Step 4 of {{ step_count }}</span>{% endif %}Signals &amp; requirements</legend>
+  <p class="step-intro">What to watch. Each list feeds a free collector; LinkedIn sources are checked by Claude through MCP.</p>
+  {{ m.checks("signals.enabled_types", "Signal types to track", SIGNAL_OPTIONS, cls="checks-2col") }}
+  <div class="grid-2">
+    {{ m.listarea("signals.keywords", "Keywords to monitor", help="Watched on Hacker News, Reddit and news.", placeholder="corporate travel\nchauffeur service") }}
+    {{ m.listarea("signals.subreddits", "Subreddits", help="Without r/.", placeholder="dubai\nsmallbusiness") }}
+    {{ m.listarea("signals.github_repos", "GitHub repositories", help="owner/repo of competitor or related projects; people active on them become leads.", placeholder="owner/repo") }}
+    {{ m.textarea("signals.job_boards", "Job boards of target accounts", help="One per line: provider:board-token:Company (greenhouse, lever or ashby).", rows=3, placeholder="greenhouse:stripe:Stripe\nlever:northwind:Northwind") }}
+    {{ m.listarea("signals.hiring_keywords", "Hiring keywords", help="Job titles at target accounts that signal a need.", placeholder="Executive Assistant\nTravel Manager") }}
+    {{ m.listarea("signals.news_queries", "News queries", help="Google News searches.", placeholder="raises Series A fintech") }}
+    {% if not public_mode %}
+    {{ m.listarea("signals.rss_feeds", "RSS / Atom feeds", help="Feed URLs to scan for your keywords.") }}
+    {% endif %}
+    {% if "signals.sec_queries" in values %}
+    {{ m.listarea("signals.sec_queries", "SEC EDGAR queries", help="US companies: new Form D funding filings and 8-K executive changes.") }}
+    {% endif %}
+    {{ m.listarea("signals.influencers", "LinkedIn influencers", help="Profile URLs. Claude checks who engages with their posts.") }}
+    {{ m.listarea("signals.competitor_pages", "Competitor LinkedIn pages", help="Claude checks who engages with them.") }}
+    {{ m.listarea("signals.events", "Events & webinars", help="Attendees are good leads.") }}
+  </div>
+  <div class="grid-3">
+    {{ m.input("signals.lookback_days", "Look back (days)", type="number", help="How far back each scan reads.", attrs={"min": "1", "max": "90", "inputmode": "numeric"}) }}
+    {{ m.input("scan_interval_hours", "Scan every (hours)", type="number", help="Automatic scan interval.", attrs={"min": "1", "max": "720", "inputmode": "numeric"}) }}
+    {{ m.input("leads_per_week", "Leads per week target", type="number", attrs={"min": "1", "max": "5000", "inputmode": "numeric"}) }}
+  </div>
+  {{ m.textarea("requirements", "What do you need?", help="Goals, volumes, markets, constraints. Claude reads this before prospecting.", rows=6, placeholder="e.g. 50 qualified corporate leads a week in the UAE, focus on finance and events, no agencies.", cls="field-lg") }}
+</fieldset>
+
+{# ------------------------------------------------------------------ 5. Outreach & alerts #}
+<fieldset class="step card" id="step-outreach" data-step="outreach">
+  <legend class="step-title">{% if wizard %}<span class="step-kicker">Step 5 of {{ step_count }}</span>{% endif %}Outreach &amp; alerts</legend>
+  <p class="step-intro">How messages should sound and when to ping you about hot leads.</p>
+  <div class="grid-3">
+    {{ m.input("outreach.sender_name", "Sender name") }}
+    {{ m.input("outreach.sender_title", "Sender title") }}
+    {{ m.select("outreach.tone", "Tone", TONE_OPTIONS) }}
+    {{ m.input("outreach.language", "Language") }}
+    {{ m.input("outreach.calendar_link", "Calendar link", placeholder="https://cal.com/you") }}
+    {{ m.input("outreach.max_followups", "Max follow-ups", type="number", attrs={"min": "0", "max": "6", "inputmode": "numeric"}) }}
+  </div>
+  {{ m.checks("outreach.channels", "Channels", [("linkedin", "LinkedIn"), ("email", "Email")]) }}
+  <div class="grid-2">
+    {{ m.input("outreach.call_to_action", "Call to action") }}
+    {{ m.input("outreach.followup_days", "Follow-up after (days)", help="Days to wait after each sent message, e.g. 3, 7.") }}
+  </div>
+  {{ m.radios("outreach.mode", "Drafting mode", [
+      ("review", "Review", "You draft on demand from a lead's page or by asking Claude."),
+      ("auto_draft", "Auto-draft", "A first-touch draft is created for every person lead that turns hot (in a scan, through Claude, the API, an import or an edit)."),
+    ], help="Nothing is ever sent automatically: you approve, copy and send every message yourself.") }}
+  <div class="grid-2">
+    {{ m.textarea("outreach.signature", "Signature", rows=2) }}
+    {{ m.listarea("outreach.banned_words", "Banned words", help="Words and phrases messages must never use.", rows=2) }}
+  </div>
+  {{ m.textarea("outreach.extra_instructions", "Extra instructions for Claude", rows=2, placeholder="e.g. Never mention pricing in the first message.") }}
+  <h3 class="sub-head">Hot-lead alerts</h3>
+  {% if public_mode %}
+  <p class="help">Slack or Discord alerts and RSS feeds are connected by the team after they review your registration.</p>
+  {% else %}
+  <div class="grid-3">
+    {{ m.input("notify.slack_webhook_url", "Slack webhook URL", type="url", placeholder="https://hooks.slack.com/…", attrs={"pattern": "https://.*"}) }}
+    {{ m.input("notify.discord_webhook_url", "Discord webhook URL", type="url", placeholder="https://discord.com/api/webhooks/…", attrs={"pattern": "https://.*"}) }}
+    {{ m.input("notify.min_score", "Alert at score ≥", type="number", help="Each person lead is alerted once, when it turns hot (70+) with at least this score. Below 70 works like 70.", attrs={"min": "0", "max": "100", "inputmode": "numeric"}) }}
+  </div>
+  {% endif %}
+</fieldset>
+
+{# ------------------------------------------------------------------ 6. Review #}
+{% if wizard %}
+<fieldset class="step card" id="step-review" data-step="review">
+  <legend class="step-title"><span class="step-kicker">Step 6 of {{ step_count }}</span>Review &amp; submit</legend>
+  <p class="step-intro">Check your answers. Everything can be changed later on the company profile page.</p>
+  <div class="review" data-review aria-live="polite"><p class="muted">Use the steps above to fill in the form, then submit.</p></div>
+</fieldset>
+{% endif %}
+
+<div class="form-actions{{ ' wizard-nav' if wizard else ' save-bar' }}">
+  {% if wizard %}
+  <button type="button" class="btn" data-wizard-back hidden>{{ m.icon("chevron-left") }}Back</button>
+  <span class="spacer"></span>
+  <span class="muted small" data-wizard-count></span>
+  <button type="button" class="btn btn-primary" data-wizard-next hidden>Next{{ m.icon("chevron-right") }}</button>
+  <button type="submit" class="btn btn-primary" data-wizard-submit>{{ m.icon("check") }}{{ submit_label }}</button>
+  {% else %}
+  <span class="muted small">Saving recalculates every lead's score.</span>
+  <span class="spacer"></span>
+  <button type="submit" class="btn btn-primary">{{ m.icon("check") }}{{ submit_label }}</button>
+  {% endif %}
+</div>
+</form>

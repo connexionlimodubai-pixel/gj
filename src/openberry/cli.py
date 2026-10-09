@@ -20,25 +20,59 @@ def _serve(args: argparse.Namespace) -> None:
 
 
 def _mcp(args: argparse.Namespace) -> None:
-    from .mcp_server import build_server
+    if not args.http:
+        from .mcp_server import build_server
 
-    server = build_server()
-    if args.http:
-        server.run("streamable-http", host=args.host, port=args.port)
-    else:
-        server.run()  # stdio: what Claude Desktop / Claude Code launch
+        build_server().run()  # stdio: what Claude Desktop / Claude Code launch
+        return
+
+    # Standalone HTTP endpoint with the same bearer-token and Host checks as the dashboard's /mcp.
+    from contextlib import AsyncExitStack, asynccontextmanager
+
+    import uvicorn
+    from fastapi import FastAPI
+
+    from .config import get_settings
+    from .mcp_server import mount_http
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with AsyncExitStack() as stack:
+            for hook in app.state.lifespan_hooks:
+                await stack.enter_async_context(hook())
+            yield
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.lifespan_hooks = []
+    mount_http(app, get_settings())
+    print(f"MCP endpoint: http://{args.host}:{args.port}/mcp", file=sys.stderr)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 def _scan(args: argparse.Namespace) -> None:
     from . import repo
-    from .services import run_scan
+    from .collectors import get_collectors
+    from .services import ScanInProgress, run_scan
 
-    ids = [args.company] if args.company else [c.id for c in repo.list_companies() if c.status == "active"]
+    try:
+        get_collectors(args.source)  # a typo fails before anything is scanned
+    except ValueError as exc:
+        sys.exit(f"openberry scan: error: {exc}")
+    companies = repo.list_companies()
+    if args.company and args.company not in {c.id for c in companies}:
+        known = ", ".join(f"{c.id} ({c.name})" for c in companies) or "none yet"
+        sys.exit(f"openberry scan: error: company {args.company} not found; registered companies: {known}")
+    ids = [args.company] if args.company else [c.id for c in companies if c.status == "active"]
     if not ids:
         print("No companies registered yet. Open the dashboard (openberry serve) and register one.")
         return
     for company_id in ids:
-        stats = asyncio.run(run_scan(company_id, trigger="cli", sources=args.source or None))
+        try:
+            stats = asyncio.run(run_scan(company_id, trigger="cli", sources=args.source or None))
+        except ScanInProgress as exc:
+            stats = {"status": "already_running", "message": str(exc)}
+        except repo.NotFound as exc:  # deleted while we were scanning the others
+            stats = {"status": "not_found", "message": str(exc)}
         print(json.dumps({"company_id": company_id, **stats}, indent=2, default=str))
 
 
@@ -91,6 +125,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     # Logs go to stderr: stdout belongs to the MCP protocol in `openberry mcp`.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # it logs full request URLs at INFO; webhook URLs are secrets
     args.func(args)
 
 

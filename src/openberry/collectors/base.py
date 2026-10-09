@@ -27,6 +27,7 @@ class RawSignal:
     lead: LeadIn | None = None
     account: str = ""
     account_domain: str = ""
+    account_location: str = ""
 
 
 @dataclass

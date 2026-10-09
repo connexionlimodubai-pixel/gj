@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% set base = "/c/" ~ company.id %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow"><a href="{{ base }}/leads">Leads</a></p>
+    <h1>Add a lead</h1>
+    <p class="lede">Add a person, or only a company to track it as an account. If the lead already exists (same LinkedIn URL, email or name and company), the details are merged.</p>
+  </div>
+</div>
+<form method="post" action="{{ base }}/leads" class="stack-lg">
+  {{ m.csrf() }}
+  {% if errors %}<div class="form-alert" role="alert">{{ m.icon("alert", 18) }}<div><strong>Please check the highlighted fields.</strong></div></div>{% endif %}
+  <fieldset class="card step">
+    <legend class="step-title">Who</legend>
+    <div class="grid-2">
+      {{ m.input("full_name", "Full name", help="Leave empty to add a company-level (account) lead.") }}
+      {{ m.input("title", "Job title") }}
+      {{ m.input("lead_company", "Company") }}
+      {{ m.input("company_domain", "Company domain", placeholder="acme.com") }}
+      {{ m.input("industry", "Industry") }}
+      {{ m.input("company_size", "Company size", placeholder="e.g. 51-200") }}
+      {{ m.input("location", "Location") }}
+      {{ m.input("linkedin_url", "LinkedIn URL", placeholder="https://www.linkedin.com/in/…") }}
+      {{ m.input("email", "Email", type="email") }}
+      {{ m.input("phone", "Phone", type="tel") }}
+      {{ m.input("website", "Website") }}
+      {{ m.input("github_username", "GitHub username") }}
+    </div>
+    {{ m.textarea("bio", "Bio / about", rows=3) }}
+    <div class="grid-2">
+      {{ m.textarea("notes", "Notes", rows=2) }}
+      {{ m.input("tags", "Tags", help="Comma-separated.") }}
+    </div>
+  </fieldset>
+  <fieldset class="card step">
+    <legend class="step-title">First signal <span class="muted small">optional</span></legend>
+    <p class="step-intro">Why is this lead interesting right now? A signal raises the intent score.</p>
+    <div class="grid-3">
+      {{ m.select("signal_type", "Signal type", SIGNAL_OPTIONS) }}
+      {{ m.input("signal_date", "When", type="date") }}
+      {{ m.input("signal_strength", "Strength", type="number", help="50 = typical, 100 = very strong.", attrs={"min": "0", "max": "100"}) }}
+    </div>
+    <div class="grid-2">
+      {{ m.input("signal_title", "What happened", placeholder="e.g. Asked for chauffeur recommendations on Reddit") }}
+      {{ m.input("signal_url", "Link", placeholder="https://…") }}
+    </div>
+  </fieldset>
+  <div class="form-actions">
+    <a class="btn btn-ghost" href="{{ base }}/leads">Cancel</a>
+    <span class="spacer"></span>
+    <button class="btn btn-primary" type="submit">{{ m.icon("plus") }}Add lead</button>
+  </div>
+</form>
+{% endblock %}

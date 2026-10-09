@@ -1,0 +1,60 @@
+[
+  {
+    "additionalPlain": "The base range for this position is AED 25,000 - 32,000 per month.",
+    "additional": "<div>The base range for this position is AED 25,000 - 32,000 per month.</div>",
+    "categories": {"commitment": "Full-time", "department": "Operations", "location": "Dubai", "team": "Workplace & Travel", "allLocations": ["Dubai", "Riyadh"]},
+    "createdAt": 1791100800000,
+    "descriptionPlain": "Northwind is looking for a Travel Manager to own corporate travel for our 400 people across the Gulf, including airport transfers and executive ground transport.",
+    "description": "<div>Northwind is looking for a <b>Travel Manager</b> to own corporate travel for our 400 people across the Gulf.</div>",
+    "id": "5f0c1a2b-0001-4eab-9ee2-aa7d1d07a9d6",
+    "lists": [{"text": "What You'll Do", "content": "<li>Run the travel program</li>"}],
+    "text": "Travel Manager",
+    "country": "AE",
+    "hostedUrl": "https://jobs.lever.co/northwind/5f0c1a2b-0001-4eab-9ee2-aa7d1d07a9d6",
+    "applyUrl": "https://jobs.lever.co/northwind/5f0c1a2b-0001-4eab-9ee2-aa7d1d07a9d6/apply",
+    "workplaceType": "on-site",
+    "salaryRange": {"currency": "AED", "interval": "per-month-salary", "min": 25000, "max": 32000}
+  },
+  {
+    "additionalPlain": "",
+    "additional": "",
+    "categories": {"commitment": "Full-time", "department": "G&A", "location": "Dubai", "team": "Executive Office", "allLocations": ["Dubai"]},
+    "createdAt": 1788247800000,
+    "descriptionPlain": "Support our founders.",
+    "description": "<div>Support our founders.</div>",
+    "id": "5f0c1a2b-0002-4eab-9ee2-aa7d1d07a9d6",
+    "lists": [],
+    "text": "Executive Assistant",
+    "country": "AE",
+    "hostedUrl": "https://jobs.lever.co/northwind/5f0c1a2b-0002-4eab-9ee2-aa7d1d07a9d6",
+    "applyUrl": "https://jobs.lever.co/northwind/5f0c1a2b-0002-4eab-9ee2-aa7d1d07a9d6/apply",
+    "workplaceType": "hybrid"
+  },
+  {
+    "categories": {"commitment": "Contract", "department": "Operations", "location": "Riyadh", "team": "Workplace & Travel"},
+    "descriptionPlain": "Six-month contract to coordinate team offsites.",
+    "description": "<div>Six-month contract to coordinate team offsites.</div>",
+    "id": "5f0c1a2b-0003-4eab-9ee2-aa7d1d07a9d6",
+    "lists": [],
+    "text": "Travel Coordinator",
+    "country": null,
+    "hostedUrl": "https://jobs.lever.co/northwind/5f0c1a2b-0003-4eab-9ee2-aa7d1d07a9d6",
+    "applyUrl": "https://jobs.lever.co/northwind/5f0c1a2b-0003-4eab-9ee2-aa7d1d07a9d6/apply",
+    "workplaceType": "unspecified"
+  },
+  {
+    "additionalPlain": "",
+    "additional": "",
+    "categories": {"commitment": "Permanent", "department": "Sales", "location": "Toronto", "team": "Platform", "allLocations": ["Toronto"]},
+    "createdAt": 1791301500000,
+    "descriptionPlain": "As an Account Executive you will own the full sales cycle.",
+    "description": "<div>As an Account Executive you will own the full sales cycle.</div>",
+    "id": "5f0c1a2b-0004-4eab-9ee2-aa7d1d07a9d6",
+    "lists": [],
+    "text": "Account Executive, Backstage",
+    "country": "CA",
+    "hostedUrl": "https://jobs.lever.co/northwind/5f0c1a2b-0004-4eab-9ee2-aa7d1d07a9d6",
+    "applyUrl": "https://jobs.lever.co/northwind/5f0c1a2b-0004-4eab-9ee2-aa7d1d07a9d6/apply",
+    "workplaceType": "remote"
+  }
+]

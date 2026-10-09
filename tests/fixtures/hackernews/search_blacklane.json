@@ -1,0 +1,278 @@
+{
+  "exhaustive": {
+    "nbHits": true,
+    "typo": true
+  },
+  "exhaustiveNbHits": true,
+  "exhaustiveTypo": true,
+  "hits": [
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "dxb_ops"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Alternatives to Blacklane for corporate travel in Dubai?"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_dxb_ops",
+        "story_45410001",
+        "ask_hn"
+      ],
+      "author": "dxb_ops",
+      "children": [
+        45410002
+      ],
+      "created_at": "2026-10-05T09:00:00Z",
+      "created_at_i": 1791190800,
+      "num_comments": 9,
+      "objectID": "45410001",
+      "points": 12,
+      "story_id": 45410001,
+      "title": "Ask HN: Alternatives to Blacklane for corporate travel in Dubai?",
+      "updated_at": "2026-10-05T09:00:00Z",
+      "story_text": "We&#x27;ve been frustrated with Blacklane&#x27;s pricing lately and are looking for a chauffeur service with monthly invoicing for ~40 execs.<p>Any recommendations?"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "tlv_founder"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "We use Blacklane for our offsites, works fine."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Alternatives to Blacklane for corporate travel in Dubai?"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_tlv_founder",
+        "story_45410001"
+      ],
+      "author": "tlv_founder",
+      "comment_text": "We use Blacklane for our offsites, works fine.",
+      "created_at": "2026-10-05T11:00:00Z",
+      "created_at_i": 1791198000,
+      "objectID": "45410002",
+      "parent_id": 45410001,
+      "story_id": 45410001,
+      "story_title": "Ask HN: Alternatives to Blacklane for corporate travel in Dubai?",
+      "updated_at": "2026-10-05T11:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "night_owl"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Uber Black has been fine for me in Berlin."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Blacklane raises $50M Series E"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_night_owl",
+        "story_45409000"
+      ],
+      "author": "night_owl",
+      "comment_text": "Uber Black has been fine for me in Berlin.",
+      "created_at": "2026-10-03T22:10:00Z",
+      "created_at_i": 1791065400,
+      "objectID": "45410003",
+      "parent_id": 45409000,
+      "story_id": 45409000,
+      "story_title": "Blacklane raises $50M Series E",
+      "updated_at": "2026-10-03T22:10:00Z",
+      "story_url": "https://techcrunch.example/blacklane-series-e"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "lanefan"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Show HN: A CLI for blacklisting lanes"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_lanefan",
+        "story_45410004",
+        "show_hn"
+      ],
+      "author": "lanefan",
+      "children": [],
+      "created_at": "2026-10-03T12:00:00Z",
+      "created_at_i": 1791028800,
+      "num_comments": 0,
+      "objectID": "45410004",
+      "points": 2,
+      "story_id": 45410004,
+      "title": "Show HN: A CLI for blacklisting lanes",
+      "updated_at": "2026-10-03T12:00:00Z",
+      "url": "https://github.com/lanefan/blcli"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "blacklane_fan"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "I prefer trains."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Night trains are back in Europe"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_blacklane_fan",
+        "story_45408000"
+      ],
+      "author": "blacklane_fan",
+      "comment_text": "I prefer trains.",
+      "created_at": "2026-10-02T18:00:00Z",
+      "created_at_i": 1790964000,
+      "objectID": "45410005",
+      "parent_id": 45408000,
+      "story_id": 45408000,
+      "story_title": "Night trains are back in Europe",
+      "updated_at": "2026-10-02T18:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "pressbot42"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Chauffeur startup expands to 50 new cities"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_pressbot42",
+        "story_45410008"
+      ],
+      "author": "pressbot42",
+      "children": [],
+      "created_at": "2026-10-02T07:00:00Z",
+      "created_at_i": 1790924400,
+      "num_comments": 0,
+      "objectID": "45410008",
+      "points": 3,
+      "story_id": 45410008,
+      "title": "Chauffeur startup expands to 50 new cities",
+      "updated_at": "2026-10-02T07:00:00Z",
+      "url": "https://www.blacklane.com/en/press/50-new-cities/"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "early_bird"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Blacklane drivers were late twice last month."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Business travel horror stories"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_early_bird",
+        "story_45300000"
+      ],
+      "author": "early_bird",
+      "comment_text": "Blacklane drivers were late twice last month.",
+      "created_at": "2026-09-20T08:00:00Z",
+      "created_at_i": 1789891200,
+      "objectID": "45410006",
+      "parent_id": 45300000,
+      "story_id": 45300000,
+      "story_title": "Ask HN: Business travel horror stories",
+      "updated_at": "2026-09-20T08:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "x"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Blacklane is a scam"
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ride hailing for business"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_x",
+        "story_45407000"
+      ],
+      "author": null,
+      "comment_text": "Blacklane is a scam",
+      "created_at": "2026-10-04T08:00:00Z",
+      "created_at_i": 1791100800,
+      "objectID": "45410007",
+      "parent_id": 45407000,
+      "story_id": 45407000,
+      "story_title": "Ride hailing for business",
+      "updated_at": "2026-10-04T08:00:00Z"
+    }
+  ],
+  "hitsPerPage": 50,
+  "nbHits": 8,
+  "nbPages": 1,
+  "page": 0,
+  "params": "query=Blacklane&tags=%28story%2Ccomment%29&advancedSyntax=true&analyticsTags=backend",
+  "processingTimeMS": 2,
+  "query": "Blacklane",
+  "serverTimeMS": 3
+}

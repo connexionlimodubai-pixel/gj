@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Gulf Mobility Weekly</title>
+  <link href="https://blog.example.org/" rel="alternate"/>
+  <link href="https://blog.example.org/feed.atom" rel="self"/>
+  <id>tag:blog.example.org,2026:feed</id>
+  <updated>2026-10-07T18:00:00Z</updated>
+  <entry>
+    <title>Careem Business adds monthly invoicing for SMEs</title>
+    <link href="/2026/10/careem-business-invoicing" rel="alternate"/>
+    <id>tag:blog.example.org,2026:post-41</id>
+    <updated>2026-10-04T10:00:00Z</updated>
+    <author><name>Layla Haddad</name></author>
+    <summary type="html">&lt;p&gt;The ride-hailing giant now bills companies once a month.&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <title>Initech closes $40 million Series C led by Sequoia</title>
+    <link href="/2026/10/initech-series-c" rel="alternate"/>
+    <id>tag:blog.example.org,2026:post-42</id>
+    <published>2026-10-06T09:00:00Z</published>
+    <updated>2026-10-06T12:00:00Z</updated>
+    <author><name>Layla Haddad</name></author>
+    <content type="html">&lt;p&gt;Initech will use the money for its &lt;strong&gt;Dubai office opening&lt;/strong&gt; next spring.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>Undated note about chauffeur pricing</title>
+    <link href="/notes/chauffeur-pricing" rel="alternate"/>
+    <id>tag:blog.example.org,2026:note-7</id>
+    <summary>No date on this one.</summary>
+  </entry>
+</feed>

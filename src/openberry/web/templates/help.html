@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">Help</p>
+    <h1>Connect Claude &amp; automate</h1>
+    <p class="lede">OpenBerry stores, scores and shows. Claude does the research, qualification and writing through the openberry MCP server. Scripts and no-code tools use the JSON API.</p>
+  </div>
+</div>
+
+<div class="help-grid">
+  <section class="card" aria-labelledby="h-code">
+    <h2 id="h-code" class="title-icon">{{ m.icon("terminal") }}Claude Code</h2>
+    <p>Run this once in a terminal on this machine:</p>
+    <div class="code-block"><pre id="cmd-code">claude mcp add openberry{% for key, value in launch.env.items() %} -e {{ key }}="{{ value }}"{% endfor %} -- {{ launch_shell }}</pre>{{ m.copy_button("#cmd-code", "Copy", "btn btn-sm btn-ghost") }}</div>
+    <p class="small muted">The MCP server and this dashboard share the same SQLite database, so whatever Claude adds appears here immediately.</p>
+    {% if not launch.docker %}
+    <p class="small muted">Running OpenBerry with Docker Compose instead? Use <code id="cmd-docker">claude mcp add openberry -- {{ docker_shell }}</code>.</p>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-labelledby="h-desktop">
+    <h2 id="h-desktop" class="title-icon">{{ m.icon("sparkles") }}Claude Desktop</h2>
+    <p>Add this to <code>claude_desktop_config.json</code> (Settings → Developer → Edit config), then restart Claude:</p>
+    <div class="code-block"><pre id="cfg-desktop">{{ desktop_config }}</pre>{{ m.copy_button("#cfg-desktop", "Copy", "btn btn-sm btn-ghost") }}</div>
+    <p class="small muted">{% if launch.docker %}This runs <code>openberry mcp</code> inside the <code>openberry</code> container, so Docker must be running on the machine where Claude is.{% else %}The command is a full path because Claude Desktop doesn't use your terminal's PATH. Moved the folder or the virtual environment? Reopen this page for an updated snippet.{% endif %}</p>
+  </section>
+
+  <section class="card" aria-labelledby="h-remote">
+    <h2 id="h-remote" class="title-icon">{{ m.icon("globe") }}Remote server (HTTP)</h2>
+    {% if http_mcp %}
+    <p>This dashboard also serves MCP over Streamable HTTP at <code>{{ page_url }}/mcp</code>.</p>
+    <div class="code-block"><pre id="cmd-http">claude mcp add --transport http openberry "{{ page_url }}/mcp" --header "Authorization: Bearer $OPENBERRY_API_TOKEN"</pre>{{ m.copy_button("#cmd-http", "Copy", "btn btn-sm btn-ghost") }}</div>
+    {% if base_url_differs %}<p class="callout callout-warning">{{ m.icon("alert", 14) }}<span>You opened this page at <code>{{ page_url }}</code>, but <code>OPENBERRY_BASE_URL</code> is <code>{{ base_url }}</code>. Links in Claude's replies use <code>OPENBERRY_BASE_URL</code>: set it to the address you use in the browser.</span></p>{% endif %}
+    {% if auth_enabled and not api_token_set %}<p class="callout callout-warning">{{ m.icon("alert", 14) }}Set <code>OPENBERRY_API_TOKEN</code>: with a dashboard password and no token, the HTTP endpoint and the JSON API stay closed.</p>{% endif %}
+    {% else %}
+    <p>The HTTP endpoint is turned off (<code>OPENBERRY_HTTP_MCP=false</code>). Use the local command above, or run <code>openberry mcp --http</code>.</p>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-labelledby="h-prompts">
+    <h2 id="h-prompts" class="title-icon">{{ m.icon("message") }}Things to ask Claude</h2>
+    <ul class="prompt-list">
+      {% for text in [
+          "Use openberry: list my companies and show what's missing from company " ~ example_company ~ "'s profile.",
+          "Use the openberry tools: read company " ~ example_company ~ "'s profile, run a signal scan, then show me the 10 hottest leads with why they're hot.",
+          "Find decision-makers for the account leads of company " ~ example_company ~ " and add them.",
+          "Draft LinkedIn connection notes for all hot leads of company " ~ example_company ~ " that have no message yet.",
+          "Write my weekly pipeline report for company " ~ example_company ~ ".",
+        ] %}
+      <li><div class="prompt"><p id="help-prompt-{{ loop.index }}">{{ text }}</p>{{ m.copy_button("#help-prompt-" ~ loop.index, "Copy", "btn btn-sm btn-ghost") }}</div></li>
+      {% endfor %}
+    </ul>
+    <p class="small muted">For research on LinkedIn and the web, add an open-source browser MCP server next to openberry, for example Playwright MCP (<code>npx @playwright/mcp@latest</code>) or the reference Fetch server (<code>uvx mcp-server-fetch</code>). Respect each site's terms.</p>
+  </section>
+
+  <section class="card span-all" id="server-sources" aria-labelledby="h-server-sources">
+    <h2 id="h-server-sources" class="title-icon">{{ m.icon("zap") }}Sources set up on the server</h2>
+    <p>Most sources only need the company profile. These also need a setting in the server's <code>.env</code> file (restart OpenBerry after changing it):</p>
+    <ul class="small">
+      <li><strong>Reddit</strong> ({{ "set up" if reddit_ready else "not set up" }}): create a Reddit API app and set <code>REDDIT_CLIENT_ID</code>, <code>REDDIT_CLIENT_SECRET</code> and <code>REDDIT_USERNAME</code>. Commercial use needs Reddit's agreement.</li>
+      <li><strong>SEC EDGAR</strong>: <code>OPENBERRY_CONTACT_EMAIL</code>, or a contact e-mail in the company profile (the SEC asks for one).</li>
+      <li><strong>GitHub</strong> (optional): <code>GITHUB_TOKEN</code> raises the limit from 60 to 5,000 requests an hour.</li>
+    </ul>
+  </section>
+
+  <section class="card span-all" aria-labelledby="h-api">
+    <h2 id="h-api" class="title-icon">{{ m.icon("plug") }}JSON API</h2>
+    <p>For n8n, Activepieces, Make or your own scripts. {% if auth_enabled or api_token_set %}Send <code>Authorization: Bearer $OPENBERRY_API_TOKEN</code> with every request.{% else %}Local mode: the API is open on this machine. Set <code>OPENBERRY_PASSWORD</code> and <code>OPENBERRY_API_TOKEN</code> before exposing it.{% endif %} The OpenAPI schema is at <a href="/api/openapi.json">/api/openapi.json</a>.</p>
+    <div class="table-wrap">
+      <table class="table table-compact api-table">
+        <thead><tr><th scope="col">Method</th><th scope="col">Path</th><th scope="col">What it does</th></tr></thead>
+        <tbody>
+          {% for method, path, what in [
+              ("GET", "/api/companies", "List registered companies"),
+              ("POST", "/api/companies", "Register a company (registration-board JSON)"),
+              ("GET", "/api/companies/{id}", "One company profile"),
+              ("PATCH", "/api/companies/{id}", "Update part of a profile, e.g. {\"icp\": {\"locations\": [\"UAE\"]}}"),
+              ("GET", "/api/companies/{id}/leads", "Leads; filters: tier, status, kind, source, search, min_score, sort, limit, offset"),
+              ("POST", "/api/companies/{id}/leads", "Add a lead (merged with an existing one when it matches)"),
+              ("GET", "/api/leads/{id}", "One lead with its signals and messages"),
+              ("PATCH", "/api/leads/{id}", "Update status, notes, tags or profile fields"),
+              ("GET", "/api/companies/{id}/signals", "Signals; filters: type, source, lead_id, since"),
+              ("POST", "/api/companies/{id}/scan", "Start a background scan (202)"),
+              ("GET", "/api/companies/{id}/scan-status", "Is a scan running? Latest scan run"),
+              ("GET", "/api/companies/{id}/stats", "Dashboard numbers"),
+              ("POST", "/api/site-summary", "Read a website: {\"url\": \"example.com\"}"),
+            ] %}
+          <tr><td><span class="method method-{{ method|lower }}">{{ method }}</span></td><td><code>{{ path }}</code></td><td>{{ what }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="code-block"><pre id="curl-example">curl -s "{{ page_url }}/api/companies/{{ example_company }}/leads?tier=hot" \
+  -H "Authorization: Bearer $OPENBERRY_API_TOKEN"</pre>{{ m.copy_button("#curl-example", "Copy", "btn btn-sm btn-ghost") }}</div>
+  </section>
+</div>
+{% endblock %}

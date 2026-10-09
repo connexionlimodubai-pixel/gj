@@ -1,0 +1,117 @@
+{
+  "exhaustive": {
+    "nbHits": true,
+    "typo": true
+  },
+  "exhaustiveNbHits": true,
+  "exhaustiveTypo": true,
+  "hits": [
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "policy_nerd"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Corporate-travel policies at my company are a mess."
+        },
+        "story_title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Expense policies that actually work"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_policy_nerd",
+        "story_45409700"
+      ],
+      "author": "policy_nerd",
+      "comment_text": "Corporate-travel policies at my company are a mess.",
+      "created_at": "2026-10-07T19:45:00Z",
+      "created_at_i": 1791402300,
+      "objectID": "45410030",
+      "parent_id": 45409700,
+      "story_id": 45409700,
+      "story_title": "Expense policies that actually work",
+      "updated_at": "2026-10-07T19:45:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "travel_pro_dxb"
+        },
+        "comment_text": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Location: Dubai<p>Remote: Yes<p>Skills: corporate travel, expense policy, Concur"
+        },
+        "story_title": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "Ask HN: Who wants to be hired? (October 2026)"
+        }
+      },
+      "_tags": [
+        "comment",
+        "author_travel_pro_dxb",
+        "story_45400002"
+      ],
+      "author": "travel_pro_dxb",
+      "comment_text": "Location: Dubai<p>Remote: Yes<p>Skills: corporate travel, expense policy, Concur",
+      "created_at": "2026-10-06T10:00:00Z",
+      "created_at_i": 1791280800,
+      "objectID": "45400777",
+      "parent_id": 45400002,
+      "story_id": 45400002,
+      "story_title": "Ask HN: Who wants to be hired? (October 2026)",
+      "updated_at": "2026-10-06T10:00:00Z"
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "dxb_ops"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Alternatives to Blacklane for corporate travel in Dubai?"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_dxb_ops",
+        "story_45410001",
+        "ask_hn"
+      ],
+      "author": "dxb_ops",
+      "children": [
+        45410002
+      ],
+      "created_at": "2026-10-05T09:00:00Z",
+      "created_at_i": 1791190800,
+      "num_comments": 9,
+      "objectID": "45410001",
+      "points": 12,
+      "story_id": 45410001,
+      "title": "Ask HN: Alternatives to Blacklane for corporate travel in Dubai?",
+      "updated_at": "2026-10-05T09:00:00Z",
+      "story_text": "We&#x27;ve been frustrated with Blacklane&#x27;s pricing lately and are looking for a chauffeur service with monthly invoicing for ~40 execs.<p>Any recommendations?"
+    }
+  ],
+  "hitsPerPage": 50,
+  "nbHits": 3,
+  "nbPages": 1,
+  "page": 0,
+  "params": "query=corporate+travel&tags=%28story%2Ccomment%29&advancedSyntax=true&analyticsTags=backend",
+  "processingTimeMS": 2,
+  "query": "corporate travel",
+  "serverTimeMS": 3
+}

@@ -1,0 +1,142 @@
+{
+  "exhaustive": {
+    "nbHits": true,
+    "typo": true
+  },
+  "exhaustiveNbHits": true,
+  "exhaustiveTypo": true,
+  "hits": [
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "whoishiring"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Freelancer? Seeking freelancer? (October 2026)"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_whoishiring",
+        "story_45400003",
+        "ask_hn"
+      ],
+      "author": "whoishiring",
+      "children": [],
+      "created_at": "2026-10-01T15:00:05Z",
+      "created_at_i": 1790866805,
+      "num_comments": 120,
+      "objectID": "45400003",
+      "points": 40,
+      "story_id": 45400003,
+      "title": "Ask HN: Freelancer? Seeking freelancer? (October 2026)",
+      "updated_at": "2026-10-01T15:00:05Z",
+      "story_text": "Share your information if you are looking for work as a freelancer..."
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "whoishiring"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who wants to be hired? (October 2026)"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_whoishiring",
+        "story_45400002",
+        "ask_hn"
+      ],
+      "author": "whoishiring",
+      "children": [],
+      "created_at": "2026-10-01T15:00:03Z",
+      "created_at_i": 1790866803,
+      "num_comments": 210,
+      "objectID": "45400002",
+      "points": 95,
+      "story_id": 45400002,
+      "title": "Ask HN: Who wants to be hired? (October 2026)",
+      "updated_at": "2026-10-01T15:00:03Z",
+      "story_text": "Share your information if you are looking for work..."
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "whoishiring"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (October 2026)"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_whoishiring",
+        "story_45400001",
+        "ask_hn"
+      ],
+      "author": "whoishiring",
+      "children": [],
+      "created_at": "2026-10-01T15:00:00Z",
+      "created_at_i": 1790866800,
+      "num_comments": 540,
+      "objectID": "45400001",
+      "points": 310,
+      "story_id": 45400001,
+      "title": "Ask HN: Who is hiring? (October 2026)",
+      "updated_at": "2026-10-01T15:00:00Z",
+      "story_text": "Please state the location and include REMOTE for remote work..."
+    },
+    {
+      "_highlightResult": {
+        "author": {
+          "matchLevel": "none",
+          "matchedWords": [],
+          "value": "whoishiring"
+        },
+        "title": {
+          "matchLevel": "full",
+          "matchedWords": [],
+          "value": "Ask HN: Who is hiring? (September 2026)"
+        }
+      },
+      "_tags": [
+        "story",
+        "author_whoishiring",
+        "story_45100001",
+        "ask_hn"
+      ],
+      "author": "whoishiring",
+      "children": [],
+      "created_at": "2026-09-01T15:00:00Z",
+      "created_at_i": 1788274800,
+      "num_comments": 610,
+      "objectID": "45100001",
+      "points": 420,
+      "story_id": 45100001,
+      "title": "Ask HN: Who is hiring? (September 2026)",
+      "updated_at": "2026-09-01T15:00:00Z",
+      "story_text": "Please state the location and include REMOTE for remote work..."
+    }
+  ],
+  "hitsPerPage": 50,
+  "nbHits": 4,
+  "nbPages": 1,
+  "page": 0,
+  "params": "tags=story%2Cauthor_whoishiring&hitsPerPage=10&advancedSyntax=true&analyticsTags=backend",
+  "processingTimeMS": 2,
+  "query": "",
+  "serverTimeMS": 3
+}

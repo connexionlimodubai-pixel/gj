@@ -1,0 +1,29 @@
+# One-command self-hosting:  cp .env.example .env  (edit it)  &&  docker compose up -d
+# Dashboard: http://localhost:8000      Claude (HTTP MCP): http://localhost:8000/mcp
+services:
+  openberry:
+    build: .
+    image: openberry:latest
+    container_name: openberry
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000"   # remove "127.0.0.1:" to expose on your network (set a password first!)
+    volumes:
+      - openberry-data:/data
+
+  # Optional: free local LLM for the "Local AI (Ollama)" writer in the lead page's Draft a message card.
+  # Enable with:  docker compose --profile ollama up -d
+  # then:         docker exec -it ollama ollama pull llama3.1
+  # and set OPENBERRY_OLLAMA_URL=http://ollama:11434 in .env
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    profiles: ["ollama"]
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  openberry-data:
+  ollama-models:

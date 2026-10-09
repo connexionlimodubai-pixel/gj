@@ -93,3 +93,46 @@ def test_csv_roundtrip_and_formula_escape(company):
 def test_lead_requires_name_or_company(company):
     with pytest.raises(ValueError):
         repo.upsert_lead(company.id, LeadIn(title="CEO"))
+
+
+async def test_crashing_scan_is_marked_failed(company, monkeypatch):
+    from openberry import services
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("collector exploded")
+
+    monkeypatch.setattr(services, "_scan", boom)
+    with pytest.raises(RuntimeError):
+        await services.run_scan(company.id)
+    run = repo.list_scan_runs(company.id)[0]
+    assert run.status == "failed" and "exploded" in run.stats["error"]
+
+
+async def test_hot_lead_alerts_skip_private_webhooks(company, monkeypatch):
+    import httpx
+
+    from openberry import notify
+
+    lead, _ = repo.upsert_lead(company.id, LeadIn(full_name="Ann", title="Travel Manager"))
+    lead = lead.model_copy(update={"score": 90})
+    posted = []
+    transport = httpx.MockTransport(lambda req: posted.append(str(req.url)) or httpx.Response(200))
+    async with httpx.AsyncClient(transport=transport) as client:
+        private = company.model_copy(update={"notify": company.notify.model_copy(
+            update={"slack_webhook_url": "https://127.0.0.1/hook"})})
+        assert await notify.notify_hot_leads(private, [lead], client=client) == []
+
+        async def public(_url):
+            return None
+
+        monkeypatch.setattr(notify, "assert_public_host", public)
+        ok = company.model_copy(update={"notify": company.notify.model_copy(
+            update={"slack_webhook_url": "https://hooks.slack.com/services/x"})})
+        assert await notify.notify_hot_leads(ok, [lead], client=client) == ["slack"]
+    assert posted == ["https://hooks.slack.com/services/x"]
+
+
+def test_update_lead_keeps_a_name_or_company(company):
+    lead, _ = repo.upsert_lead(company.id, LeadIn(full_name="Solo"))
+    with pytest.raises(ValueError):
+        repo.update_lead(lead.id, {"full_name": ""})

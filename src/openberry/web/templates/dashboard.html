@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% set base = "/c/" ~ company.id %}
+<div class="page-head">
+  <div class="min0">
+    <p class="eyebrow">Dashboard</p>
+    <h1 class="title-row">{{ company.name }} <span class="pill pill-company-{{ 'pending' if pending_review(company) else company.status }}">{{ company|company_status }}</span></h1>
+    <p class="meta-inline">
+      {% if company.website|safe_url %}<a href="{{ company.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("globe", 14) }}{{ company.website|host }}</a>{% endif %}
+      {% if company.industry %}<span>{{ m.icon("target", 14) }}{{ company.industry }}</span>{% endif %}
+      {% if company.location %}<span>{{ m.icon("pin", 14) }}{{ company.location }}</span>{% endif %}
+      <span>{{ m.icon("clock", 14) }}Last scan {{ m.when(company.last_scan_at) }}</span>
+    </p>
+  </div>
+  <div class="page-actions">
+    <a class="btn" href="{{ base }}/leads">{{ m.icon("users") }}View leads</a>
+    <form method="post" action="{{ base }}/scan">{{ m.csrf() }}
+      <button class="btn btn-primary" type="submit"{% if scan.running %} disabled{% endif %}>{{ m.icon("refresh") }}{{ "Scanning…" if scan.running else "Run scan now" }}</button>
+    </form>
+  </div>
+</div>
+
+{% if scan.running %}
+<div class="scan-banner" role="status" data-scan-poll="/api/companies/{{ company.id }}/scan-status">
+  <span class="spinner" aria-hidden="true"></span>
+  <p><strong>Scanning free sources…</strong> <span class="muted">This page refreshes by itself when the new signals are in.</span></p>
+</div>
+{% elif scan.last_result and not scan.last_result.ok %}
+{% set problem = scan.last_result.error or "see Scan history below for each source's errors." %}
+{% if scan.last_result.status == "failed" or not scan.last_result.status %}
+<div class="flash flash-error">{{ m.icon("alert") }}<p>The last scan failed: {{ problem }}</p></div>
+{% else %}
+<div class="flash flash-warning">{{ m.icon("alert") }}<p>Last scan: {{ scan.last_result.status|scan_status }}. {{ problem }}</p></div>
+{% endif %}
+{% endif %}
+
+<section class="kpis" aria-label="Key numbers">
+  {% for k in kpis %}
+  <a class="kpi" href="{{ k.href }}">
+    <span class="kpi-label">{% if k.tier %}<span class="tier-dot tier-dot-{{ k.tier }}" aria-hidden="true"></span>{% endif %}{{ k.label }}</span>
+    <span class="kpi-value">{% if k.value is none %}—{% elif k.value is number %}{{ k.value|compact }}{% else %}{{ k.value }}{% endif %}</span>
+    <span class="kpi-sub">{{ k.sub }}</span>
+  </a>
+  {% endfor %}
+</section>
+
+<div class="dash-grid">
+  <section class="card span-2 chart-card" aria-labelledby="days-title">
+    <header class="card-head">
+      <div><h2 id="days-title">Signals, last 14 days</h2>
+        <p class="card-sub">{% if days.empty %}No signals yet{% else %}{{ days.total|plural("signal") }} · busiest day {{ days.peak }}{% endif %}</p></div>
+      <a class="btn btn-sm btn-ghost" href="{{ base }}/signals">All signals{{ m.icon("chevron-right", 14) }}</a>
+    </header>
+    {% if days.empty %}
+      {% call m.empty("zap", "No signals in the last 14 days") %}
+      <p>Run a scan to collect fresh signals, or add sources on the <a href="{{ base }}/settings#step-signals">company profile</a>.</p>
+      {% endcall %}
+    {% else %}
+    <figure class="colchart">
+      <div class="colchart-plot">
+        <div class="colchart-grid" aria-hidden="true">
+          {% for t in days.ticks %}<div class="gridline{{ ' baseline' if loop.first }}" style="bottom: {{ t.pct }}%"><span class="tick">{{ t.value }}</span></div>{% endfor %}
+        </div>
+        <div class="colchart-cols">
+          {% for c in days.cols %}
+          <div class="col{{ ' today' if c.is_today }}" tabindex="0" role="img" aria-label="{{ c.tip }}" data-tip="{{ c.tip }}">
+            <div class="bar" style="height: {{ c.pct }}%">{% if c.label_value %}<span class="bar-val">{{ c.count }}</span>{% endif %}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="colchart-x" aria-hidden="true">
+        {% for c in days.cols %}<span class="{{ 'odd' if loop.index0 % 2 }}{{ ' today' if c.is_today }}">{{ c.xlabel }}</span>{% endfor %}
+      </div>
+      <figcaption class="sr-only">Number of signals collected per day over the last 14 days.</figcaption>
+    </figure>
+    <details class="table-view">
+      <summary>View as table</summary>
+      <table class="table table-compact">
+        <thead><tr><th scope="col">Day</th><th scope="col" class="num">Signals</th></tr></thead>
+        <tbody>{% for c in days.cols|reverse %}<tr><td>{{ "Today" if c.is_today else c.date.strftime("%a %d %b") }}</td><td class="num">{{ c.count }}</td></tr>{% endfor %}</tbody>
+      </table>
+    </details>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-labelledby="types-title">
+    <header class="card-head"><div><h2 id="types-title">By signal type</h2><p class="card-sub">Last 30 days</p></div></header>
+    {% if types.empty %}
+      {% call m.empty("target", "Nothing to break down yet") %}<p>Signal types appear here after your first scan.</p>{% endcall %}
+    {% else %}
+    <ul class="hbars">
+      {% for b in types.bars %}
+      <li class="hbar-row" title="{{ b.label }}: {{ b.count }}">
+        <span class="hbar-label">{% if b.type %}<a href="{{ base }}/signals?type={{ b.type }}">{{ b.label }}</a>{% else %}{{ b.label }}{% endif %}</span>
+        <span class="hbar-line"><span class="hbar" style="width: calc((100% - 2.75rem) * {{ b.frac }})"></span><span class="hbar-val">{{ b.count }}</span></span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+
+  <section class="card span-2" aria-labelledby="hot-title">
+    <header class="card-head">
+      <div><h2 id="hot-title">Hottest leads</h2><p class="card-sub">Top people by score: ICP fit plus fresh intent</p></div>
+      <a class="btn btn-sm btn-ghost" href="{{ base }}/leads">All leads{{ m.icon("chevron-right", 14) }}</a>
+    </header>
+    {% if top_leads %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th scope="col">Lead</th><th scope="col">Score</th><th scope="col" class="hide-sm">Why now</th></tr></thead>
+        <tbody>
+          {% for lead in top_leads %}
+          <tr>
+            <td><div class="lead-cell">{{ m.avatar(lead.full_name, lead.kind) }}<div class="min0"><a class="lead-name" href="{{ base }}/leads/{{ lead.id }}">{{ m.lead_title(lead) }}</a><span class="sub">{{ m.lead_sub(lead) }}{% if lead.lead_company and lead.kind == "person" %} · {{ lead.lead_company }}{% endif %}</span></div></div></td>
+            <td><div class="score-cell">{{ m.score(lead.score, lead.tier) }}{{ m.tier_badge(lead.tier) }}</div></td>
+            <td class="hide-sm why-cell">{% set r = lead|top_reason %}{% if r %}{{ m.reason(r) }}{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      {% call m.empty("users", "No leads yet") %}
+      <p>Run a scan, import a CSV, or ask Claude to find leads.</p>
+      <div class="btn-row center">
+        <a class="btn btn-sm" href="{{ base }}/leads#import">{{ m.icon("upload", 14) }}Import CSV</a>
+        <a class="btn btn-sm" href="{{ base }}/leads/new">{{ m.icon("plus", 14) }}Add a lead</a>
+      </div>
+      {% endcall %}
+    {% endif %}
+  </section>
+
+  <section class="card claude-card" aria-labelledby="claude-title">
+    <header class="card-head"><div><h2 id="claude-title" class="title-icon">{{ m.icon("sparkles") }}Use with Claude</h2>
+      <p class="card-sub">Paste into Claude Desktop or Claude Code with the openberry MCP server connected.</p></div></header>
+    <ul class="prompt-list">
+      {% for label, prompt in prompts %}
+      <li>
+        <p class="prompt-label">{{ label }}</p>
+        <div class="prompt"><p id="prompt-{{ loop.index }}">{{ prompt }}</p>{{ m.copy_button("#prompt-" ~ loop.index, "Copy", "btn btn-sm btn-ghost") }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="small"><a href="/help">How to connect Claude{{ m.icon("chevron-right", 12) }}</a></p>
+  </section>
+
+  <section class="card span-2 align-start" aria-labelledby="recent-title">
+    <header class="card-head"><div><h2 id="recent-title">Recent signals</h2></div>
+      <a class="btn btn-sm btn-ghost" href="{{ base }}/signals">All{{ m.icon("chevron-right", 14) }}</a></header>
+    {% if recent %}
+    <ul class="feed feed-compact">
+      {% for s in recent %}
+      {% set lead = signal_leads.get(s.lead_id) %}
+      <li class="feed-item">
+        <span class="feed-icon">{{ m.icon("zap", 14) }}</span>
+        <div class="feed-body min0">
+          <p class="feed-head"><span class="sig-type">{{ s.label }}</span> <span class="muted">· {{ m.when(s.occurred_at) }}</span></p>
+          <p class="feed-title clamp-2">{{ s.title or "Untitled signal" }}</p>
+          {% if lead %}<a class="feed-lead" href="{{ base }}/leads/{{ lead.id }}">{{ m.lead_title(lead) }}</a>{% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+      {% call m.empty("zap", "No signals yet") %}<p>They show up here as soon as a scan finds something.</p>{% endcall %}
+    {% endif %}
+  </section>
+
+  <div class="dash-col">
+    <section class="card" aria-labelledby="followups-title">
+      <header class="card-head"><div><h2 id="followups-title">Follow-ups due</h2><p class="card-sub">Sent messages waiting for the next step</p></div>
+        <a class="btn btn-sm btn-ghost" href="{{ base }}/outreach?tab=followups">Queue{{ m.icon("chevron-right", 14) }}</a></header>
+      {% if followups %}
+      <ul class="list">
+        {% for f in followups %}
+        <li class="list-item">
+          {{ m.avatar(f.lead.full_name, f.lead.kind) }}
+          <div class="min0 grow">
+            <a class="lead-name" href="{{ base }}/leads/{{ f.lead.id }}">{{ m.lead_title(f.lead) }}</a>
+            <span class="sub">Step {{ f.next_step }} · due {{ m.when(f.due_since) }}</span>
+          </div>
+          <form method="post" action="{{ base }}/leads/{{ f.lead.id }}/draft">{{ m.csrf() }}<input type="hidden" name="step" value="{{ f.next_step }}">
+            <button class="btn btn-sm" type="submit">{{ m.icon("edit", 14) }}Draft</button></form>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+        {% call m.empty("clock", "No follow-ups due") %}<p>When you mark a message as sent, the next step appears here after {{ company.outreach.followup_days[0] if company.outreach.followup_days else 3 }} days without a reply.</p>{% endcall %}
+      {% endif %}
+    </section>
+
+    <section class="card" aria-labelledby="sources-title">
+      <header class="card-head"><div><h2 id="sources-title">Sources</h2><p class="card-sub">Free collectors for this profile</p></div>
+        <a class="btn btn-sm btn-ghost" href="{{ base }}/settings#step-signals">Configure</a></header>
+      <ul class="sources">
+        {% for s in sources %}
+        <li class="source">
+          <span class="source-state {{ 'on' if s.enabled else 'off' }}">{{ m.icon("check" if s.enabled else "minus", 12) }}</span>
+          <div class="min0">
+            <p class="source-name">{{ s.label }}
+              {% if s.enabled %}<span class="pill pill-on">{{ "Via Claude" if s.via_claude else "Enabled" }}</span>
+              {% elif s.configured %}<span class="pill pill-off">Signal types off</span>
+              {% else %}<span class="pill pill-off">Needs setup</span>{% endif %}</p>
+            {% if not s.enabled %}<p class="small muted">Needs {{ s.requires }}. <a href="{{ s.setup_url or base ~ '/settings#step-signals' }}">Set up</a></p>{% endif %}
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+  </div>
+
+  <section class="card span-3" aria-labelledby="runs-title">
+    <header class="card-head"><div><h2 id="runs-title">Scan history</h2><p class="card-sub">{% if scheduler_enabled %}Automatic scans run every {{ company.scan_interval_hours }}h while the company is active{% else %}Automatic scans are off on this server (OPENBERRY_SCHEDULER=false): use Run scan now, or schedule <code>openberry scan</code>{% endif %}</p></div></header>
+    {% if runs %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th scope="col">Started</th><th scope="col">Trigger</th><th scope="col">Status</th><th scope="col" class="num">New signals</th><th scope="col" class="num">New leads</th><th scope="col" class="hide-sm">Duration</th><th scope="col">Issues</th></tr></thead>
+        <tbody>
+          {% for r in runs %}
+          <tr>
+            <td class="nowrap">{{ m.when(r.run.started_at) }}</td>
+            <td>{{ r.run.trigger|capitalize }}</td>
+            <td><span class="pill pill-run-{{ r.run.status if r.run.status in SCAN_STATUS_LABELS else 'other' }}">{{ r.run.status|scan_status }}</span></td>
+            <td class="num">{{ r.signals_new if r.signals_new is not none else "—" }}</td>
+            <td class="num">{{ r.leads_new if r.leads_new is not none else "—" }}</td>
+            <td class="hide-sm">{% if r.duration is not none %}{{ r.duration }}s{% else %}—{% endif %}</td>
+            <td>
+              {% if r.errors or r.warnings %}
+              <details class="issues"><summary>{% if r.errors %}{{ r.errors|length|plural("error") }}{% endif %}{% if r.errors and r.warnings %}, {% endif %}{% if r.warnings %}{{ r.warnings|length|plural("warning") }}{% endif %}</summary>
+                <ul>{% for e in r.errors[:8] %}<li class="error-text">{{ e }}</li>{% endfor %}{% for w in r.warnings[:8] %}<li>{{ w }}</li>{% endfor %}
+                {% if r.errors|length > 8 or r.warnings|length > 8 %}<li class="muted">+{{ [r.errors|length - 8, 0]|max + [r.warnings|length - 8, 0]|max }} more</li>{% endif %}</ul>
+              </details>
+              {% else %}<span class="muted">None</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      {% call m.empty("refresh", "No scans yet") %}<p>Click <strong>Run scan now</strong> to collect your first signals.</p>{% endcall %}
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

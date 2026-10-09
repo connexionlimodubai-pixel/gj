@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
@@ -19,7 +19,7 @@ SIGNAL_TYPES: dict[str, tuple[str, int]] = {
     "hiring": ("Hiring for a relevant role", 25),
     "funding": ("Raised funding", 30),
     "job_change": ("New job or promotion", 30),
-    "github_star": ("Starred a relevant GitHub repo", 20),
+    "github_star": ("Starred or forked a relevant GitHub repo", 20),
     "influencer_engagement": ("Engaged with a niche influencer", 20),
     "profile_visit": ("Visited your profile or website", 35),
     "event": ("Attending a relevant event", 15),
@@ -29,7 +29,7 @@ SIGNAL_TYPES: dict[str, tuple[str, int]] = {
 
 SIGNAL_SOURCES = (
     "hackernews", "reddit", "github", "greenhouse", "lever", "ashby",
-    "google_news", "rss", "linkedin", "web", "manual", "claude", "csv",
+    "google_news", "rss", "sec_edgar", "linkedin", "web", "manual", "claude", "csv", "demo",
 )
 
 SENIORITIES: dict[str, str] = {
@@ -52,6 +52,13 @@ MESSAGE_DIRECTIONS = ("outbound", "inbound")
 COMPANY_TYPES = ("startup", "smb", "mid-market", "enterprise", "agency", "public sector", "nonprofit")
 TONES = ("friendly", "professional", "casual", "direct")
 TIERS = ("hot", "warm", "cold")
+# ScanRun.status -> label. 'failed': it crashed, or every source failed or came back empty with problems.
+SCAN_STATUSES: dict[str, str] = {
+    "running": "Running",
+    "ok": "Ok",
+    "failed": "Failed",
+    "nothing_configured": "No sources configured",
+}
 JOB_BOARD_PROVIDERS = ("greenhouse", "lever", "ashby")
 
 
@@ -147,11 +154,12 @@ class SignalConfig(_Model):
     enabled_types: StrList = Field(default_factory=lambda: list(SIGNAL_TYPES), description="Signal types to track")
     keywords: StrList = Field(default_factory=list, description="Topics to monitor on HN/Reddit/news, e.g. 'corporate chauffeur'")
     subreddits: StrList = Field(default_factory=list, description="Subreddits to watch (without r/)")
-    github_repos: StrList = Field(default_factory=list, description="owner/repo of competitor or related repos; stargazers become leads")
+    github_repos: StrList = Field(default_factory=list, description="owner/repo of competitor or related repos: issue authors and forkers become leads (stargazers only for repos you admin, with GITHUB_TOKEN)")
     job_boards: Annotated[list[JobBoard], BeforeValidator(parse_job_boards)] = Field(default_factory=list)
     hiring_keywords: StrList = Field(default_factory=list, description="Job titles at target accounts that signal need, e.g. 'SDR', 'Travel Manager'")
     news_queries: StrList = Field(default_factory=list, description="Google News queries, e.g. 'raises Series A fintech'")
     rss_feeds: StrList = Field(default_factory=list, description="Any RSS/Atom feed URLs to scan for keywords")
+    sec_queries: StrList = Field(default_factory=list, description="SEC EDGAR full-text queries (US companies). Form D funding filings match names, places, people and industry labels (e.g. 'Other Technology', 'Texas'); 8-K executive changes match topical phrases (e.g. 'logistics software')")
     influencers: StrList = Field(default_factory=list, description="LinkedIn profile URLs whose post engagers Claude should check")
     competitor_pages: StrList = Field(default_factory=list, description="Competitor LinkedIn/company pages whose engagers Claude should check")
     events: StrList = Field(default_factory=list, description="Events/webinars whose attendees are good leads")
@@ -192,7 +200,7 @@ class OutreachConfig(_Model):
     followup_days: Annotated[list[int], BeforeValidator(lambda v: [int(x) for x in split_list(v)] if isinstance(v, str) else v)] = Field(
         default_factory=lambda: [3, 7], description="Days to wait after each sent message before the next follow-up is due")
     mode: Literal["review", "auto_draft"] = Field(
-        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot lead after a scan. Nothing is ever sent automatically.")
+        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot lead, however it turned hot (scan, Claude, import or edit). Nothing is ever sent automatically.")
     banned_words: StrList = Field(default_factory=list, description="Words/phrases messages must never use")
     extra_instructions: str = Field(default="", description="Anything Claude must respect when writing messages")
 
@@ -264,6 +272,15 @@ class SignalIn(_Model):
     @classmethod
     def _known_type(cls, v: str) -> str:
         return v if v in SIGNAL_TYPES else "custom"
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _not_in_future(cls, v: datetime | None) -> datetime | None:
+        # A future date (an event's date, a typo) would never decay and would rank as the latest activity.
+        if v is None:
+            return None
+        now = datetime.now(timezone.utc)
+        return now if (v if v.tzinfo else v.replace(tzinfo=timezone.utc)) > now else v
 
 
 class LeadIn(_Model):

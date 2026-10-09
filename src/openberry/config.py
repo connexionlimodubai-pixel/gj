@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def _dotenv_value(raw: str) -> str:
+    """The value part of a KEY=value line.
+
+    Quoted values are kept as written (`"a # b"`). In an unquoted value a `#` after whitespace
+    starts a comment (`myname  # note` -> `myname`), as in docker compose; a `#` inside a word
+    stays (`pa#ss`).
+    """
+    value = raw.strip()
+    if value[:1] in {'"', "'"} and (end := value.find(value[0], 1)) > 0:
+        return value[1:end]
+    return re.split(r"\s#", raw, maxsplit=1)[0].strip().strip('"').strip("'")
 
 
 def _load_dotenv(path: Path) -> None:
@@ -17,8 +31,12 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        os.environ.setdefault(key.strip(), _dotenv_value(value))
+
+
+# Fixed per-user home so the dashboard and Claude Desktop (which starts `openberry mcp` from an
+# unpredictable working directory) always share the same database and .env file.
+OPENBERRY_HOME = Path(os.environ.get("OPENBERRY_HOME", "~/.openberry")).expanduser()
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -38,7 +56,10 @@ def _int(name: str, default: int) -> int:
 
 @dataclass
 class Settings:
-    db_path: Path = field(default_factory=lambda: Path("data/openberry.db"))
+    db_path: Path = field(default_factory=lambda: OPENBERRY_HOME / "openberry.db")
+    # Public URL of the dashboard: links in MCP replies, an allowed Host name, and Secure
+    # session cookies when it is https://.
+    base_url: str = "http://127.0.0.1:8000"
     # Dashboard login. Empty = no login (fine on localhost, NOT for a public server).
     password: str = ""
     secret_key: str = ""
@@ -47,24 +68,45 @@ class Settings:
     api_token: str = ""
     # Let anyone open /register (agency mode: clients fill in their own details).
     public_registration: bool = False
-    # Background scheduler that runs signal scans every company's scan interval.
+    # Background scheduler: runs each company's signal scan on its interval and, every tick
+    # (seconds, min 30), alerts on people who turned hot outside a scan.
     scheduler_enabled: bool = True
     scheduler_tick_seconds: int = 300
     # Expose the MCP server over Streamable HTTP at /mcp in the web app.
     http_mcp_enabled: bool = True
-    # Optional free local LLM (https://ollama.com) used by the dashboard's "Draft with AI".
+    # Optional free local LLM (https://ollama.com): the "Local AI (Ollama)" writer on a lead page.
     ollama_url: str = ""
     ollama_model: str = "llama3.1"
     # Optional GitHub token: raises the API limit from 60 to 5000 requests/hour.
     github_token: str = ""
+    # Optional Reddit API app credentials (Reddit blocks unauthenticated access since 2026;
+    # commercial use needs Reddit's agreement). The Reddit source stays off without them.
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+    reddit_username: str = ""  # used in the User-Agent Reddit requires: "... (by /u/<username>)"
+    # Let RSS feeds point at private/loopback hosts (e.g. a local RSSHub). Keep off when public
+    # registration is on or the dashboard is shared.
+    allow_private_feeds: bool = False
+    # Contact e-mail sent in the User-Agent where APIs require one (SEC EDGAR fair-access policy).
+    contact_email: str = ""
     user_agent: str = "OpenBerry/0.1 (+https://github.com/connexionlimodubai-pixel/gj)"
     http_timeout: float = 20.0
+    # Extra Host names accepted by the HTTP MCP endpoint (without an API token) and, in local
+    # mode, the dashboard (besides localhost and base_url's host; the dashboard also accepts
+    # any IP address, /mcp does not). "*" disables the check.
+    allowed_hosts: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "Settings":
-        _load_dotenv(Path(os.environ.get("OPENBERRY_ENV_FILE", ".env")))
+        if env_file := os.environ.get("OPENBERRY_ENV_FILE"):
+            _load_dotenv(Path(env_file).expanduser())
+        else:
+            _load_dotenv(Path(".env"))
+            _load_dotenv(OPENBERRY_HOME / ".env")
+        db = os.environ.get("OPENBERRY_DB")
         s = cls(
-            db_path=Path(os.environ.get("OPENBERRY_DB", "data/openberry.db")).expanduser(),
+            db_path=Path(db).expanduser().resolve() if db else OPENBERRY_HOME / "openberry.db",
+            base_url=os.environ.get("OPENBERRY_BASE_URL", "http://127.0.0.1:8000").rstrip("/"),
             password=os.environ.get("OPENBERRY_PASSWORD", ""),
             secret_key=os.environ.get("OPENBERRY_SECRET_KEY", ""),
             api_token=os.environ.get("OPENBERRY_API_TOKEN", ""),
@@ -75,6 +117,12 @@ class Settings:
             ollama_url=os.environ.get("OPENBERRY_OLLAMA_URL", "").rstrip("/"),
             ollama_model=os.environ.get("OPENBERRY_OLLAMA_MODEL", "llama3.1"),
             github_token=os.environ.get("GITHUB_TOKEN", os.environ.get("OPENBERRY_GITHUB_TOKEN", "")),
+            reddit_client_id=os.environ.get("REDDIT_CLIENT_ID", ""),
+            reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
+            reddit_username=os.environ.get("REDDIT_USERNAME", ""),
+            allow_private_feeds=_bool("OPENBERRY_ALLOW_PRIVATE_FEEDS", False),
+            contact_email=os.environ.get("OPENBERRY_CONTACT_EMAIL", ""),
+            allowed_hosts=[h.strip() for h in os.environ.get("OPENBERRY_ALLOWED_HOSTS", "").split(",") if h.strip()],
         )
         if not s.secret_key:
             # Sessions won't survive restarts without a fixed key; that's acceptable locally.

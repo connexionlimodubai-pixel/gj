@@ -1,0 +1,74 @@
+[
+ {
+  "starred_at": "2026-09-01T12:00:00Z",
+  "user": {
+   "login": "before-window",
+   "id": 20444555,
+   "node_id": "MDQ6VXNlcj20444555",
+   "avatar_url": "https://avatars.githubusercontent.com/u/20444555?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/before-window",
+   "html_url": "https://github.com/before-window",
+   "followers_url": "https://api.github.com/users/before-window/followers",
+   "following_url": "https://api.github.com/users/before-window/following{/other_user}",
+   "gists_url": "https://api.github.com/users/before-window/gists{/gist_id}",
+   "starred_url": "https://api.github.com/users/before-window/starred{/owner}{/repo}",
+   "subscriptions_url": "https://api.github.com/users/before-window/subscriptions",
+   "organizations_url": "https://api.github.com/users/before-window/orgs",
+   "repos_url": "https://api.github.com/users/before-window/repos",
+   "events_url": "https://api.github.com/users/before-window/events{/privacy}",
+   "received_events_url": "https://api.github.com/users/before-window/received_events",
+   "type": "User",
+   "user_view_type": "public",
+   "site_admin": false
+  }
+ },
+ {
+  "starred_at": "2026-09-29T08:45:00Z",
+  "user": {
+   "login": "lina-k",
+   "id": 50334455,
+   "node_id": "MDQ6VXNlcj50334455",
+   "avatar_url": "https://avatars.githubusercontent.com/u/50334455?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/lina-k",
+   "html_url": "https://github.com/lina-k",
+   "followers_url": "https://api.github.com/users/lina-k/followers",
+   "following_url": "https://api.github.com/users/lina-k/following{/other_user}",
+   "gists_url": "https://api.github.com/users/lina-k/gists{/gist_id}",
+   "starred_url": "https://api.github.com/users/lina-k/starred{/owner}{/repo}",
+   "subscriptions_url": "https://api.github.com/users/lina-k/subscriptions",
+   "organizations_url": "https://api.github.com/users/lina-k/orgs",
+   "repos_url": "https://api.github.com/users/lina-k/repos",
+   "events_url": "https://api.github.com/users/lina-k/events{/privacy}",
+   "received_events_url": "https://api.github.com/users/lina-k/received_events",
+   "type": "User",
+   "user_view_type": "public",
+   "site_admin": false
+  }
+ },
+ {
+  "starred_at": "2026-10-04T17:20:00Z",
+  "user": {
+   "login": "mo-ahmed",
+   "id": 50667788,
+   "node_id": "MDQ6VXNlcj50667788",
+   "avatar_url": "https://avatars.githubusercontent.com/u/50667788?v=4",
+   "gravatar_id": "",
+   "url": "https://api.github.com/users/mo-ahmed",
+   "html_url": "https://github.com/mo-ahmed",
+   "followers_url": "https://api.github.com/users/mo-ahmed/followers",
+   "following_url": "https://api.github.com/users/mo-ahmed/following{/other_user}",
+   "gists_url": "https://api.github.com/users/mo-ahmed/gists{/gist_id}",
+   "starred_url": "https://api.github.com/users/mo-ahmed/starred{/owner}{/repo}",
+   "subscriptions_url": "https://api.github.com/users/mo-ahmed/subscriptions",
+   "organizations_url": "https://api.github.com/users/mo-ahmed/orgs",
+   "repos_url": "https://api.github.com/users/mo-ahmed/repos",
+   "events_url": "https://api.github.com/users/mo-ahmed/events{/privacy}",
+   "received_events_url": "https://api.github.com/users/mo-ahmed/received_events",
+   "type": "User",
+   "user_view_type": "public",
+   "site_admin": false
+  }
+ }
+]

@@ -1,0 +1,17 @@
+{
+  "exhaustive": {
+    "nbHits": true,
+    "typo": true
+  },
+  "exhaustiveNbHits": true,
+  "exhaustiveTypo": true,
+  "hits": [],
+  "hitsPerPage": 50,
+  "nbHits": 0,
+  "nbPages": 0,
+  "page": 0,
+  "params": "query=Careem+Business&tags=%28story%2Ccomment%29&advancedSyntax=true&analyticsTags=backend",
+  "processingTimeMS": 2,
+  "query": "Careem Business",
+  "serverTimeMS": 3
+}

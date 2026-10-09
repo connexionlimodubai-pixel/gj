@@ -1,0 +1,73 @@
+{
+ "apiVersion": "1",
+ "jobs": [
+  {
+   "id": "7458d4e9-da2e-47bd-98cb-adfda43d42b2",
+   "title": "Engineering Manager, EU",
+   "department": "Engineering",
+   "team": "EMEA Engineering",
+   "employmentType": "FullTime",
+   "location": "Remote - European Union",
+   "secondaryLocations": [
+    {
+     "location": "Spain",
+     "address": {
+      "postalAddress": {
+       "addressLocality": "",
+       "addressRegion": "",
+       "addressCountry": "Spain"
+      }
+     }
+    }
+   ],
+   "publishedAt": "2024-03-04T14:29:08.532+00:00",
+   "isListed": true,
+   "isRemote": true,
+   "workplaceType": "Remote",
+   "address": {
+    "postalAddress": {
+     "addressLocality": "",
+     "addressRegion": "",
+     "addressCountry": "Spain"
+    }
+   },
+   "jobUrl": "https://jobs.ashbyhq.com/ashby/7458d4e9-da2e-47bd-98cb-adfda43d42b2",
+   "applyUrl": "https://jobs.ashbyhq.com/ashby/7458d4e9-da2e-47bd-98cb-adfda43d42b2/application",
+   "descriptionHtml": "<p>We are looking for an Engineering Manager...</p>",
+   "descriptionPlain": "We are looking for an Engineering Manager...",
+   "shouldDisplayCompensationOnJobPostings": true,
+   "compensation": {
+    "compensationTierSummary": "€76K – €185K • Offers Equity • Offers Bonus",
+    "scrapeableCompensationSalarySummary": "€76K - €185K",
+    "compensationTiers": [
+     {
+      "id": "5b1f0c2e-1d2a-4d7e-9a51-0c6c1e2f3a4b",
+      "title": "EU",
+      "tierSummary": "€76K – €185K • Offers Equity • Offers Bonus",
+      "additionalInformation": null,
+      "components": [
+       {
+        "id": "9d2c7e10-3f4b-4a8c-b1e2-7f6a5d4c3b2a",
+        "summary": "€76K – €185K",
+        "compensationType": "Salary",
+        "interval": "1 YEAR",
+        "currencyCode": "EUR",
+        "minValue": 76000,
+        "maxValue": 185000
+       }
+      ]
+     }
+    ],
+    "summaryComponents": [
+     {
+      "compensationType": "Salary",
+      "interval": "1 YEAR",
+      "currencyCode": "EUR",
+      "minValue": 76000,
+      "maxValue": 185000
+     }
+    ]
+   }
+  }
+ ]
+}

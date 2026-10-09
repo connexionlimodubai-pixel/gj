@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block container_class %} narrow{% endblock %}
+{% block content %}
+<section class="card center-card">
+  <div class="success-mark">{{ m.icon("check", 28) }}</div>
+  <h1>Thank you, your registration is in.</h1>
+  <p class="lede">We received your company details and requirements. We'll set up your lead monitoring and get back to you.</p>
+  {% if not public_mode %}<p><a class="btn" href="/companies">Back to the registration board</a></p>{% endif %}
+</section>
+{% endblock %}

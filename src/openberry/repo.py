@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -30,7 +31,7 @@ from .models import (
     Signal,
     SignalIn,
 )
-from .scoring import SignalPoint, score_lead
+from .scoring import DISQUALIFIED_MAX_SCORE, SignalPoint, score_lead
 
 # --------------------------------------------------------------------------------------
 # Small helpers
@@ -89,13 +90,39 @@ def normalize_domain(value: str) -> str:
     return v if "." in v else ""
 
 
-def company_key(name: str, domain: str = "") -> str:
-    d = normalize_domain(domain)
-    if d:
-        return f"d:{d}"
-    n = _COMPANY_SUFFIXES.sub(" ", (name or "").lower())
-    n = re.sub(r"[^a-z0-9]+", "", n)
+def _fold(text: str) -> str:
+    """Casefold and drop accents and vowel points (Société -> societe) but keep the letters of every script.
+
+    Symbols go first so compatibility forms don't turn "Acme™" into "acmetm"; NFKD still folds
+    full-width letters and ligatures.
+    """
+    s = "".join(" " if unicodedata.category(ch)[0] == "S" else ch for ch in text or "")
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in s if not unicodedata.combining(ch)).casefold()
+
+
+def _words(text: str) -> list[str]:
+    """Runs of letters, digits and marks in any script (\\w alone misses Devanagari or Thai vowel signs)."""
+    return "".join(ch if ch.isalnum() or unicodedata.category(ch)[0] == "M" else " " for ch in text).split()
+
+
+def _name_key(name: str) -> str:
+    n = "".join(_words(_COMPANY_SUFFIXES.sub(" ", _fold(name))))
     return f"n:{n}" if n else ""
+
+
+def _domain_key(domain: str) -> str:
+    d = normalize_domain(domain)
+    return f"d:{d}" if d else ""
+
+
+def company_key(name: str, domain: str = "") -> str:
+    """The key that links people to their company's account-level intent.
+
+    The normalised name wins because people leads almost always carry a company name but
+    rarely a domain; the domain is the fallback for accounts known only by their website.
+    """
+    return _name_key(name) or _domain_key(domain)
 
 
 def normalize_linkedin(url: str) -> str:
@@ -103,15 +130,28 @@ def normalize_linkedin(url: str) -> str:
     return f"{m.group(1).lower()}/{m.group(2).lower()}" if m else ""
 
 
+# Query parameters that name the profile itself (news.ycombinator.com/user?id=pg) are part of its
+# identity; any other query parameters (tracking, ?utm_source=...) and fragments are dropped.
+_PROFILE_ID_PARAMS = ("id", "user", "username", "u")
+
+
+def normalize_profile_url(url: str) -> str:
+    base, _, query = re.sub(r"^https?://(www\.)?", "", url.strip().lower()).split("#")[0].partition("?")
+    ident = "&".join(p for p in query.split("&")
+                     if p.partition("=")[0] in _PROFILE_ID_PARAMS and p.partition("=")[2])
+    return base.rstrip("/") + (f"?{ident}" if ident else "")
+
+
 def _norm_name(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+    return " ".join(_words(_fold(name)))
 
 
 def lead_identity_keys(data: LeadIn | Lead, kind: str) -> list[str]:
     keys: list[str] = []
     ckey = company_key(data.lead_company, data.company_domain)
     if kind == "account":
-        return [f"acct:{ckey}"] if ckey else []
+        # Both identities, so "Acme Bank" seen first by name and later with acme.com merge.
+        return [f"acct:{k}" for k in (_name_key(data.lead_company), _domain_key(data.company_domain)) if k]
     if li := normalize_linkedin(data.linkedin_url):
         keys.append(f"li:{li}")
     if data.email and "@" in data.email:
@@ -122,8 +162,7 @@ def lead_identity_keys(data: LeadIn | Lead, kind: str) -> list[str]:
         handle = re.sub(r"^https?://(www\.)?(twitter|x)\.com/", "", data.twitter.strip(), flags=re.I)
         keys.append(f"tw:{handle.lstrip('@').strip('/').lower()}")
     if data.profile_url and not normalize_linkedin(data.profile_url):
-        url = re.sub(r"^https?://(www\.)?", "", data.profile_url.strip().lower()).split("?")[0].rstrip("/")
-        keys.append(f"url:{url}")
+        keys.append(f"url:{normalize_profile_url(data.profile_url)}")
     name = _norm_name(data.full_name)
     if name and ckey:
         keys.append(f"nc:{name}|{ckey}")
@@ -226,15 +265,24 @@ def set_last_scan(company_id: int, when: datetime | None = None, conn: sqlite3.C
         c.execute("UPDATE companies SET last_scan_at = ? WHERE id = ?", (iso(when), company_id))
 
 
+RETRY_FAILED_SCAN_AFTER = timedelta(hours=1)
+
+
 def companies_due_for_scan(now: datetime | None = None) -> list[Company]:
+    """Active companies whose interval has passed (an hour after a failed scan), unless a scan is running."""
     now = now or utcnow()
     due = []
-    for company in list_companies():
-        if company.status != "active":
-            continue
-        last = company.last_scan_at
-        if last is None or now - last >= timedelta(hours=company.scan_interval_hours):
-            due.append(company)
+    with connect() as c:
+        for company in list_companies(conn=c):
+            if company.status != "active" or running_scan_run(company.id, now, conn=c):
+                continue
+            interval = timedelta(hours=company.scan_interval_hours)
+            last_run = next(iter(list_scan_runs(company.id, limit=1, conn=c)), None)
+            if last_run is not None and last_run.status == "failed":
+                interval = min(interval, RETRY_FAILED_SCAN_AFTER)
+            last = company.last_scan_at
+            if last is None or now - last >= interval:
+                due.append(company)
     return due
 
 
@@ -247,6 +295,8 @@ _LEAD_PROFILE_FIELDS = (
     "linkedin_url", "email", "phone", "website", "github_username", "twitter", "profile_url", "bio",
 )
 _LEAD_EDITABLE = (*_LEAD_PROFILE_FIELDS, "status", "notes", "tags", "kind")
+LEAD_PROFILE_FIELDS = _LEAD_PROFILE_FIELDS
+LEAD_EDITABLE_FIELDS = _LEAD_EDITABLE
 
 
 def _lead_from_row(row: sqlite3.Row) -> Lead:
@@ -272,7 +322,16 @@ def find_lead(lead_id: int) -> Lead | None:
         return None
 
 
-def _find_existing(c: sqlite3.Connection, company_id: int, keys: list[str]) -> int | None:
+_WEAK_KEY_PREFIXES = ("nc:", "nm:")  # name (+ company): shared by namesakes, so never enough on its own
+
+
+def _identity_kind(key: str) -> str:
+    """'li', 'em', 'gh', 'tw' or 'url:<host>' (profiles on two different sites don't conflict)."""
+    prefix, _, rest = key.partition(":")
+    return f"url:{re.split(r'[/?]', rest, maxsplit=1)[0]}" if prefix == "url" else prefix
+
+
+def _lead_with_key(c: sqlite3.Connection, company_id: int, keys: list[str]) -> int | None:
     if not keys:
         return None
     marks = ", ".join("?" * len(keys))
@@ -281,6 +340,25 @@ def _find_existing(c: sqlite3.Connection, company_id: int, keys: list[str]) -> i
         [company_id, *keys],
     ).fetchone()
     return row["id"] if row and row["id"] is not None else None
+
+
+def _find_existing(c: sqlite3.Connection, company_id: int, keys: list[str]) -> int | None:
+    """The lead these identity keys belong to, if any.
+
+    Strong keys (LinkedIn, email, GitHub, X, profile URL, account name/domain) win. A name match
+    alone is trusted only when the two records don't carry different identities of the same kind:
+    two John Smiths at Google with different LinkedIn profiles are two people.
+    """
+    strong = [k for k in keys if not k.startswith(_WEAK_KEY_PREFIXES)]
+    if (found := _lead_with_key(c, company_id, strong)) is not None:
+        return found
+    found = _lead_with_key(c, company_id, [k for k in keys if k.startswith(_WEAK_KEY_PREFIXES)])
+    if found is None or not strong:
+        return found
+    # None of our strong keys is known, so any key of the same kind on `found` is a different one.
+    theirs = {_identity_kind(r["key"]) for r in c.execute(
+        "SELECT key FROM lead_keys WHERE company_id = ? AND lead_id = ?", (company_id, found))}
+    return None if theirs & {_identity_kind(k) for k in strong} else found
 
 
 def _add_keys(c: sqlite3.Connection, company_id: int, lead_id: int, keys: list[str]) -> None:
@@ -334,12 +412,19 @@ def upsert_lead(company_id: int, data: LeadIn, conn: sqlite3.Connection | None =
             merged_tags = tags + [t for t in data.tags if t not in tags]
             if merged_tags != tags:
                 updates["tags"] = json.dumps(merged_tags)
-            if not row["company_key"] and ckey:
-                updates["company_key"] = ckey
+            # The name beats the domain, so a domain-only account that learns its name moves to the
+            # key its people already have.
+            new_ckey = company_key(updates.get("lead_company", row["lead_company"]),
+                                   updates.get("company_domain", row["company_domain"]))
+            if new_ckey and new_ckey != row["company_key"]:
+                updates["company_key"] = new_ckey
             if updates:
                 sets = ", ".join(f"{k} = ?" for k in updates)
                 c.execute(f"UPDATE leads SET {sets}, updated_at = ? WHERE id = ?",
                           [*updates.values(), now, lead_id])
+                keys = keys + lead_identity_keys(get_lead(lead_id, conn=c), row["kind"])
+            if row["kind"] == "account" and row["company_key"] and "company_key" in updates:
+                _rescore_people_at(c, company_id, row["company_key"])  # they no longer inherit its intent
         _add_keys(c, company_id, lead_id, keys)
         for sig in data.signals:
             if not sig.source or sig.source == "manual":
@@ -361,24 +446,37 @@ def update_lead(lead_id: int, fields: dict[str, Any], conn: sqlite3.Connection |
         raise ValueError("kind must be 'person' or 'account'")
     with _conn(conn) as c:
         lead = get_lead(lead_id, conn=c)
+        old_ckey = c.execute("SELECT company_key FROM leads WHERE id = ?", (lead_id,)).fetchone()["company_key"]
         updates = dict(fields)
         if "tags" in updates:
             from .models import split_list
 
             updates["tags"] = json.dumps(split_list(updates["tags"]))
+        if "notes" in updates:  # NOT NULL column: null clears the notes
+            updates["notes"] = str(updates["notes"] or "")
         for key in _LEAD_PROFILE_FIELDS:
             if key in updates:
                 updates[key] = str(updates[key] or "").strip()
         if updates:
-            merged = lead.model_copy(update={k: v for k, v in fields.items() if k != "tags"})
+            merged = lead.model_copy(update={k: v for k, v in updates.items() if k != "tags"})
+            if not merged.full_name and not merged.lead_company and not merged.company_domain:
+                raise ValueError("a lead needs at least a full_name or a lead_company")
             kind = updates.get("kind", lead.kind)
+            if "kind" not in updates and updates.get("full_name"):
+                kind = "person"  # like upsert_lead: naming an account's contact makes it a person
             if kind == "person" and not merged.full_name:
                 kind = "account"
-                updates["kind"] = kind
-            updates["company_key"] = company_key(merged.lead_company, merged.company_domain)
+            updates["kind"] = kind
+            new_ckey = updates["company_key"] = company_key(merged.lead_company, merged.company_domain)
             sets = ", ".join(f"{k} = ?" for k in updates)
             c.execute(f"UPDATE leads SET {sets}, updated_at = ? WHERE id = ?", [*updates.values(), iso(), lead_id])
+            if kind != lead.kind:
+                # Keys of the old kind would keep routing its signals here (company-level ones to a person).
+                op = "NOT LIKE" if kind == "account" else "LIKE"
+                c.execute(f"DELETE FROM lead_keys WHERE lead_id = ? AND key {op} 'acct:%'", (lead_id,))
             _add_keys(c, lead.company_id, lead_id, lead_identity_keys(merged, kind))
+            if lead.kind == "account" and old_ckey and (kind != "account" or new_ckey != old_ckey):
+                _rescore_people_at(c, lead.company_id, old_ckey)  # they no longer inherit its intent
         _rescore_lead_and_dependents(c, lead_id)
         return get_lead(lead_id, conn=c)
 
@@ -397,7 +495,39 @@ def set_ai_assessment(lead_id: int, ai_score: int | None, rationale: str = "",
 
 def delete_lead(lead_id: int, conn: sqlite3.Connection | None = None) -> None:
     with _conn(conn) as c:
+        row = c.execute("SELECT company_id, kind, company_key FROM leads WHERE id = ?", (lead_id,)).fetchone()
         c.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+        if row is not None and row["kind"] == "account" and row["company_key"]:
+            _rescore_people_at(c, row["company_id"], row["company_key"])  # its signals are gone with it
+
+
+def _rescore_people_at(c: sqlite3.Connection, company_id: int, ckey: str) -> None:
+    """Rescore the people under a company key, e.g. after its account lead was deleted or moved."""
+    company = get_company(company_id, conn=c)
+    rows = c.execute("SELECT id FROM leads WHERE company_id = ? AND company_key = ? AND kind = 'person'",
+                     (company_id, ckey)).fetchall()
+    for r in rows:
+        _rescore_lead(c, r["id"], company)
+
+
+def refresh_identity_keys(conn: sqlite3.Connection | None = None) -> int:
+    """Recompute every lead's company_key and add the identity keys it lacks; returns the leads re-keyed.
+
+    For databases written before name normalisation understood accents and non-Latin scripts.
+    Old keys are kept, so spellings seen before still merge. Needs a sqlite3.Row connection.
+    """
+    with _conn(conn) as c:
+        rekeyed: list[Lead] = []
+        for row in c.execute("SELECT * FROM leads").fetchall():
+            lead = _lead_from_row(row)
+            ckey = company_key(lead.lead_company, lead.company_domain)
+            if ckey != row["company_key"]:
+                c.execute("UPDATE leads SET company_key = ? WHERE id = ?", (ckey, lead.id))
+                rekeyed.append(lead)
+            _add_keys(c, lead.company_id, lead.id, lead_identity_keys(lead, lead.kind))
+        for company_id in {lead.company_id for lead in rekeyed}:
+            rescore_company(company_id, conn=c)
+        return len(rekeyed)
 
 
 _LEAD_SORTS = {
@@ -484,13 +614,17 @@ def _rescore_lead(c: sqlite3.Connection, lead_id: int, company: Company | None =
     points = _signal_points(c, row)
     lead = _lead_from_row(row)
     result = score_lead(lead, company.icp, points, company.signals.weights, lead.ai_score, lead.ai_rationale)
-    tier = "cold" if row["status"] == "disqualified" else result.tier
+    score, tier, reasons = result.score, result.tier, result.reasons
+    if row["status"] == "disqualified":  # like an ICP disqualifier: off the top of score-sorted lists
+        score, tier = min(score, DISQUALIFIED_MAX_SCORE), "cold"
+        reasons = ["! Disqualified (pipeline status)", *reasons]
     last = max((p.occurred_at for p in points), default=None)
+    # A lead that went cold may be alerted again when it next turns hot.
     c.execute(
         "UPDATE leads SET icp_score = ?, intent_score = ?, score = ?, tier = ?, score_reasons = ?, "
-        "last_signal_at = ? WHERE id = ?",
-        (result.icp_score, result.intent_score, result.score, tier, json.dumps(result.reasons),
-         iso(last) if last else None, lead_id),
+        "last_signal_at = ?, alerted_at = CASE WHEN ? = 'cold' THEN NULL ELSE alerted_at END WHERE id = ?",
+        (result.icp_score, result.intent_score, score, tier, json.dumps(reasons),
+         iso(last) if last else None, tier, lead_id),
     )
 
 
@@ -748,10 +882,44 @@ def _scan_from_row(row: sqlite3.Row) -> ScanRun:
     return ScanRun.model_validate(data)
 
 
-def start_scan_run(company_id: int, trigger: str = "manual", conn: sqlite3.Connection | None = None) -> int:
+# A 'running' row older than this belongs to a scan that died with its process.
+SCAN_STALE_AFTER = timedelta(minutes=15)
+
+
+class ScanInProgress(RuntimeError):
+    """Another scan of the company (dashboard, scheduler, CLI or Claude, in any process) is still running."""
+
+    def __init__(self, company_id: int, run: ScanRun | None = None):
+        self.company_id = company_id
+        self.run = run
+        since = f" (started from {run.trigger} at {iso(run.started_at)})" if run else ""
+        super().__init__(f"a scan of company {company_id} is already running{since}; try again when it has finished")
+
+
+def running_scan_run(company_id: int, now: datetime | None = None,
+                     conn: sqlite3.Connection | None = None) -> ScanRun | None:
+    """The company's scan that is running now; a stale 'running' row doesn't count."""
+    cutoff = iso((now or utcnow()) - SCAN_STALE_AFTER)
     with _conn(conn) as c:
-        cur = c.execute("INSERT INTO scan_runs (company_id, trigger, status, started_at) VALUES (?, ?, 'running', ?)",
-                        (company_id, trigger, iso()))
+        row = c.execute("SELECT * FROM scan_runs WHERE company_id = ? AND status = 'running' AND started_at > ? "
+                        "ORDER BY started_at DESC, id DESC LIMIT 1", (company_id, cutoff)).fetchone()
+    return _scan_from_row(row) if row else None
+
+
+def start_scan_run(company_id: int, trigger: str = "manual", conn: sqlite3.Connection | None = None) -> int:
+    """Record a new running scan, or raise ScanInProgress while another one runs.
+
+    Check and insert are one statement (SQLite holds the write lock for all of it), so two
+    processes can never both start a scan of the same company.
+    """
+    now = utcnow()
+    with _conn(conn) as c:
+        cur = c.execute(
+            "INSERT INTO scan_runs (company_id, trigger, status, started_at) SELECT ?, ?, 'running', ? "
+            "WHERE NOT EXISTS (SELECT 1 FROM scan_runs WHERE company_id = ? AND status = 'running' AND started_at > ?)",
+            (company_id, trigger, iso(now), company_id, iso(now - SCAN_STALE_AFTER)))
+        if cur.rowcount != 1:
+            raise ScanInProgress(company_id, running_scan_run(company_id, now, conn=c))
         return cur.lastrowid
 
 
@@ -777,6 +945,28 @@ def get_scan_run(run_id: int, conn: sqlite3.Connection | None = None) -> ScanRun
 
 
 # --------------------------------------------------------------------------------------
+# Hot-lead alerts
+# --------------------------------------------------------------------------------------
+
+
+def claim_new_hot_leads(company_id: int, conn: sqlite3.Connection | None = None) -> list[Lead]:
+    """Hot people not alerted yet, stamped as alerted in the same statement.
+
+    Leads turn hot in scans, through Claude, the API, CSV imports and edits; whichever process
+    asks first gets each lead exactly once, so alerts and auto-drafts never go out twice.
+    """
+    with _conn(conn) as c:
+        ids = [r["id"] for r in c.execute(
+            "UPDATE leads SET alerted_at = ? WHERE company_id = ? AND kind = 'person' AND tier = 'hot' "
+            "AND alerted_at IS NULL RETURNING id", (iso(), company_id)).fetchall()]
+        if not ids:
+            return []
+        rows = c.execute(f"SELECT * FROM leads WHERE id IN ({', '.join('?' * len(ids))}) ORDER BY score DESC, id",
+                         ids).fetchall()
+    return [_lead_from_row(r) for r in rows]
+
+
+# --------------------------------------------------------------------------------------
 # Dashboard numbers
 # --------------------------------------------------------------------------------------
 
@@ -798,6 +988,9 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
         for r in c.execute("SELECT status, COUNT(*) n FROM messages WHERE company_id = ? AND direction = 'outbound' "
                            "GROUP BY status", (company_id,)):
             messages[r["status"]] = r["n"]
+        # Replies leads sent us (log_reply) are inbound messages; the statuses above are our outbound ones.
+        messages["received"] = count("SELECT COUNT(*) FROM messages WHERE company_id = ? AND direction = 'inbound'",
+                                     company_id)
 
         start = (now - timedelta(days=13)).date()
         by_day = {(start + timedelta(days=i)).isoformat(): 0 for i in range(14)}
@@ -824,6 +1017,8 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
             "accounts": count("SELECT COUNT(*) FROM leads WHERE company_id = ? AND kind = 'account'", company_id),
             "new_leads_7d": count("SELECT COUNT(*) FROM leads WHERE company_id = ? AND created_at >= ?",
                                   company_id, iso(now - timedelta(days=7))),
+            "new_people_7d": count("SELECT COUNT(*) FROM leads WHERE company_id = ? AND kind = 'person' "
+                                   "AND created_at >= ?", company_id, iso(now - timedelta(days=7))),
             "tiers": tiers,
             "statuses": statuses,
             "signals_total": count("SELECT COUNT(*) FROM signals WHERE company_id = ?", company_id),

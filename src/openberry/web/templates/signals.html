@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% set base = "/c/" ~ company.id %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">{{ company.name }}</p>
+    <h1>Signals</h1>
+    <p class="lede">Every buying signal OpenBerry or Claude has found, newest first. Each one feeds the score of the lead it belongs to.</p>
+  </div>
+  <div class="page-actions">
+    <form method="post" action="{{ base }}/scan">{{ m.csrf() }}<button class="btn btn-primary" type="submit">{{ m.icon("refresh") }}Run scan now</button></form>
+  </div>
+</div>
+
+<form class="filters card" method="get" action="{{ base }}/signals">
+  <div class="field"><label for="f-type">Type</label>
+    <select class="input" id="f-type" name="type" data-autosubmit><option value="">All types</option>{% for value, label in SIGNAL_OPTIONS %}<option value="{{ value }}"{% if filters.type == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+  <div class="field"><label for="f-source">Source</label>
+    <select class="input" id="f-source" name="source" data-autosubmit><option value="">All sources</option>{% for s in LEAD_SOURCES %}<option value="{{ s }}"{% if filters.source == s %} selected{% endif %}>{{ s|source_label }}</option>{% endfor %}</select></div>
+  <div class="filter-actions">
+    <button class="btn" type="submit">Apply</button>
+    {% if filters.type or filters.source %}<a class="btn btn-ghost" href="{{ base }}/signals">Reset</a>{% endif %}
+  </div>
+</form>
+
+{% if items %}
+<div class="card card-flush">
+  <ul class="feed">
+    {% for s in items %}
+    {% set lead = leads.get(s.lead_id) %}
+    <li class="feed-item">
+      <span class="feed-icon">{{ m.icon("zap", 14) }}</span>
+      <div class="feed-body min0">
+        <p class="feed-head"><a class="sig-type" href="{{ query_with(request, type=s.type, page=None) }}">{{ s.label }}</a> <span class="muted">· {{ s.source|source_label }} · {{ m.when(s.occurred_at) }}</span>
+          <span class="strength" title="Strength {{ s.strength }} of 100 (50 = typical)">strength {{ s.strength }}</span></p>
+        <p class="feed-title">{% if s.url|safe_url %}<a href="{{ s.url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ s.title or s.url|host }}{{ m.icon("external", 12) }}</a>{% else %}{{ s.title or "Untitled signal" }}{% endif %}</p>
+        {% if s.summary %}<p class="feed-summary clamp-2">{{ s.summary }}</p>{% endif %}
+      </div>
+      <div class="feed-lead-col">
+        {% if lead %}
+        <a class="lead-chip" href="{{ base }}/leads/{{ lead.id }}">{{ m.avatar(lead.full_name, lead.kind) }}<span class="min0"><span class="lead-name">{{ m.lead_title(lead) }}</span><span class="sub">{{ m.lead_sub(lead) }}</span></span></a>
+        {{ m.score(lead.score, lead.tier) }}
+        {% else %}<span class="muted small">No lead attached</span>{% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  <div class="card-foot">{{ m.pager(pager) }}</div>
+</div>
+{% else %}
+<div class="card">
+  {% if filters.type or filters.source %}
+    {% call m.empty("search", "No signals match these filters") %}<p><a href="{{ base }}/signals">Show all signals</a></p>{% endcall %}
+  {% else %}
+    {% call m.empty("zap", "No signals yet") %}
+    <p>Run a scan to check your free sources, or ask Claude to look for intent on LinkedIn and the web.</p>
+    <p><a href="{{ base }}/settings#step-signals">Review which sources are set up</a></p>
+    {% endcall %}
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"
+	xmlns:content="http://purl.org/rss/1.0/modules/content/"
+	xmlns:wfw="http://wellformedweb.org/CommentAPI/"
+	xmlns:dc="http://purl.org/dc/elements/1.1/"
+	xmlns:atom="http://www.w3.org/2005/Atom"
+	xmlns:sy="http://purl.org/rss/1.0/modules/syndication/"
+	xmlns:slash="http://purl.org/rss/1.0/modules/slash/"
+	>
+
+<channel>
+	<title>TechCrunch</title>
+	<atom:link href="https://techcrunch.com/feed/" rel="self" type="application/rss+xml" />
+	<link>https://techcrunch.com/</link>
+	<description>Startup and Technology News</description>
+	<lastBuildDate>Thu, 08 Oct 2026 08:54:51 +0000</lastBuildDate>
+	<language>en-US</language>
+	<sy:updatePeriod>
+	hourly	</sy:updatePeriod>
+	<sy:updateFrequency>
+	1	</sy:updateFrequency>
+	<generator>https://wordpress.org/?v=6.9.10</generator>
+
+<image>
+	<url>https://techcrunch.com/wp-content/uploads/2015/02/cropped-cropped-favicon-gradient.png?w=32</url>
+	<title>TechCrunch</title>
+	<link>https://techcrunch.com/</link>
+	<width>32</width>
+	<height>32</height>
+</image>
+	<item>
+		<title>Chauffeur marketplace Ridely raises $25M Series B to expand across the Gulf</title>
+		<link>https://techcrunch.com/2026/10/08/chauffeur-marketplace-ridely-raises-25m-series-b/</link>
+		<dc:creator><![CDATA[Ingrid Lunden]]></dc:creator>
+		<pubDate>Thu, 08 Oct 2026 07:30:00 +0000</pubDate>
+		<category><![CDATA[Fundraising]]></category>
+		<category><![CDATA[Startups]]></category>
+		<category><![CDATA[Transportation]]></category>
+		<category><![CDATA[ridely]]></category>
+		<guid isPermaLink="false">https://techcrunch.com/?p=3051001</guid>
+		<description><![CDATA[Ridely, which connects corporate clients with vetted <b>chauffeur</b> companies in Dubai and Riyadh, has raised a $25 million Series B to expand into Doha and Kuwait City.]]></description>
+	</item>
+	<item>
+		<title>Blacklane partners with Emirates for premium airport transfers</title>
+		<link>https://techcrunch.com/2026/10/07/blacklane-partners-with-emirates/</link>
+		<dc:creator><![CDATA[Kirsten Korosec]]></dc:creator>
+		<pubDate>Wed, 07 Oct 2026 16:12:40 +0000</pubDate>
+		<category><![CDATA[Transportation]]></category>
+		<category><![CDATA[blacklane]]></category>
+		<guid isPermaLink="false">https://techcrunch.com/?p=3050877</guid>
+		<description><![CDATA[Business-class passengers flying through Dubai can now book a Blacklane chauffeur at check-in&#8230;]]></description>
+	</item>
+	<item>
+		<title>How corporate travel managers are rethinking ground transport in 2026</title>
+		<link>https://techcrunch.com/2026/10/06/corporate-travel-ground-transport-2026/</link>
+		<dc:creator><![CDATA[Mary Ann Azevedo]]></dc:creator>
+		<pubDate>Tue, 06 Oct 2026 12:00:00 +0000</pubDate>
+		<category><![CDATA[Enterprise]]></category>
+		<guid isPermaLink="false">https://techcrunch.com/?p=3050412</guid>
+		<description><![CDATA[<p>Travel teams are consolidating ride-hailing, limo and rail spend into a single policy.</p>]]></description>
+	</item>
+	<item>
+		<title>Northwind hires former Uber exec as VP of corporate travel</title>
+		<link>https://techcrunch.com/2026/10/05/northwind-hires-former-uber-exec/</link>
+		<dc:creator><![CDATA[Connie Loizos]]></dc:creator>
+		<pubDate>Mon, 05 Oct 2026 09:45:00 +0000</pubDate>
+		<category><![CDATA[Startups]]></category>
+		<guid isPermaLink="false">https://techcrunch.com/?p=3050101</guid>
+		<description><![CDATA[Northwind, the spend-management startup, has hired a former Uber executive to run its travel product.]]></description>
+	</item>
+	<item>
+		<title>Apple releases new MacBook Pro with M6 chip</title>
+		<link>https://techcrunch.com/2026/10/05/apple-macbook-pro-m6/</link>
+		<dc:creator><![CDATA[Brian Heater]]></dc:creator>
+		<pubDate>Mon, 05 Oct 2026 08:00:00 +0000</pubDate>
+		<category><![CDATA[Hardware]]></category>
+		<guid isPermaLink="false">https://techcrunch.com/?p=3050099</guid>
+		<description><![CDATA[Apple's new laptops arrive with a faster chip and longer battery life.]]></description>
+	</item>
+	<item>
+		<title>Acme Corp launches expense tool for finance teams</title>
+		<link>https://techcrunch.com/2026/10/04/acme-corp-expense-tool/</link>
+		<dc:creator><![CDATA[Ingrid Lunden]]></dc:creator>
+		<pubDate>Sun, 04 Oct 2026 10:00:00 +0000</pubDate>
+		<category><![CDATA[Fintech]]></category>
+		<guid isPermaLink="false">https://techcrunch.com/?p=3049900</guid>
+		<description><![CDATA[The tool reconciles taxi, <em>chauffeur</em> and hotel receipts automatically.]]></description>
+	</item>
+	<item>
+		<title>Vela Mobility wants to be the Uber of chauffeurs, and investors are buying it</title>
+		<link>https://techcrunch.com/2026/10/03/vela-mobility-chauffeurs/</link>
+		<dc:creator><![CDATA[Rebecca Szkutak]]></dc:creator>
+		<pubDate>Sat, 03 Oct 2026 14:20:00 +0000</pubDate>
+		<category><![CDATA[Fundraising]]></category>
+		<category><![CDATA[Venture]]></category>
+		<guid isPermaLink="false">https://techcrunch.com/?p=3049777</guid>
+		<description><![CDATA[The Riyadh-based startup closed a new round this week.]]></description>
+	</item>
+	<item>
+		<title>Chauffeur startup Limozy shuts down</title>
+		<link>https://techcrunch.com/2026/09/15/limozy-shuts-down/</link>
+		<dc:creator><![CDATA[Kirsten Korosec]]></dc:creator>
+		<pubDate>Tue, 15 Sep 2026 10:00:00 +0000</pubDate>
+		<category><![CDATA[Transportation]]></category>
+		<guid isPermaLink="false">https://techcrunch.com/?p=3041000</guid>
+		<description><![CDATA[Limozy is closing its doors after failing to raise a Series A.]]></description>
+	</item>
+	</channel>
+</rss>

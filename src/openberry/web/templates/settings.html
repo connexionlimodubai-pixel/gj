@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">{{ company.name }}</p>
+    <h1>Company profile</h1>
+    <p class="lede">Everything entered on the registration board. Claude reads this profile before it prospects, qualifies or writes.</p>
+  </div>
+  <div class="page-actions">
+    <span class="pill pill-company-{{ 'pending' if pending_review(company) else company.status }}">{{ company|company_status }}</span>
+    <form method="post" action="/c/{{ company.id }}/status">{{ m.csrf() }}
+      <button class="btn" type="submit">{% if company.status == "active" %}{{ m.icon("pause") }}Pause scans{% else %}{{ m.icon("play") }}Activate{% endif %}</button>
+    </form>
+  </div>
+</div>
+<div class="settings-layout">
+  <nav class="section-nav" aria-label="Profile sections">
+    <ul>
+      {% for key, label in steps if key != "review" %}
+      <li><a href="#step-{{ key }}">{{ label }}</a></li>
+      {% endfor %}
+      <li><a href="#danger-zone">Pause or delete</a></li>
+    </ul>
+  </nav>
+  <div class="settings-main">
+    {% set form_action = "/c/" ~ company.id ~ "/settings" %}
+    {% set wizard = false %}
+    {% set submit_label = "Save changes" %}
+    {% set public_mode = false %}
+    {% include "_company_form.html" %}
+    <section class="card danger-zone" id="danger-zone" aria-labelledby="danger-title">
+      <h2 id="danger-title">Pause or delete</h2>
+      <div class="danger-row">
+        <div>
+          <p class="strong">{{ "Pause automatic scans" if company.status == "active" else "Resume automatic scans" }}</p>
+          <p class="muted small">Paused companies keep their data; the scheduler skips them. Manual scans still work.</p>
+        </div>
+        <form method="post" action="/c/{{ company.id }}/status">{{ m.csrf() }}
+          <button class="btn" type="submit">{{ "Pause" if company.status == "active" else "Activate" }}</button>
+        </form>
+      </div>
+      <div class="danger-row">
+        <div>
+          <p class="strong">Delete this company</p>
+          <p class="muted small">Permanently removes the profile and all of its leads, signals, messages and scan history.</p>
+        </div>
+        <form method="post" action="/c/{{ company.id }}/delete">{{ m.csrf() }}
+          <button class="btn btn-danger" type="submit" data-confirm="Delete {{ company.name }} and all of its data? This cannot be undone.">{{ m.icon("trash") }}Delete company</button>
+        </form>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}

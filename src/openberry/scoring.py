@@ -32,6 +32,7 @@ STACKING_BONUS = 0.15         # +15% when 2+ distinct signal types happened with
 STACKING_WINDOW_DAYS = 30
 HOT_THRESHOLD = 70
 WARM_THRESHOLD = 45
+DISQUALIFIED_MAX_SCORE = 15  # excluded keyword, never-contact company or disqualified status
 
 # Common location aliases so "UAE" matches "Dubai, United Arab Emirates" etc.
 LOCATION_ALIASES: dict[str, tuple[str, ...]] = {
@@ -111,6 +112,50 @@ def size_bucket(size: str) -> str | None:
         if n <= upper:
             return bucket
     return "5000+"
+
+
+# What people type for a seniority besides its key or label ("C-level", "c_level", "Head of"...).
+SENIORITY_ALIASES = {
+    "c suite": "c_level", "csuite": "c_level", "cxo": "c_level", "chief": "c_level", "executive": "c_level",
+    "owner": "founder", "ic": "senior", "individual contributor": "senior", "junior": "entry",
+}
+_SIZE_BOUNDS = (("1-10", 1, 10), ("11-50", 11, 50), ("51-200", 51, 200), ("201-1000", 201, 1000),
+                ("1001-5000", 1001, 5000), ("5000+", 5001, math.inf))
+
+
+def _vocab(text: str) -> str:
+    return re.sub(r"[\s_/-]+", " ", _norm(text)).strip()
+
+
+_SENIORITY_LOOKUP = {
+    **{_vocab(alias): key for alias, key in SENIORITY_ALIASES.items()},
+    **{_vocab(text): key for key, label in SENIORITIES.items()
+       for text in (key, label, label.split("(")[0], *label.split(" / "))},
+}
+
+
+def normalize_seniority(value: str) -> str | None:
+    """Map 'C-level', 'Head of', 'VP Sales', 'Directors', 'c_level'... to a SENIORITIES key; None when unknown."""
+    text = _vocab(value)
+    return _SENIORITY_LOOKUP.get(text) or _SENIORITY_LOOKUP.get(text.removesuffix("s")) or infer_seniority(value)
+
+
+def size_buckets(value: str) -> list[str]:
+    """COMPANY_SIZES buckets an ICP size means: '51-200' as is, '50-200' -> 51-200, '1000+' -> 1001-5000 and 5000+."""
+    s = _norm(value).replace(",", "")
+    if s in COMPANY_SIZES:
+        return [s]
+    nums = [float(n) * (1000 if k else 1) for n, k in re.findall(r"(\d+(?:\.\d+)?)\s*(k)?", s)]
+    if not nums:
+        return []
+    if len(nums) >= 2:
+        low, high = min(nums[:2]), max(nums[:2])
+    elif "+" in s or "more" in s or "over" in s:
+        low, high = nums[0], math.inf
+    else:
+        bucket = size_bucket(s)
+        return [bucket] if bucket else []
+    return [label for label, lo, hi in _SIZE_BOUNDS if lo <= high and hi > low]
 
 
 def location_matches(target: str, location: str) -> bool:
@@ -199,21 +244,24 @@ def icp_fit(lead: LeadFacts, icp: ICP) -> tuple[int, list[str], bool]:
                   f"Title matches '{title_hit}'", "Title unknown" if not lead.title else f"Title '{lead.title}' not targeted")
 
         seniority = infer_seniority(lead.title)
-        wanted = {s.lower() for s in icp.seniorities}
+        # Labels and aliases count as their key; values outside the vocabulary are ignored, not a miss.
+        wanted = {key for key in map(normalize_seniority, icp.seniorities) if key}
         sen_hit = SENIORITIES.get(seniority, seniority) if seniority in wanted else None
         criterion("seniority", bool(wanted), seniority is not None, sen_hit,
                   f"Seniority: {sen_hit}", "Seniority unknown" if seniority is None
                   else f"Seniority '{SENIORITIES.get(seniority, seniority)}' not targeted")
 
     ind_text = " ".join([lead.industry, lead.bio, lead.lead_company])
-    ind_hit = any_phrase(icp.industries, ind_text)
+    # The lead's own industry field names the match before a word found in the bio or company name.
+    ind_hit = any_phrase(icp.industries, lead.industry) or any_phrase(icp.industries, ind_text)
     criterion("industry", bool(icp.industries), bool(lead.industry), ind_hit,
               f"Industry matches '{ind_hit}'", "Industry unknown" if not lead.industry
               else f"Industry '{lead.industry}' not targeted")
 
     bucket = size_bucket(lead.company_size)
-    size_hit = bucket if bucket and bucket in icp.company_sizes else None
-    criterion("company_size", bool(icp.company_sizes), bucket is not None, size_hit,
+    wanted_sizes = {b for size in icp.company_sizes for b in size_buckets(size)}
+    size_hit = bucket if bucket and bucket in wanted_sizes else None
+    criterion("company_size", bool(wanted_sizes), bucket is not None, size_hit,
               f"Company size {size_hit}", "Company size unknown" if bucket is None
               else f"Company size {bucket} not targeted")
 
@@ -264,17 +312,21 @@ def intent(signals: list[SignalPoint], weights: dict[str, int] | None = None,
     now = now or datetime.now(timezone.utc)
     total = 0.0
     scored: list[tuple[float, str]] = []
+    recent_types: set[str] = set()
     for s in signals:
         age = _age_days(s.occurred_at, now)
         value = type_weight(s.type, weights) * min(2.0, max(0.0, s.strength / 50))
+        if value <= 0:
+            continue  # a type weighted 0 (or a 0-strength signal) is ignored: no points, no stacking, no reason
         value *= 0.5 ** (age / INTENT_HALF_LIFE_DAYS)
         if s.account_level:
             value *= ACCOUNT_SIGNAL_FACTOR
         total += value
+        if age <= STACKING_WINDOW_DAYS:
+            recent_types.add(s.type)
         label = SIGNAL_TYPES.get(s.type, SIGNAL_TYPES["custom"])[0]
         where = " (company)" if s.account_level else ""
         scored.append((value, f"* {label}{where}, {humanize_age(age)}"))
-    recent_types = {s.type for s in signals if _age_days(s.occurred_at, now) <= STACKING_WINDOW_DAYS}
     stacked = len(recent_types) >= 2
     if stacked:
         total *= 1 + STACKING_BONUS
@@ -314,5 +366,5 @@ def score_lead(lead: object, icp: ICP, signals: list[SignalPoint], weights: dict
     if ai_score is not None:
         reasons.append(f"AI {ai_score}/100" + (f": {ai_rationale[:160]}" if ai_rationale else ""))
     if disqualified:
-        score = min(score, 15)
+        score = min(score, DISQUALIFIED_MAX_SCORE)
     return ScoreResult(icp_score, intent_score, score, tier_for(score), reasons, disqualified)

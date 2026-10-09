@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">Free · self-hosted · open source</p>
+  <h1>Find buyers the moment they show intent.</h1>
+  <p class="lede">OpenBerry watches free public signals (people posting about your topic, engaging with competitors, hiring, raising money), scores every lead against your ideal customer, and lets Claude research them and write the outreach. Nothing is sent without you.</p>
+  <div class="hero-actions">
+    <a class="btn btn-primary btn-lg" href="/register">{{ m.icon("plus") }}Register your company</a>
+    <form method="post" action="/demo">{{ m.csrf() }}<button class="btn btn-lg" type="submit">{{ m.icon("sparkles") }}Load demo data</button></form>
+  </div>
+</section>
+<ol class="how-grid">
+  <li class="card how-card">
+    <span class="how-num" aria-hidden="true">1</span>
+    <h2>Register</h2>
+    <p>Fill in the registration board: what you sell, who buys it, and which buying signals matter. About five minutes.</p>
+  </li>
+  <li class="card how-card">
+    <span class="how-num" aria-hidden="true">2</span>
+    <h2>Collect signals</h2>
+    <p>Free sources out of the box: Hacker News, GitHub, Greenhouse, Lever and Ashby job boards, Google News, RSS and SEC EDGAR. Reddit works once the server has Reddit API access.</p>
+  </li>
+  <li class="card how-card">
+    <span class="how-num" aria-hidden="true">3</span>
+    <h2>Let Claude work</h2>
+    <p>Connect Claude through MCP to qualify leads, find decision-makers and draft personal messages that you approve and send.</p>
+  </li>
+</ol>
+{% endblock %}

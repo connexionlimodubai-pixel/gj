@@ -16,6 +16,7 @@ from .config import get_settings
 from .db import connect
 from .models import Company, Lead, LeadIn
 from .notify import notify_hot_leads
+from .repo import ScanInProgress
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def ingest(company_id: int, raw_signals: list[RawSignal]) -> IngestStats:
                     lead_in = raw.lead.model_copy(update={"signals": []})
                 elif raw.account or raw.account_domain:
                     lead_in = LeadIn(lead_company=raw.account, company_domain=raw.account_domain,
-                                     source=raw.signal.source)
+                                     location=raw.account_location, source=raw.signal.source)
                 else:
                     lead_in = None
                 lead_id = None
@@ -85,13 +86,26 @@ async def run_scan(company_id: int, *, trigger: str = "manual", sources: list[st
     """Run every configured collector for a company and ingest the results.
 
     Returns a stats dict (also stored on the scan run) with per-collector counts and errors.
+    Raises ScanInProgress while another scan of the company runs (in any process).
     """
     company = repo.get_company(company_id)
-    settings = get_settings()
     collectors = [c for c in get_collectors(sources) if c.enabled_for(company)]
     run_id = repo.start_scan_run(company_id, trigger)
+    try:
+        return await _scan(company, run_id, collectors, sources, client)
+    except BaseException as exc:  # includes cancellation: never leave a run stuck in "running"
+        reason = "Interrupted" if isinstance(exc, asyncio.CancelledError) else f"{type(exc).__name__}: {exc}"
+        repo.finish_scan_run(run_id, "failed", {"error": reason})
+        if isinstance(exc, Exception):
+            repo.set_last_scan(company_id)  # the scheduler retries a failed scan after an hour, not every tick
+        raise
+
+
+async def _scan(company: Company, run_id: int, collectors: list, sources: list[str] | None,
+                client: httpx.AsyncClient | None) -> dict[str, Any]:
+    company_id = company.id
+    settings = get_settings()
     since = repo.utcnow() - timedelta(days=company.signals.lookback_days)
-    hot_before = _hot_ids(company_id)
 
     own_client = client is None
     client = client or _new_client()
@@ -116,14 +130,8 @@ async def run_scan(company_id: int, *, trigger: str = "manual", sources: list[st
 
     ingest_stats = await asyncio.to_thread(ingest, company_id, all_raw)
     repo.set_last_scan(company_id)
-
-    newly_hot = [lead for lead in _hot_leads(company_id) if lead.id not in hot_before]
-    notified: list[str] = []
-    drafted = 0
-    if newly_hot:
-        notified = await notify_hot_leads(company, newly_hot)
-        if company.outreach.mode == "auto_draft":
-            drafted = await asyncio.to_thread(auto_draft, company, newly_hot)
+    # Every person who is hot and not alerted yet, including leads that turned hot outside a scan.
+    alerts = await alert_new_hot_leads(company_id, company)
 
     stats = {
         "collectors": per_collector,
@@ -132,16 +140,36 @@ async def run_scan(company_id: int, *, trigger: str = "manual", sources: list[st
         "signals_duplicate": ingest_stats.signals_duplicate,
         "leads_new": ingest_stats.leads_new,
         "leads_updated": ingest_stats.leads_updated,
-        "newly_hot": [lead.id for lead in newly_hot],
-        "notified": notified,
-        "drafted": drafted,
+        **alerts,
         "errors": ingest_stats.errors[:20],
     }
-    failed = collectors and all("error" in per_collector.get(c.name, {}) for c in collectors)
-    repo.finish_scan_run(run_id, "failed" if failed else "ok", stats)
+    status, problem = scan_status(collectors, per_collector)
+    if problem:
+        stats["error"] = problem
+    repo.finish_scan_run(run_id, status, stats)
     stats["run_id"] = run_id
-    stats["status"] = "failed" if failed else "ok"
+    stats["status"] = status
     return stats
+
+
+NOTHING_CONFIGURED = ("No signal source is configured for this company: add keywords, subreddits, GitHub repos, "
+                      "job boards, news queries or RSS feeds to its profile.")
+NOTHING_WORKED = ("No source returned anything and every one failed or reported problems (see the warnings): "
+                  "check the network, proxy or API limits.")
+
+
+def _collector_failed(result: dict[str, Any]) -> bool:
+    """It raised, or found nothing and warned (collectors turn failed requests into warnings)."""
+    return "error" in result or (not result.get("found") and bool(result.get("warnings")))
+
+
+def scan_status(collectors: list, per_collector: dict[str, Any]) -> tuple[str, str]:
+    """('ok' | 'failed' | 'nothing_configured', why it isn't ok)."""
+    if not collectors:
+        return "nothing_configured", NOTHING_CONFIGURED
+    if all(_collector_failed(per_collector.get(c.name, {})) for c in collectors):
+        return "failed", NOTHING_WORKED
+    return "ok", ""
 
 
 def default_channel(company: Company, lead: Lead) -> str:
@@ -169,13 +197,37 @@ def auto_draft(company: Company, leads: list[Lead]) -> int:
     return count
 
 
-def _hot_ids(company_id: int) -> set[int]:
-    return {lead.id for lead in _hot_leads(company_id)}
+async def alert_new_hot_leads(company_id: int, company: Company | None = None) -> dict[str, Any]:
+    """Alert on hot people not alerted yet (and draft for them in auto_draft mode), once per lead.
+
+    Called after every scan and on every scheduler tick, so leads that turn hot through Claude,
+    the API, a CSV import or an edit are alerted too.
+    """
+    company = company or repo.get_company(company_id)
+    leads = await asyncio.to_thread(repo.claim_new_hot_leads, company_id)
+    notified: list[str] = []
+    drafted = 0
+    if leads:
+        notified = await notify_hot_leads(company, leads)
+        if company.outreach.mode == "auto_draft":
+            drafted = await asyncio.to_thread(auto_draft, company, leads)
+    return {"newly_hot": [lead.id for lead in leads], "notified": notified, "drafted": drafted}
 
 
-def _hot_leads(company_id: int) -> list[Lead]:
-    leads, _ = repo.list_leads(company_id, tier="hot", kind="person", limit=5000)
-    return leads
+async def alert_active_companies() -> dict[int, dict[str, Any]]:
+    """alert_new_hot_leads for every active company; returns the companies that had new hot leads."""
+    results = {}
+    for company in repo.list_companies():
+        if company.status != "active":
+            continue
+        try:
+            result = await alert_new_hot_leads(company.id, company)
+        except Exception:
+            log.exception("hot-lead alerts failed for company %s", company.id)
+            continue
+        if result["newly_hot"]:
+            results[company.id] = result
+    return results
 
 
 async def scan_due_companies(trigger: str = "schedule") -> list[dict[str, Any]]:
@@ -183,6 +235,8 @@ async def scan_due_companies(trigger: str = "schedule") -> list[dict[str, Any]]:
     for company in repo.companies_due_for_scan():
         try:
             results.append({"company_id": company.id, **await run_scan(company.id, trigger=trigger)})
+        except ScanInProgress as exc:  # started elsewhere since we looked: that scan does the work
+            log.info("scheduled scan skipped: %s", exc)
         except Exception as exc:
             log.exception("scheduled scan failed for company %s", company.id)
             results.append({"company_id": company.id, "status": "failed", "error": str(exc)})

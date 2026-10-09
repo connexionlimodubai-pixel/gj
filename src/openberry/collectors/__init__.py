@@ -11,6 +11,7 @@ from .hackernews import HackerNewsCollector
 from .jobs import JobBoardsCollector
 from .news import GoogleNewsCollector, RssCollector
 from .reddit import RedditCollector
+from .sec_edgar import SecEdgarCollector
 
 ALL: list[Collector] = [
     HackerNewsCollector(),
@@ -19,6 +20,7 @@ ALL: list[Collector] = [
     JobBoardsCollector(),
     GoogleNewsCollector(),
     RssCollector(),
+    SecEdgarCollector(),
 ]
 
 COLLECTORS: dict[str, Collector] = {c.name: c for c in ALL}

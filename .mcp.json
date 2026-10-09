@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "openberry": {
+      "command": "uv",
+      "args": ["run", "openberry", "mcp"]
+    }
+  }
+}

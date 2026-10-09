@@ -2,7 +2,7 @@
 
 Three ways to get a message, from best to most basic:
   1. Claude, through the MCP server: `get_outreach_context` -> Claude writes -> `save_outreach_message`.
-  2. A free local LLM via Ollama (dashboard "Draft with local AI" when OPENBERRY_OLLAMA_URL is set).
+  2. A free local LLM via Ollama (the lead page's "Local AI (Ollama)" writer when OPENBERRY_OLLAMA_URL is set).
   3. A deterministic template that references the lead's strongest signal (always available).
 """
 
@@ -43,25 +43,64 @@ def _short(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip(" ,.;:-") + "…"
 
 
+# Sources whose keyword/competitor signals are a post the lead wrote, titled with the collector's prefix
+# ("r/<subreddit>: <post title>", "Posted on HN: <story title>"); what follows the prefix is their own words.
+_AUTHORED_SOURCES = ("hackernews", "reddit", "github")
+_AUTHORED_PREFIX = re.compile(r"^(?:r/[\w-]+:\s*|Posted on HN:\s*)")
+# Titles that describe what the lead did ("Asked for chauffeur recommendations on Reddit").
+_ACTION_TITLE = re.compile(
+    r"(?i)^(?:asked|commented|posted|reposted|liked|reacted|shared|replied|mentioned|wrote|attended|registered|"
+    r"joined|followed|engaged|upvoted|published|spoke|downloaded|requested|recommended|reviewed|opened|"
+    r"starred|forked)\b")
+
+
+def _own_words(signal: Signal) -> str:
+    """The lead's own post title, or "" when the title was written by whoever recorded the signal."""
+    if signal.type not in ("keyword_mention", "competitor_engagement") or signal.source not in _AUTHORED_SOURCES:
+        return ""
+    title = signal.title.strip()
+    prefix = _AUTHORED_PREFIX.match(title)
+    if prefix:
+        title = title[prefix.end():]
+    elif _ACTION_TITLE.match(title):  # e.g. HN "Commented on HN thread ...": the thread isn't theirs
+        return ""
+    return "" if title.startswith("Reddit post by u/") else _short(title, 70)
+
+
 def signal_hook(signal: Signal | None, lead: Lead) -> str:
-    """A short, natural phrase referencing why we're reaching out now."""
+    """A short, natural phrase referencing why we're reaching out now.
+
+    Only a post the lead wrote (collected from Hacker News, Reddit or GitHub) is quoted. Other titles
+    describe the lead in someone else's words, so they become "that you asked ..." or neutral wording.
+    """
     if signal is None:
         return ""
     title = _short(signal.title, 70)
     company = lead.lead_company or "your team"
-    hooks = {
-        "competitor_engagement": f"your take on “{title}”",
-        "keyword_mention": f"your post “{title}”",
-        "hiring": f"that {company} is hiring ({title})",
+    about_company = {
+        "hiring": f"that {company} is hiring ({title})" if title else f"that {company} is hiring",
         "funding": f"the news about {company}'s funding",
         "job_change": "your new role",
-        "github_star": f"that you starred {title}" if title else "your GitHub activity",
-        "influencer_engagement": f"your comment on “{title}”",
         "profile_visit": "that you checked out our profile",
-        "event": f"that you're attending {title}",
         "company_news": f"the recent news about {company}",
     }
-    return hooks.get(signal.type, f"“{title}”" if title else "")
+    if signal.type in about_company:
+        return about_company[signal.type]
+    if signal.type == "competitor_engagement" and signal.source == "github" and title.startswith("Opened "):
+        return f"your {title[7:]}"  # "Opened issue on org/repo: <their title>"
+    own = _own_words(signal)
+    if own:
+        return f"your take on “{own}”" if signal.type == "competitor_engagement" else f"your post “{own}”"
+    if _ACTION_TITLE.match(title):
+        return f"that you {title[0].lower()}{title[1:]}"
+    neutral = {
+        "competitor_engagement": "your recent activity in this space",
+        "keyword_mention": "your recent post",
+        "github_star": f"that you starred {title}" if title else "your GitHub activity",
+        "influencer_engagement": "your recent engagement with a post in this space",
+        "event": f"that you're attending {title}" if title else "",
+    }
+    return neutral.get(signal.type, "")
 
 
 def _value_line(company: Company) -> str:
@@ -82,7 +121,7 @@ def draft_template(company: Company, lead: Lead, signals: list[Signal], channel:
     if o.calendar_link and channel != "linkedin_connect":
         cta = f"{cta} {o.calendar_link}"
 
-    if channel == "linkedin_connect":
+    if channel == "linkedin_connect" and step <= 1:
         opener = f"Hi {name}, saw {hook}." if hook else f"Hi {name},"
         body = f"{opener} I'm {sender} at {company.name}; we help {_audience(company)}. Would love to connect!"
         if len(body) > LINKEDIN_CONNECT_LIMIT:
@@ -94,6 +133,8 @@ def draft_template(company: Company, lead: Lead, signals: list[Signal], channel:
                 f"{'Teams like ' + lead.lead_company + ' often' if lead.lead_company else 'Teams like yours often'} "
                 f"tell us {(_short(company.pain_points, 120) or 'this is worth a look').rstrip('.')}. "
                 f"{cta}")
+        if channel == "linkedin_connect":  # a connection request after an earlier email
+            return "", _short(body, LINKEDIN_CONNECT_LIMIT)
         subject = f"Re: {lead.lead_company or name}" if channel == "email" else ""
         return subject, _sign(body, o.signature, sender, channel)
 
@@ -111,8 +152,16 @@ def draft_template(company: Company, lead: Lead, signals: list[Signal], channel:
     return subject, body
 
 
+def _plural(title: str) -> str:
+    """'Travel Manager' -> 'Travel Managers' (good enough for job titles)."""
+    t = title.strip()
+    if not t or t.lower().endswith("s") or " of " in t.lower():
+        return t
+    return t[:-1] + "ies" if t.endswith("y") and t[-2:-1].lower() not in "aeiou" else t + "s"
+
+
 def _audience(company: Company) -> str:
-    titles = company.icp.job_titles[:2]
+    titles = [_plural(t) for t in company.icp.job_titles[:2]]
     industries = company.icp.industries[:1]
     who = " & ".join(titles) if titles else "teams"
     if industries:
@@ -125,6 +174,38 @@ def _sign(body: str, signature: str, sender: str, channel: str) -> str:
     if channel == "email" or signature.strip():
         return f"{body}\n\n{sig}"
     return f"{body}\n\n{sender}"
+
+
+SENT_STATUSES = ("sent", "replied")  # outbound messages the user has sent ('replied' = sent, then answered)
+
+
+def _sent(messages: list[Message]) -> list[Message]:
+    return [m for m in messages if m.direction == "outbound" and m.status in SENT_STATUSES]
+
+
+def next_step(messages: list[Message]) -> int:
+    """Sequence step of the next message: the highest step already sent + 1 (as repo.followups_due)."""
+    return max((m.step for m in _sent(messages)), default=0) + 1
+
+
+def followup_channel(channel: str) -> str:
+    """A LinkedIn connection note is sent once; after it you write to the lead by direct message."""
+    return "linkedin_dm" if channel == "linkedin_connect" else channel
+
+
+def next_touch(company: Company, lead: Lead, messages: list[Message]) -> tuple[str, int]:
+    """(channel, step) of the next message to a lead, given the lead's messages.
+
+    The first touch uses the company's preferred channel for the lead. Later touches stay on the
+    channel of the last message sent or received, with LinkedIn direct messages after a connection note.
+    """
+    exchanged = _sent(messages) + [m for m in messages if m.direction == "inbound"]
+    if not exchanged:
+        from .services import default_channel  # services imports this module
+
+        return default_channel(company, lead), 1
+    last = max(exchanged, key=lambda m: (m.sent_at or m.created_at, m.id))
+    return followup_channel(last.channel), next_step(messages)
 
 
 def outreach_context(company: Company, lead: Lead, signals: list[Signal], previous: list[Message],

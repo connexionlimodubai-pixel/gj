@@ -6,6 +6,16 @@ thinking through MCP, and a web dashboard (with a registration board for your co
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
+## Download the app
+
+| Windows 10/11 | Mac (Apple silicon) | Linux |
+|---|---|---|
+| [**OpenBerry for Windows**](https://github.com/connexionlimodubai-pixel/gj/releases/download/v0.1.0/OpenBerry-0.1.0-windows-x64.zip) (39 MB) | [**OpenBerry for Mac**](https://github.com/connexionlimodubai-pixel/gj/releases/download/v0.1.0/OpenBerry-0.1.0-macos-arm64.zip) (39 MB) | [**OpenBerry for Linux**](https://github.com/connexionlimodubai-pixel/gj/releases/download/v0.1.0/OpenBerry-0.1.0-linux-x64.tar.gz) (43 MB) |
+| Unzip (right-click → **Extract All**), then double-click **OpenBerry.exe**. If Windows says it protected your PC, click **More info → Run anyway**. | Unzip, drag **OpenBerry.app** to Applications, then right-click it → **Open** the first time. | Extract and run `./OpenBerry`: it opens in your browser. |
+
+Version 0.1.0. The newest version and release notes are always on the [Releases page](https://github.com/connexionlimodubai-pixel/gj/releases/latest).
+The app isn't code-signed, which is why Windows and macOS ask you to confirm once. Step-by-step help: [docs/DESKTOP.md](docs/DESKTOP.md).
+
 ## What it does
 
 1. **Register your company** on the registration board: what you sell, who buys it (your ICP), which signals to watch,
@@ -31,8 +41,8 @@ See [docs/GOJIBERRY_COMPARISON.md](docs/GOJIBERRY_COMPARISON.md) for a feature-b
 
 ## Desktop app (no terminal needed)
 
-Download OpenBerry for **Windows**, **Mac** (Apple silicon) or **Linux** from the
-[Releases page](https://github.com/connexionlimodubai-pixel/gj/releases), unzip it and double-click **OpenBerry**.
+Download OpenBerry for **Windows**, **Mac** (Apple silicon) or **Linux** [above](#download-the-app) or from the
+[Releases page](https://github.com/connexionlimodubai-pixel/gj/releases/latest), unzip it and double-click **OpenBerry**.
 The dashboard opens in its own window, and your data stays on your computer. Claude Desktop connects to it
 through the **Connect Claude** page in the app. You don't need Python or a terminal.
 
@@ -162,7 +172,7 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ```bash
 uv sync --extra dev
-uv run pytest            # ~830 tests, no network needed
+uv run pytest            # ~880 tests, no network needed
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

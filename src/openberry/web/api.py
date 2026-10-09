@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, Response
 
 from .. import repo, website
-from ..models import CompanyIn, LeadIn
+from ..models import CompanyIn, LeadIn, OutreachConfig
 from . import scans
 from .auth import is_anonymous, require_api_auth
 from .ratelimit import client_key, limits, retry_header
@@ -36,6 +36,30 @@ def _dump(model: BaseModel) -> dict[str, Any]:
 # Companies
 # --------------------------------------------------------------------------------------
 
+# AI agent sending is the user's decision, made in the dashboard (as with Claude's update_company): a
+# script may turn it off or lower the daily limit, never turn it on, raise the limit or lift the pause
+# the agent set with report_send_problem.
+AGENT_SETTINGS = ("agent_sending", "agent_daily_limit", "agent_paused_until", "agent_pause_reason")
+
+
+def _check_agent_settings(changes: Any, current: OutreachConfig) -> None:
+    if not isinstance(changes, dict) or not any(key in changes for key in AGENT_SETTINGS):
+        return
+    wanted = OutreachConfig.model_validate(
+        {**current.model_dump(mode="json"), **{k: v for k, v in changes.items() if k in AGENT_SETTINGS}})
+    refused = []
+    if wanted.agent_sending and not current.agent_sending:
+        refused.append("turn AI agent sending on")
+    if wanted.agent_daily_limit > current.agent_daily_limit:
+        refused.append("raise the agent's daily limit")
+    if (wanted.agent_paused_until != current.agent_paused_until
+            or wanted.agent_pause_reason != current.agent_pause_reason):
+        refused.append("pause or resume agent sending")
+    if refused:
+        raise HTTPException(403, f"Not changed: only the user can {' or '.join(refused)}, on the dashboard's "
+                                 "Outreach page. The API may turn agent sending off or lower its daily limit.")
+
+
 @router.get("/companies")
 def api_list_companies() -> dict[str, Any]:
     return {"items": [_dump(c) for c in repo.list_companies()]}
@@ -43,6 +67,7 @@ def api_list_companies() -> dict[str, Any]:
 
 @router.post("/companies", status_code=201)
 def api_create_company(data: CompanyIn) -> dict[str, Any]:
+    _check_agent_settings(data.outreach.model_dump(mode="json", include=set(AGENT_SETTINGS)), OutreachConfig())
     return _dump(repo.create_company(data))
 
 
@@ -54,6 +79,7 @@ def api_get_company(company_id: int) -> dict[str, Any]:
 @router.patch("/companies/{company_id}")
 def api_patch_company(company_id: int, patch: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Deep-merge a partial profile, e.g. {"icp": {"locations": ["UAE"]}} or {"status": "paused"}."""
+    _check_agent_settings(patch.get("outreach"), repo.get_company(company_id).outreach)
     return _dump(repo.update_company(company_id, patch))
 
 

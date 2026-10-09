@@ -9,7 +9,7 @@
     <p class="lede">People and accounts showing intent, scored against your ideal customer profile.</p>
   </div>
   <div class="page-actions">
-    <a class="btn" href="{{ base }}/leads.csv{{ query_with(request, page=None) if request.query_params else '' }}">{{ m.icon("download") }}Export CSV</a>
+    <a class="btn" href="{{ base }}/leads.csv{{ query_with(request, page=None) if request.query_params else '' }}" download>{{ m.icon("download") }}Export CSV</a>
     <a class="btn" href="#import" data-open-details="import">{{ m.icon("upload") }}Import CSV</a>
     <a class="btn btn-primary" href="{{ base }}/leads/new">{{ m.icon("plus") }}Add lead</a>
   </div>

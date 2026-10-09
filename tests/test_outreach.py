@@ -98,6 +98,78 @@ def test_followup_template_is_never_a_second_connection_note(company: Company, l
     assert len(note) <= outreach.LINKEDIN_CONNECT_LIMIT and "https://" not in note
 
 
+def _long_profile(company: Company, account: str) -> Company:
+    return repo.update_company(company.id, {
+        "name": "Acme Executive Chauffeurs International",
+        "pain_points": "Late drivers, surprise surcharges and no single invoice for the whole team, every month, "
+                       "across three cities",
+        "icp": {"job_titles": ["Executive Assistant to the CEO", "Corporate Travel Manager"],
+                "industries": ["Financial Services and Consulting"]},
+        "outreach": {"sender_name": "Samantha Al-Rashid", "linkedin_account": account}})
+
+
+ROADSHOW = "r/dubai: Need a reliable chauffeur for a three-day CEO roadshow across Dubai and Abu Dhabi"
+
+
+def test_template_notes_fit_the_linkedin_account(company: Company, lead: Lead):
+    signals = [signal("keyword_mention", ROADSHOW, source="reddit")]
+    free = _long_profile(company, "free")
+    _, note = outreach.draft_template(free, lead, signals, "linkedin_connect")
+    assert len(note) <= 200 and "we help" not in note  # the shorter note, for a free account's 200 characters
+    _, later = outreach.draft_template(free, lead, signals, "linkedin_connect", 2)
+    assert len(later) == 200 and later.endswith("…")  # cut to fit
+    premium = _long_profile(company, "premium")
+    _, note = outreach.draft_template(premium, lead, signals, "linkedin_connect")
+    assert 200 < len(note) <= 300 and "we help" in note
+    _, later = outreach.draft_template(premium, lead, signals, "linkedin_connect", 2)
+    assert 200 < len(later) <= 300 and not later.endswith("…")
+
+
+def test_outreach_context_gives_the_accounts_note_limits(company: Company, lead: Lead):
+    free = outreach.outreach_context(company, lead, [], [], channel="linkedin_connect")
+    assert free["limits"] == {"max_chars": 200, "linkedin_account": "free", "monthly_note_limit": 5}
+    assert "Hard limit 200 characters" in free["channel_guidance"]
+    assert any("200 characters or fewer" in r for r in free["rules"])
+    assert any("only 5 connection requests a month" in r for r in free["rules"])
+    assert "Hard limit 200 characters" in outreach.build_llm_prompt(free)
+    premium = _long_profile(company, "premium")
+    ctx = outreach.outreach_context(premium, lead, [], [], channel="linkedin_connect", step=2)
+    assert ctx["limits"] == {"max_chars": 300, "linkedin_account": "premium", "monthly_note_limit": None}
+    assert ctx["channel_guidance"].startswith("LinkedIn connection request note. Hard limit 300 characters")
+    assert "follow-up #1" in ctx["channel_guidance"] and not any("a month" in r for r in ctx["rules"])
+    assert outreach.outreach_context(premium, lead, [], [], channel="linkedin_dm")["limits"] == {"soft_max_chars": 600}
+    assert outreach.outreach_context(premium, lead, [], [], channel="email")["limits"] == {}
+
+
+def test_llm_replies_are_cut_to_the_accounts_note_limit():
+    reply = "Hi Omar, " + "a" * 280
+    assert len(outreach.parse_llm_reply(reply, "linkedin_connect")[1]) == 200  # unknown account: the stricter limit
+    assert len(outreach.parse_llm_reply(reply, "linkedin_connect", 200)[1]) == 200
+    assert outreach.parse_llm_reply(reply, "linkedin_connect", 300)[1] == reply
+    assert len(outreach.parse_llm_reply("b" * 400, "linkedin_connect", 500)[1]) == 300  # never above LinkedIn's max
+    assert outreach.parse_llm_reply(reply, "linkedin_dm", 200)[1] == reply  # direct messages aren't cut
+
+
+async def test_ollama_drafts_follow_the_accounts_note_limit(company: Company, lead: Lead, settings):
+    import httpx
+
+    reply = "Hi Omar, " + "c" * 270
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "Hard limit" in request.read().decode()
+        return httpx.Response(200, json={"response": reply})
+
+    settings.ollama_url = "http://ollama.test"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ctx = outreach.outreach_context(company, lead, [], [], channel="linkedin_connect")
+        _, body = await outreach.draft_with_ollama(settings, ctx, client=client)
+        assert len(body) == 200
+        premium = _long_profile(company, "premium")
+        ctx = outreach.outreach_context(premium, lead, [], [], channel="linkedin_connect")
+        _, body = await outreach.draft_with_ollama(settings, ctx, client=client)
+        assert body == reply
+
+
 @pytest.mark.parametrize(("type", "title", "source", "hook"), [
     # J5: titles typed by the user or Claude describe the lead; they are never quoted as the lead's words.
     ("keyword_mention", "Asked for chauffeur recommendations on Reddit", "manual",

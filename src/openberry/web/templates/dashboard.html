@@ -35,6 +35,10 @@
 {% endif %}
 {% endif %}
 
+{% if agent.enabled and agent.paused %}
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>AI agent sending is paused</strong> until {{ agent.paused_until|abs_dt }}. Your agent reported a problem on LinkedIn: <span class="agent-reason">{{ agent.pause_reason or "no details given" }}</span> <a href="{{ base }}/outreach#agent">Review it on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
+{% endif %}
+
 <section class="kpis" aria-label="Key numbers">
   {% for k in kpis %}
   <a class="kpi" href="{{ k.href }}">
@@ -44,6 +48,9 @@
   </a>
   {% endfor %}
 </section>
+{% if agent.enabled and not agent.paused %}
+<p class="agent-line">{{ m.icon("bot", 15) }}<span>AI agent sending is on: <strong>{{ agent.sent_last_24h }} of {{ agent.daily_limit }}</strong> LinkedIn messages sent in the last 24 hours{% if agent.state == "limit" %}, daily limit reached{% else %} · {{ agent.eligible_total }} queued{% endif %}.</span> <a href="{{ base }}/outreach#agent">Outreach{{ m.icon("chevron-right", 12) }}</a></p>
+{% endif %}
 
 <div class="dash-grid">
   <section class="card span-2 chart-card" aria-labelledby="days-title">

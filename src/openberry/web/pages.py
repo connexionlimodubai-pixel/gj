@@ -4,9 +4,12 @@ outreach queue, company profile (settings) and help."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +20,12 @@ from starlette.responses import RedirectResponse, Response
 
 from .. import repo, services
 from ..config import get_settings
-from ..models import SIGNAL_TYPES, Company, CompanyIn, Lead, ScanRun
+from ..models import SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
 from . import charts, forms, scans
 from .auth import LoginRequired, checked_form, public_registration_open, require_login
 from .ratelimit import client_key, limits, retry_header
 from .session import COMPANY_KEY, flash, is_logged_in, remember_company, safe_next
-from .ui import LEAD_SOURCES, choice, int_param, page_info, render
+from .ui import LEAD_SOURCES, as_utc, choice, int_param, page_info, render
 
 router = APIRouter(dependencies=[Depends(require_login)], include_in_schema=False)
 public_router = APIRouter(include_in_schema=False)
@@ -57,6 +60,78 @@ def claude_prompts(company_id: int) -> list[tuple[str, str]]:
                                    "that have no message yet."),
         ("Weekly report", f"Write my weekly pipeline report for company {company_id}."),
     ]
+
+
+def agent_prompts(company_id: int) -> list[tuple[str, str]]:
+    """What the user pastes into their browser agent. Copied prompts become the user's own words, so
+    they name the company by id only: the agent reads each approved message from the send queue."""
+    return [
+        ("Agents with MCP prompts (Claude)",
+         f"Use the openberry tools: run the send_approved_messages prompt for company {company_id}."),
+        ("Any other MCP-capable agent",
+         f"Use the openberry tools: call get_send_queue for company {company_id} and follow its instructions."),
+    ]
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    if isinstance(value, str) and value.strip():
+        try:
+            value = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return as_utc(value) if isinstance(value, datetime) else None
+
+
+AGENT_QUEUE_SHOWN = 50  # the highest daily limit: the queue never holds more than what's left today
+AGENT_SKIPPED_SHOWN = 20
+
+
+def agent_status(company: Company, limit: int = AGENT_QUEUE_SHOWN) -> dict[str, Any]:
+    """AI agent sending for the dashboard: the send queue plus the state to show.
+
+    state: off | paused | limit (daily limit reached) | on. The on/off switch is the profile's
+    outreach.agent_sending; the pause, the counts and the queued messages come from repo.send_queue,
+    which applies every guardrail (only approved LinkedIn messages, never-contact list, replies...).
+    """
+    queue = repo.send_queue(company.id, limit=limit)
+    out = company.outreach
+    now = datetime.now(timezone.utc)
+    paused_until = _as_datetime(queue.get("paused_until")) or _as_datetime(out.agent_paused_until)
+    paused = paused_until is not None and paused_until > now
+    enabled = bool(out.agent_sending)
+    daily_limit = int(queue.get("daily_limit") or out.agent_daily_limit)
+    sent = int(queue.get("sent_last_24h") or 0)
+    remaining = queue.get("remaining")
+    remaining = max(0, daily_limit - sent) if remaining is None else max(0, int(remaining))
+    if not enabled:
+        state = "off"
+    elif paused:
+        state = "paused"
+    elif remaining <= 0:
+        state = "limit"
+    else:
+        state = "on"
+    items = list(queue.get("items") or []) if enabled and not paused else []
+    return {
+        "state": state, "enabled": enabled, "paused": paused, "paused_until": paused_until if paused else None,
+        "pause_reason": (queue.get("pause_reason") or out.agent_pause_reason or "") if paused else "",
+        "daily_limit": daily_limit, "sent_last_24h": sent, "remaining": remaining, "items": items,
+        # Every message the agent may send, also those waiting for a free slot (items stop at `remaining`).
+        "eligible_total": max(len(items), int(queue.get("eligible_total") or 0)),
+        # Approved LinkedIn messages the agent may not send, with why (no LinkedIn URL, lead replied...).
+        "skipped": list(queue.get("skipped") or []) if enabled and not paused else [],
+        "limit_frees_at": _as_datetime(queue.get("limit_frees_at")),
+        # Connection requests: at most 80 in any 7 days, and a note on 5 in any 30 days from a free LinkedIn
+        # account (repo.send_queue counts every connection request sent for the company, whoever sent it).
+        "linkedin_account": out.linkedin_account,
+        "connect_sent_7d": int(queue.get("connect_sent_7d") or 0),
+        "weekly_connect_limit": int(queue.get("weekly_connect_limit") or repo.AGENT_WEEKLY_CONNECT_LIMIT),
+        "connect_notes_30d": int(queue.get("connect_notes_30d") or 0),
+        "monthly_note_limit": queue.get("monthly_note_limit"),
+        "connect_blocked_reason": queue.get("connect_blocked_reason") or "",
+        "connect_blocked_message": repo.connect_blocked_message(queue) if queue.get("connect_blocked_reason") else "",
+        "connect_frees_at": _as_datetime(queue.get("connect_frees_at")),
+    }
 
 
 def run_summary(run: ScanRun) -> dict[str, Any]:
@@ -188,6 +263,47 @@ def source_checkout() -> Path | None:
     return root if (root / "pyproject.toml").is_file() and (root / "src" / "openberry").is_dir() else None
 
 
+CLI_EXECUTABLE = "openberry-cli"  # the packaged app's console executable
+
+
+def bundled_cli() -> str:
+    """The packaged app's command-line executable: `openberry-cli` (.exe on Windows) next to the
+    app's own executable (on macOS both sit in OpenBerry.app/Contents/MacOS).
+
+    Without it, the app's executable, which also runs CLI commands (desktop.main).
+    """
+    app = Path(sys.executable)
+    cli = app.with_name(CLI_EXECUTABLE + (".exe" if sys.platform == "win32" else ""))
+    return str(cli if cli.is_file() else app)
+
+
+MOVE_TO_APPLICATIONS = ("macOS is running OpenBerry from a temporary copy, so Claude would not find it later. "
+                        "Quit OpenBerry, drag it into your Applications folder, open it from there, "
+                        "then come back to this page.")
+EXTRACT_THE_ZIP = ("OpenBerry is running from a temporary folder, probably from inside the zip file, so Claude "
+                   "would not find it later. Close OpenBerry, extract the zip file (right-click it, Extract All), "
+                   "open OpenBerry from the extracted folder, then come back to this page.")
+
+
+def _temp_dir() -> str:
+    return tempfile.gettempdir()
+
+
+def unstable_location(command: str) -> str:
+    """Why the packaged app's command would not work for Claude later, or "" if its place is fine.
+
+    A downloaded Mac app opened where it was unzipped runs from a random, temporary copy (App
+    Translocation), and Windows runs an app opened inside a zip file from a temporary folder: both
+    folders disappear, and Claude Desktop's config would point at nothing.
+    """
+    if "/AppTranslocation/" in command:
+        return MOVE_TO_APPLICATIONS
+    temp = os.path.normcase(os.path.realpath(_temp_dir()))
+    if os.path.normcase(os.path.realpath(command)).startswith(temp.rstrip(os.sep) + os.sep):
+        return EXTRACT_THE_ZIP
+    return ""
+
+
 def shell_line(words: list[str]) -> str:
     return " ".join(w if _SHELL_SAFE.fullmatch(w) else '"' + w.replace('"', '\\"') + '"' for w in words)
 
@@ -196,8 +312,11 @@ def mcp_launch(db_path: str) -> dict[str, Any]:
     """How Claude starts `openberry mcp` on this machine: command, args and env.
 
     Claude Desktop starts servers without the shell's PATH, so the command is an absolute path:
-    uv for a clone (as in the README), else this Python. In a container, `docker exec` runs it there.
+    the packaged desktop app's own CLI, uv for a clone (as in the README), else this Python.
+    In a container, `docker exec` runs it there.
     """
+    if getattr(sys, "frozen", False):  # the packaged desktop app (PyInstaller): there is no Python to run
+        return {"command": bundled_cli(), "args": ["mcp"], "env": {"OPENBERRY_DB": db_path}, "docker": False}
     if in_container():
         return {"command": DOCKER_MCP[0], "args": DOCKER_MCP[1:], "env": {}, "docker": True}
     root, uv = source_checkout(), shutil.which("uv")
@@ -218,6 +337,7 @@ def help_page(request: Request) -> Response:
     # Commands use the address this page was opened on: OPENBERRY_BASE_URL may still be the
     # default :8000 while the server runs on another port.
     page_url = str(request.base_url).rstrip("/")
+    packaged = bool(getattr(sys, "frozen", False))
     return render(request, "help.html", {
         "active": "help", "title": "Connect Claude & API", "db_path": str(settings.db_path.resolve()),
         "api_token_set": bool(settings.api_token), "example_company": companies[0].id if companies else 1,
@@ -226,6 +346,7 @@ def help_page(request: Request) -> Response:
         "desktop_config": json.dumps(desktop, indent=2, ensure_ascii=False),
         "page_url": page_url, "base_url_differs": page_url != settings.base_url.rstrip("/"),
         "reddit_ready": bool(settings.reddit_client_id and settings.reddit_client_secret),
+        "packaged": packaged, "install_warning": unstable_location(launch["command"]) if packaged else "",
     })
 
 
@@ -268,6 +389,9 @@ def as_pending_review(data: CompanyIn) -> CompanyIn:
         "status": "paused",
         "signals": data.signals.model_copy(update={"rss_feeds": []}),
         "notify": data.notify.model_copy(update={"slack_webhook_url": "", "discord_webhook_url": ""}),
+        # Only the operator turns on AI agent sending (the public form doesn't show it).
+        "outreach": data.outreach.model_copy(update={
+            "agent_sending": False, "agent_daily_limit": OutreachConfig.model_fields["agent_daily_limit"].default}),
     })
 
 
@@ -326,7 +450,7 @@ def dashboard(request: Request, company_id: int) -> Response:
         "top_leads": top_leads, "recent": recent, "signal_leads": leads_by_id(s.lead_id for s in recent),
         "followups": repo.followups_due(company_id)[:6], "sources": sources_panel(company),
         "runs": [run_summary(r) for r in runs], "scan": scans.status(company_id),
-        "prompts": claude_prompts(company_id),
+        "prompts": claude_prompts(company_id), "agent": agent_status(company),
     })
 
 
@@ -382,11 +506,70 @@ def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Res
     else:
         status = {"drafts": "draft", "approved": "approved", "sent": "sent"}[tab]
         messages = repo.list_messages(company_id, status=status, direction="outbound", limit=200)
+    agent = agent_status(company)
     return render(request, "outreach.html", {
         "company": company, "active": "outreach", "title": "Outreach", "tab": tab, "tabs": OUTREACH_TABS,
         "tab_counts": tab_counts, "messages": messages, "followups": followups,
         "leads": leads_by_id(m.lead_id for m in messages),
+        "agent": agent, "agent_prompts": agent_prompts(company_id),
+        "agent_queued_ids": {item["message_id"] for item in agent["items"]},
+        "agent_leads": leads_by_id(s["lead_id"] for s in agent["skipped"][:AGENT_SKIPPED_SHOWN]),
+        "agent_skipped_shown": AGENT_SKIPPED_SHOWN,
     })
+
+
+def _agent_limit(raw: Any) -> int | None:
+    """The submitted daily limit, or None when it isn't a whole number in the allowed range."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    low, high = forms.AGENT_LIMIT_RANGE
+    return int(text) if text.isdigit() and low <= int(text) <= high else None
+
+
+@router.post("/c/{company_id}/outreach/agent")
+def agent_settings(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Turn AI agent sending on or off and set its daily limit. Turning it off always works."""
+    company = repo.get_company(company_id)
+    back = f"/c/{company_id}/outreach#agent"
+    turn_on = str(form.get("agent_sending") or "").strip().lower() in forms.TRUTHY
+    raw_limit = form.get("agent_daily_limit")
+    limit = _agent_limit(raw_limit)
+    if not turn_on:
+        patch: dict[str, Any] = {"agent_sending": False}
+        if limit is not None:
+            patch["agent_daily_limit"] = limit
+        repo.update_company(company_id, {"outreach": patch})
+        flash(request, "AI agent sending is off. Approved messages wait for you to send them yourself.", "info")
+        return redirect(back)
+    if limit is None and isinstance(raw_limit, str) and raw_limit.strip():
+        low, high = forms.AGENT_LIMIT_RANGE
+        flash(request, f"The daily limit must be a whole number from {low} to {high}. Nothing was changed.", "error")
+        return redirect(back)
+    limit = limit or company.outreach.agent_daily_limit
+    was_on = company.outreach.agent_sending
+    company = repo.update_company(company_id, {"outreach": {"agent_sending": True, "agent_daily_limit": limit}})
+    paused_until = _as_datetime(company.outreach.agent_paused_until)
+    if paused_until is not None and paused_until > datetime.now(timezone.utc):
+        flash(request, f"Saved, but agent sending is paused until {paused_until:%d %b %H:%M} UTC because your agent "
+                       "reported a problem. Check LinkedIn yourself, then resume below.", "warning")
+    elif was_on:
+        flash(request, f"Daily limit saved: at most {limit} LinkedIn messages in any 24 hours.")
+    else:
+        flash(request, f"AI agent sending is on: your agent may send up to {limit} approved LinkedIn messages in "
+                       "any 24 hours. Copy the prompt below into your agent.")
+    return redirect(back)
+
+
+@router.post("/c/{company_id}/outreach/agent/resume")
+def agent_resume(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Lift the pause the agent's problem report set (report_send_problem)."""
+    company = repo.get_company(company_id)
+    repo.resume_agent_sending(company_id)
+    if company.outreach.agent_sending:
+        flash(request, "Agent sending resumed. Your agent stops and pauses it again if LinkedIn shows anything "
+                       "unexpected.")
+    else:
+        flash(request, "Pause lifted. Agent sending is still off: turn it on when you want your agent to send.", "info")
+    return redirect(safe_next(form.get("next"), f"/c/{company_id}/outreach#agent"))
 
 
 # --------------------------------------------------------------------------------------

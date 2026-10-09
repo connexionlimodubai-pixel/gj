@@ -131,18 +131,31 @@
   </div>
   {{ m.checks("outreach.channels", "Channels", [("linkedin", "LinkedIn"), ("email", "Email")]) }}
   <div class="grid-2">
+    {{ m.select("outreach.linkedin_account", "Your LinkedIn account", LINKEDIN_ACCOUNT_OPTIONS, help="Sets LinkedIn's connection-note limits: free accounts can add a note to " ~ LINKEDIN_FREE_NOTES_PER_MONTH ~ " requests a month, " ~ LINKEDIN_CONNECT_LIMIT_FREE ~ " characters each; Premium to every request, " ~ LINKEDIN_CONNECT_LIMIT ~ " characters.") }}
+  </div>
+  <div class="grid-2">
     {{ m.input("outreach.call_to_action", "Call to action") }}
     {{ m.input("outreach.followup_days", "Follow-up after (days)", help="Days to wait after each sent message, e.g. 3, 7.") }}
   </div>
   {{ m.radios("outreach.mode", "Drafting mode", [
       ("review", "Review", "You draft on demand from a lead's page or by asking Claude."),
       ("auto_draft", "Auto-draft", "A first-touch draft is created for every person lead that turns hot (in a scan, through Claude, the API, an import or an edit)."),
-    ], help="Nothing is ever sent automatically: you approve, copy and send every message yourself.") }}
+    ], help="Nothing is sent without your approval: you send approved messages yourself" ~ ("." if public_mode else ", or let your own AI agent send approved LinkedIn messages (below).")) }}
   <div class="grid-2">
     {{ m.textarea("outreach.signature", "Signature", rows=2) }}
     {{ m.listarea("outreach.banned_words", "Banned words", help="Words and phrases messages must never use.", rows=2) }}
   </div>
   {{ m.textarea("outreach.extra_instructions", "Extra instructions for Claude", rows=2, placeholder="e.g. Never mention pricing in the first message.") }}
+  {% if not public_mode %}
+  <h3 class="sub-head" id="agent-sending">AI agent sending (LinkedIn)</h3>
+  {% set agent_low, agent_high = AGENT_LIMIT_RANGE %}
+  <div class="agent-fields">
+    {{ m.check_card("outreach.agent_sending", "AI agent sending", "Let my AI agent send approved LinkedIn messages",
+        "An AI agent you run in your own browser, logged in to your LinkedIn, sends the messages you approve, exactly as approved. Email is never sent this way. Off by default.") }}
+    {{ m.input("outreach.agent_daily_limit", "Agent daily limit", type="number", help="Most messages in any 24 hours (" ~ agent_low ~ "–" ~ agent_high ~ "). Keep it low.", attrs={"min": agent_low, "max": agent_high, "inputmode": "numeric"}) }}
+  </div>
+  <p class="callout callout-warning">{{ m.icon("alert", 14) }}<span><strong>At your own risk.</strong> LinkedIn's rules forbid automation, and even an agent in your own browser can get your account restricted. Only messages you approve are sent. If LinkedIn complains, your agent stops and OpenBerry pauses sending for 24 hours. <a href="{{ AGENT_DOCS_URL }}" target="_blank" rel="noopener noreferrer">How it works</a></span></p>
+  {% endif %}
   <h3 class="sub-head">Hot-lead alerts</h3>
   {% if public_mode %}
   <p class="help">Slack or Discord alerts and RSS feeds are connected by the team after they review your registration.</p>

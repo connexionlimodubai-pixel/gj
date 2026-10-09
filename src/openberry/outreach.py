@@ -14,14 +14,54 @@ from typing import Any
 import httpx
 
 from .config import Settings
-from .models import Company, Lead, Message, Signal
+from .models import Company, CompanyIn, Lead, Message, OutreachConfig, Signal
 
-LINKEDIN_CONNECT_LIMIT = 300   # LinkedIn connection-request note limit (characters)
+# LinkedIn's limits on the personal note of a connection request (LinkedIn help a563153, a6239760): free (Basic)
+# accounts can add a note to at most 5 invitations a month, each at most 200 characters; Premium accounts can add
+# one to every invitation, up to 300 characters. connect_note_limit() picks the one for a company's account.
+LINKEDIN_CONNECT_LIMIT = 300        # the longest note LinkedIn takes on any account (Premium)
+LINKEDIN_CONNECT_LIMIT_FREE = 200   # free (Basic) accounts
+LINKEDIN_FREE_NOTES_PER_MONTH = 5   # free (Basic) accounts: invitations with a note per month
 LINKEDIN_DM_SOFT_LIMIT = 600
 
+
+AccountSource = CompanyIn | OutreachConfig | str | None  # a company, its outreach settings, or "free" / "premium"
+
+
+def _account(source: AccountSource) -> str:
+    if isinstance(source, CompanyIn):
+        source = source.outreach
+    if isinstance(source, OutreachConfig):
+        source = source.linkedin_account
+    return "premium" if isinstance(source, str) and source.strip().lower() == "premium" else "free"
+
+
+def connect_note_limit(source: AccountSource) -> int:
+    """The longest connection-request note the company's LinkedIn account takes: 200 (free), 300 (Premium).
+
+    Accepts a company, its outreach settings or the account word. Anything but "premium" is a free account, the
+    stricter limit, so a profile saved before the setting existed gets 200.
+    """
+    return LINKEDIN_CONNECT_LIMIT if _account(source) == "premium" else LINKEDIN_CONNECT_LIMIT_FREE
+
+
+def monthly_note_limit(source: AccountSource) -> int | None:
+    """How many connection requests a month may carry a note: 5 on a free account, None (no limit) on Premium."""
+    return None if _account(source) == "premium" else LINKEDIN_FREE_NOTES_PER_MONTH
+
+
+def account_label(source: AccountSource) -> str:
+    return "Premium" if _account(source) == "premium" else "free"
+
+
+def connect_guidance(source: AccountSource) -> str:
+    return (f"LinkedIn connection request note. Hard limit {connect_note_limit(source)} characters (the sender has "
+            f"a {account_label(source)} LinkedIn account; free accounts allow {LINKEDIN_CONNECT_LIMIT_FREE}, Premium "
+            f"{LINKEDIN_CONNECT_LIMIT}). No pitch, no links: reference the signal and give a reason to connect.")
+
+
 CHANNEL_GUIDANCE = {
-    "linkedin_connect": f"LinkedIn connection request note. Hard limit {LINKEDIN_CONNECT_LIMIT} characters. "
-                        "No pitch, no links: reference the signal and give a reason to connect.",
+    "linkedin_connect": connect_guidance("free"),  # the stricter default: outreach_context uses the company's own
     "linkedin_dm": f"LinkedIn direct message, under {LINKEDIN_DM_SOFT_LIMIT} characters, 3-5 short lines, "
                    "one soft call to action.",
     "email": "Cold email: a short specific subject line (max 7 words, no clickbait) and a 60-120 word body: "
@@ -121,12 +161,13 @@ def draft_template(company: Company, lead: Lead, signals: list[Signal], channel:
     if o.calendar_link and channel != "linkedin_connect":
         cta = f"{cta} {o.calendar_link}"
 
+    note_limit = connect_note_limit(company)  # 200 on a free LinkedIn account, 300 on Premium
     if channel == "linkedin_connect" and step <= 1:
         opener = f"Hi {name}, saw {hook}." if hook else f"Hi {name},"
         body = f"{opener} I'm {sender} at {company.name}; we help {_audience(company)}. Would love to connect!"
-        if len(body) > LINKEDIN_CONNECT_LIMIT:
+        if len(body) > note_limit:
             body = f"{opener} I'm {sender} at {company.name}. Would love to connect!"
-        return "", _short(body, LINKEDIN_CONNECT_LIMIT)
+        return "", _short(body, note_limit)
 
     if step > 1:
         body = (f"Hi {name}, following up on my last note. "
@@ -134,7 +175,7 @@ def draft_template(company: Company, lead: Lead, signals: list[Signal], channel:
                 f"tell us {(_short(company.pain_points, 120) or 'this is worth a look').rstrip('.')}. "
                 f"{cta}")
         if channel == "linkedin_connect":  # a connection request after an earlier email
-            return "", _short(body, LINKEDIN_CONNECT_LIMIT)
+            return "", _short(body, note_limit)
         subject = f"Re: {lead.lead_company or name}" if channel == "email" else ""
         return subject, _sign(body, o.signature, sender, channel)
 
@@ -212,11 +253,20 @@ def outreach_context(company: Company, lead: Lead, signals: list[Signal], previo
                      channel: str = "linkedin_dm", step: int = 1) -> dict[str, Any]:
     """Everything an LLM needs to write one personalised message, as plain data."""
     o = company.outreach
+    guidance = connect_guidance(company) if channel == "linkedin_connect" else CHANNEL_GUIDANCE.get(
+        channel, CHANNEL_GUIDANCE["other"])
+    note_rules = []
+    if channel == "linkedin_connect":
+        note_rules.append(f"Keep the connection note to {connect_note_limit(company)} characters or fewer: the "
+                          f"company sends from a {account_label(company)} LinkedIn account.")
+        if monthly_note_limit(company) is not None:
+            note_rules.append(f"A free LinkedIn account can add a note to only {monthly_note_limit(company)} "
+                              "connection requests a month: make each one count.")
     return {
         "channel": channel,
         "step": step,
-        "channel_guidance": CHANNEL_GUIDANCE.get(channel, CHANNEL_GUIDANCE["other"])
-        + (" " + FOLLOWUP_GUIDANCE.format(n=step - 1) if step > 1 else ""),
+        "channel_guidance": guidance + (" " + FOLLOWUP_GUIDANCE.format(n=step - 1) if step > 1 else ""),
+        "limits": channel_limits(company, channel),
         "sender": {
             "name": o.sender_name, "title": o.sender_title, "company": company.name,
             "website": company.website, "signature": o.signature, "calendar_link": o.calendar_link,
@@ -250,10 +300,21 @@ def outreach_context(company: Company, lead: Lead, signals: list[Signal], previo
             "One clear call to action. No buzzwords, no fake familiarity, no false claims.",
             f"Write in {o.language or 'English'} with a {o.tone or 'friendly'} tone.",
             *([f"Never use these words/phrases: {', '.join(o.banned_words)}."] if o.banned_words else []),
+            *note_rules,
             "If previous_messages contains an inbound reply, answer that reply instead of pitching again.",
             "Return only the message text (and a subject line for email).",
         ],
     }
+
+
+def channel_limits(company: Company, channel: str) -> dict[str, Any]:
+    """The length limits for one channel, as data (get_outreach_context's `limits`)."""
+    if channel == "linkedin_connect":
+        return {"max_chars": connect_note_limit(company), "linkedin_account": company.outreach.linkedin_account,
+                "monthly_note_limit": monthly_note_limit(company)}
+    if channel == "linkedin_dm":
+        return {"soft_max_chars": LINKEDIN_DM_SOFT_LIMIT}
+    return {}
 
 
 def build_llm_prompt(context: dict[str, Any]) -> str:
@@ -270,14 +331,17 @@ def build_llm_prompt(context: dict[str, Any]) -> str:
     )
 
 
-def parse_llm_reply(text: str, channel: str) -> tuple[str, str]:
+def parse_llm_reply(text: str, channel: str, max_chars: int | None = None) -> tuple[str, str]:
+    """(subject, body) from a model's reply. A connection note is cut to `max_chars`: the company's
+    connect_note_limit(), or the free account's 200 when it isn't given (never more than 300)."""
     text = (text or "").strip().strip("`").strip()
     subject = ""
     m = re.match(r"(?is)^\s*subject\s*:\s*(.+?)\n(.*)$", text)
     if m:
         subject, text = m.group(1).strip(), m.group(2).strip()
     if channel == "linkedin_connect":
-        text = _short(text, LINKEDIN_CONNECT_LIMIT)
+        limit = min(max_chars or LINKEDIN_CONNECT_LIMIT_FREE, LINKEDIN_CONNECT_LIMIT)
+        text = _short(text, limit)
     return (subject if channel == "email" else ""), text
 
 
@@ -300,7 +364,7 @@ async def draft_with_ollama(settings: Settings, context: dict[str, Any],
     finally:
         if own:
             await client.aclose()
-    subject, body = parse_llm_reply(reply, context["channel"])
+    subject, body = parse_llm_reply(reply, context["channel"], (context.get("limits") or {}).get("max_chars"))
     if not body:
         raise RuntimeError("Ollama returned an empty reply")
     return subject, body

@@ -1,0 +1,112 @@
+# Builds the OpenBerry desktop app for Windows, macOS (Apple silicon) and Linux, checks each build
+# end to end (packaging/smoke_test.py) and keeps the downloads for 14 days. A pushed tag vX.Y.Z also
+# publishes them as a GitHub Release. See docs/DESKTOP.md.
+# Every action runs on Node 24 (GitHub retired Node 20 for actions in 2026).
+name: Desktop app
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "packaging/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/desktop.yml"
+  push:
+    branches: [main]
+    # Path filters are not applied to tag pushes: every vX.Y.Z tag builds a release.
+    tags: ["v*"]
+    paths:
+      - "src/**"
+      - "packaging/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            extras: --extra desktop
+          - os: macos-latest # Apple silicon (arm64)
+            name: macos
+            extras: --extra desktop
+          - os: ubuntu-latest
+            name: linux
+            extras: "" # no pywebview: the Linux app opens the dashboard in the browser
+    defaults:
+      run:
+        shell: bash # Git Bash on Windows: one script for every runner
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install OpenBerry and PyInstaller
+        run: |
+          uv sync --locked --extra dev ${{ matrix.extras }}
+          uv pip install "pyinstaller>=6.22,<7" "pyinstaller-hooks-contrib>=2026.8"
+
+      - name: Run the tests
+        if: runner.os == 'Linux'
+        run: uv run --no-sync pytest -q
+
+      - name: Build the app
+        id: build
+        env:
+          # On a tag push, the build checks that the tag matches OpenBerry's version.
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: uv run --no-sync python packaging/build.py --release-tag "$RELEASE_TAG"
+
+      - name: Smoke-test the build
+        env:
+          CLI: ${{ steps.build.outputs.cli }}
+          GUI: ${{ steps.build.outputs.gui }}
+        run: uv run --no-sync python packaging/smoke_test.py "$CLI" "$GUI"
+
+      - name: Keep the download
+        uses: actions/upload-artifact@v6
+        with:
+          name: OpenBerry-${{ steps.build.outputs.version }}-${{ matrix.name }}
+          path: ${{ steps.build.outputs.archive }}
+          retention-days: 14
+          compression-level: 0 # already a .zip or .tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: OpenBerry-*
+          path: downloads
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: downloads/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

@@ -15,9 +15,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit
 
 from .db import connect
 from .models import (
+    AGENT_CHANNELS,
+    AGENT_PAUSE_REASON_MAX,
     LEAD_STATUSES,
     MESSAGE_CHANNELS,
     MESSAGE_STATUSES,
@@ -31,7 +34,8 @@ from .models import (
     Signal,
     SignalIn,
 )
-from .scoring import DISQUALIFIED_MAX_SCORE, SignalPoint, score_lead
+from .outreach import LINKEDIN_CONNECT_LIMIT, LINKEDIN_CONNECT_LIMIT_FREE, connect_note_limit, monthly_note_limit
+from .scoring import DISQUALIFIED_MAX_SCORE, LeadFacts, SignalPoint, icp_fit, score_lead
 
 # --------------------------------------------------------------------------------------
 # Small helpers
@@ -56,6 +60,18 @@ def _conn(conn: sqlite3.Connection | None) -> Iterator[sqlite3.Connection]:
     else:
         with connect() as c:
             yield c
+
+
+@contextmanager
+def _write_locked(conn: sqlite3.Connection | None) -> Iterator[sqlite3.Connection]:
+    """A connection that holds SQLite's write lock from the first read (BEGIN IMMEDIATE), so the checks and the
+    writes that follow them see no other writer in between. A caller's own connection is used as it is."""
+    if conn is not None:
+        yield conn
+        return
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        yield c
 
 
 def _loads(value: str | None, default: Any) -> Any:
@@ -241,12 +257,21 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
 
 def update_company(company_id: int, data: CompanyIn | dict[str, Any],
                    conn: sqlite3.Connection | None = None) -> Company:
-    """Replace the profile with a CompanyIn, or deep-merge a partial dict into it."""
-    with _conn(conn) as c:
+    """Replace the profile with a CompanyIn, or deep-merge a partial dict into it.
+
+    The AI agent's pause (outreach.agent_paused_until / agent_pause_reason) is never changed here: it is
+    kept as stored. report_send_problem sets it and resume_agent_sending lifts it. The stored pause is read
+    under the write lock, so a save racing a problem report (e.g. a profile form read before the report)
+    can't lift the pause.
+    """
+    with _write_locked(conn) as c:
         current = get_company(company_id, conn=c)
         if isinstance(data, dict):
             merged = _deep_merge(current.model_dump(mode="json"), data)
             data = CompanyIn.model_validate(merged)
+        pause = {"agent_paused_until": current.outreach.agent_paused_until,
+                 "agent_pause_reason": current.outreach.agent_pause_reason}
+        data = data.model_copy(update={"outreach": data.outreach.model_copy(update=pause)})
         values = _company_values(data)
         sets = ", ".join(f"{col} = ?" for col in values)
         c.execute(f"UPDATE companies SET {sets}, updated_at = ? WHERE id = ?",
@@ -423,6 +448,8 @@ def upsert_lead(company_id: int, data: LeadIn, conn: sqlite3.Connection | None =
                 c.execute(f"UPDATE leads SET {sets}, updated_at = ? WHERE id = ?",
                           [*updates.values(), now, lead_id])
                 keys = keys + lead_identity_keys(get_lead(lead_id, conn=c), row["kind"])
+                if linkedin_profile_url(updates.get("linkedin_url", "")):
+                    _unapprove_for_new_profile(c, lead_id)  # the lead had no LinkedIn profile when approved
             if row["kind"] == "account" and row["company_key"] and "company_key" in updates:
                 _rescore_people_at(c, company_id, row["company_key"])  # they no longer inherit its intent
         _add_keys(c, company_id, lead_id, keys)
@@ -470,6 +497,11 @@ def update_lead(lead_id: int, fields: dict[str, Any], conn: sqlite3.Connection |
             new_ckey = updates["company_key"] = company_key(merged.lead_company, merged.company_domain)
             sets = ", ".join(f"{k} = ?" for k in updates)
             c.execute(f"UPDATE leads SET {sets}, updated_at = ? WHERE id = ?", [*updates.values(), iso(), lead_id])
+            if (linkedin_profile_url(merged.linkedin_url) != linkedin_profile_url(lead.linkedin_url)
+                    or (merged.status in NO_AGENT_LEAD_STATUSES and lead.status not in NO_AGENT_LEAD_STATUSES)):
+                # A new recipient, or a lead that left the pipeline (replied, won, lost, disqualified...): its
+                # approvals lapse, so setting the status back later doesn't put old messages in the agent's queue.
+                _unapprove_for_new_profile(c, lead_id)
             if kind != lead.kind:
                 # Keys of the old kind would keep routing its signals here (company-level ones to a person).
                 op = "NOT LIKE" if kind == "account" else "LIKE"
@@ -734,6 +766,16 @@ def _message_from_row(row: sqlite3.Row) -> Message:
     return Message.model_validate(dict(row))
 
 
+def message_text(text: str) -> str:
+    """A message body as stored: every line break as a single LF character, and the ends trimmed.
+
+    Browsers submit a textarea's line breaks as CR LF, two characters, while its character counter (and LinkedIn)
+    count one per line break: without this a connection note with line breaks that fits the account's limit in the
+    dashboard would be stored longer than the limit, and never queued for the agent.
+    """
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
 def create_message(lead_id: int, body: str, *, channel: str = "linkedin_dm", subject: str = "", step: int = 1,
                    generated_by: str = "template", status: str = "draft", direction: str = "outbound",
                    conn: sqlite3.Connection | None = None) -> Message:
@@ -743,7 +785,8 @@ def create_message(lead_id: int, body: str, *, channel: str = "linkedin_dm", sub
         raise ValueError(f"status must be one of {', '.join(MESSAGE_STATUSES)}")
     if direction not in ("outbound", "inbound"):
         raise ValueError("direction must be 'outbound' or 'inbound'")
-    if not body.strip():
+    body = message_text(body)
+    if not body:
         raise ValueError("message body is empty")
     now = iso()
     with _conn(conn) as c:
@@ -751,8 +794,8 @@ def create_message(lead_id: int, body: str, *, channel: str = "linkedin_dm", sub
         cur = c.execute(
             "INSERT INTO messages (company_id, lead_id, direction, channel, step, subject, body, status, generated_by, "
             "created_at, updated_at, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (lead.company_id, lead_id, direction, channel, max(1, int(step)), subject.strip(), body.strip(), status,
-             generated_by, now, now, now if status in ("sent", "received") else None),
+            (lead.company_id, lead_id, direction, channel, max(1, int(step)), subject.strip(), body, status,
+             generated_by, now, now, now if status in ("sent", "replied", "received") else None),
         )
         return get_message(cur.lastrowid, conn=c)
 
@@ -822,17 +865,24 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
         msg = get_message(message_id, conn=c)
         updates: dict[str, Any] = {}
         if body is not None:
-            if not body.strip():
+            if not message_text(body):
                 raise ValueError("message body is empty")
-            updates["body"] = body.strip()
+            updates["body"] = message_text(body)
         if subject is not None:
             updates["subject"] = subject.strip()
         if status is not None:
             if status not in MESSAGE_STATUSES:
                 raise ValueError(f"status must be one of {', '.join(MESSAGE_STATUSES)}")
             updates["status"] = status
-            if status == "sent" and not msg.sent_at:
+            # 'replied' = sent, then answered: a message first recorded that way was sent too (it then counts
+            # toward the connection-request limits, which count every request sent, by its sent_at).
+            if (status == "sent" or (status == "replied" and msg.direction == "outbound")) and not msg.sent_at:
                 updates["sent_at"] = iso()
+        elif (msg.status == "approved" and msg.direction == "outbound"
+              and (updates.get("body", msg.body), updates.get("subject", msg.subject)) != (msg.body, msg.subject)):
+            # An approval covers the exact text (an AI agent may send approved LinkedIn messages as they are):
+            # changed text is a draft again until someone approves it, e.g. with status="approved" in the same call.
+            updates["status"] = "draft"
         if updates:
             sets = ", ".join(f"{k} = ?" for k in updates)
             c.execute(f"UPDATE messages SET {sets}, updated_at = ? WHERE id = ?", [*updates.values(), iso(), message_id])
@@ -1031,3 +1081,495 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
             "reply_rate": round(100 * answered / reached) if reached else None,
             "last_scan": runs[0] if runs else None,
         }
+
+
+# --------------------------------------------------------------------------------------
+# AI agent sending: the approved-only LinkedIn send queue for an agent in the user's own browser
+# --------------------------------------------------------------------------------------
+#
+# OpenBerry never drives LinkedIn. An MCP-capable browser agent the user runs asks for the queue, sends each
+# message exactly as approved from the user's own logged-in browser and confirms it. Every guardrail is
+# enforced here, so a confused or manipulated agent can't get past it: off unless the company turns it on,
+# only messages a person approved, LinkedIn only, a rolling 24-hour limit, never leads who replied or are
+# excluded, never a step twice, follow-ups only when due, and a kill switch the agent pulls on any problem.
+
+AGENT_WINDOW = timedelta(hours=24)
+AGENT_QUEUE_MAX = 50
+MAX_AGENT_PAUSE_HOURS = 24 * 30
+# Leads whose conversation a person handles: they replied, booked a call, closed, or were ruled out.
+NO_AGENT_LEAD_STATUSES = ("replied", "meeting", "won", "lost", "disqualified")
+# Sends counted toward the daily limit: the agent's confirmations, and LinkedIn messages Claude marked sent
+# with update_message (so an agent can't send more by recording its sends the other way).
+_AGENT_COUNTED_VIA = ("agent", "claude")
+_AGENT_SENT_SQL = (f"company_id = ? AND direction = 'outbound' AND channel IN ({', '.join('?' * len(AGENT_CHANNELS))}) "
+                   f"AND sent_via IN ({', '.join('?' * len(_AGENT_COUNTED_VIA))}) AND sent_at > ?")
+
+# Connection requests have two more limits, on top of the daily one. Both count every connection request recorded
+# as sent for the company, whoever sent it (the user's Mark sent, Claude, the agent), because LinkedIn counts every
+# invitation and every note the account sends.
+#
+# Weekly: LinkedIn doesn't publish a weekly invitation number. About 100 a week, counted over the last 7 days, is
+# widely reported by third parties, and reaching LinkedIn's limit blocks invitations for a week (LinkedIn help
+# a550555). The agent stays well below it: at most 80 connection requests in any 7 days, on any account.
+AGENT_WEEKLY_CONNECT_LIMIT = 80
+CONNECT_WEEK = timedelta(days=7)
+# Monthly, free accounts only: LinkedIn lets a free (Basic) account add a personal note to at most 5 invitations a
+# month (LinkedIn help a563153, a6239760). Every connection request OpenBerry records carries a note, so the agent
+# sends at most outreach.LINKEDIN_FREE_NOTES_PER_MONTH in any 30 days from a free account. Premium: no such limit.
+NOTE_MONTH = timedelta(days=30)
+_CONNECT_SENT_SQL = ("company_id = ? AND direction = 'outbound' AND channel = 'linkedin_connect' "
+                     "AND sent_at IS NOT NULL AND sent_at > ?")
+
+
+def _utc(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def linkedin_profile_url(url: str) -> str:
+    """The canonical https://www.linkedin.com/in/<slug>/ of a person's profile URL, or "" if `url` isn't one.
+
+    Strict on purpose: the agent opens this URL in the user's logged-in browser and lead fields come from
+    strangers, so only a linkedin.com host (or a subdomain) with an /in/<slug> path passes.
+    """
+    text = (url or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = f"https://{text}"
+    try:
+        parsed = urlsplit(text)
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if (parsed.scheme.lower() not in ("http", "https") or parsed.username or parsed.password
+            or port not in (None, 80, 443) or not (host == "linkedin.com" or host.endswith(".linkedin.com"))):
+        return ""
+    match = re.fullmatch(r"/in/([^/]+)/?", parsed.path)
+    slug = unquote(match.group(1)) if match else ""
+    if slug in ("", ".", "..") or any(ch.isspace() or ch in "/\\?#" or unicodedata.category(ch)[0] == "C"
+                                      for ch in slug):
+        return ""
+    return f"https://www.linkedin.com/in/{quote(slug, safe='-_.~')}/"
+
+
+def _unapprove_for_new_profile(c: sqlite3.Connection, lead_id: int) -> int:
+    """The lead's LinkedIn profile changed (or the lead left the pipeline): its approved LinkedIn messages go
+    back to draft.
+
+    An approval covers the recipient too. Without this, changing a lead's linkedin_url (Claude, a merge, an
+    import, a script) would make the agent send an approved text to a different person than the one approved.
+    """
+    marks = ", ".join("?" * len(AGENT_CHANNELS))
+    cur = c.execute(f"UPDATE messages SET status = 'draft', updated_at = ? WHERE lead_id = ? "
+                    f"AND direction = 'outbound' AND status = 'approved' AND channel IN ({marks})",
+                    (iso(), lead_id, *AGENT_CHANNELS))
+    return cur.rowcount
+
+
+def _agent_sent_since(c: sqlite3.Connection, company_id: int, since: datetime) -> list[sqlite3.Row]:
+    return c.execute(f"SELECT sent_via, sent_at FROM messages WHERE {_AGENT_SENT_SQL} ORDER BY sent_at",
+                     (company_id, *AGENT_CHANNELS, *_AGENT_COUNTED_VIA, iso(since))).fetchall()
+
+
+def _connect_state(c: sqlite3.Connection, company: Company, now: datetime) -> dict[str, Any]:
+    """The connection-request limits: sent in the last 7 and 30 days, what's left, and whether they block."""
+    times = [r["sent_at"] for r in c.execute(f"SELECT sent_at FROM messages WHERE {_CONNECT_SENT_SQL} ORDER BY sent_at",
+                                             (company.id, iso(now - NOTE_MONTH)))]
+    week_start = iso(now - CONNECT_WEEK)
+    week = [t for t in times if t > week_start]
+    notes_max = monthly_note_limit(company)  # 5 on a free account, None on Premium
+    weekly_left = max(0, AGENT_WEEKLY_CONNECT_LIMIT - len(week))
+    notes_left = None if notes_max is None else max(0, notes_max - len(times))
+    blocked, frees = "", []
+    # A slot frees up once enough of the counted requests are older than the window (as for the daily limit).
+    if notes_max is not None and notes_left == 0:
+        blocked = "monthly_note_limit"
+        frees.append(datetime.fromisoformat(times[len(times) - notes_max]) + NOTE_MONTH)
+    if weekly_left == 0:
+        blocked = blocked or "weekly_connect_limit"
+        frees.append(datetime.fromisoformat(week[len(week) - AGENT_WEEKLY_CONNECT_LIMIT]) + CONNECT_WEEK)
+    return {
+        "linkedin_account": company.outreach.linkedin_account,
+        "connect_note_max_chars": connect_note_limit(company),
+        "connect_sent_7d": len(week),
+        "weekly_connect_limit": AGENT_WEEKLY_CONNECT_LIMIT,
+        "connect_notes_30d": len(times),
+        "monthly_note_limit": notes_max,
+        "connect_remaining": weekly_left if notes_left is None else min(weekly_left, notes_left),
+        "connect_blocked_reason": blocked,
+        "connect_frees_at": iso(max(frees)) if frees else None,
+    }
+
+
+def connect_blocked_message(state: dict[str, Any], ahead: int = 0) -> str:
+    """Why the agent may not send a connection request now ("" when it may), for the agent and the user.
+
+    `ahead`: connection requests already in this queue, which take the slots that are left.
+    """
+    reason = state.get("connect_blocked_reason") or ""
+    if not reason and ahead and ahead >= state.get("connect_remaining", 0):
+        notes_left = (None if state.get("monthly_note_limit") is None
+                      else state["monthly_note_limit"] - state["connect_notes_30d"])
+        weekly_left = state["weekly_connect_limit"] - state["connect_sent_7d"]
+        reason = "monthly_note_limit" if notes_left is not None and notes_left <= weekly_left else "weekly_connect_limit"
+    if not reason:
+        return ""
+    queued = f", and the {ahead} ahead in this queue take the rest" if ahead else ""
+    when = (f" The next one is allowed from {state['connect_frees_at']}."
+            if state.get("connect_frees_at") and not ahead else "")
+    if reason == "monthly_note_limit":
+        return (f"free LinkedIn accounts can add a note to only {state['monthly_note_limit']} connection requests a "
+                f"month: {state['connect_notes_30d']} were sent in the last 30 days, yours included{queued}, so your "
+                f"agent sends no more connection requests for now.{when} Send the rest yourself without a note, or "
+                "set the company's LinkedIn account to Premium (company profile, Outreach) if you have Premium. "
+                "LinkedIn messages still go out")
+    return (f"at most {state['weekly_connect_limit']} connection requests go out in any 7 days, to stay below "
+            f"LinkedIn's weekly invitation limit: {state['connect_sent_7d']} were sent in the last 7 days, yours "
+            f"included{queued}.{when} Connection requests wait until older ones are 7 days old; LinkedIn messages "
+            "still go out")
+
+
+def _note_too_long(company: Company, chars: int) -> str:
+    limit = connect_note_limit(company)
+    if limit == LINKEDIN_CONNECT_LIMIT_FREE:
+        return (f"the connection note is longer than {limit} characters ({chars}), the most a free LinkedIn account "
+                f"allows (Premium: {LINKEDIN_CONNECT_LIMIT}). Shorten it and approve it again, or set the company's "
+                "LinkedIn account to Premium (company profile, Outreach) if you have Premium")
+    return f"the connection note is longer than {limit} characters ({chars}), the most LinkedIn allows"
+
+
+def _connect_problem(c: sqlite3.Connection, company: Company, msg: Message, now: datetime) -> str:
+    """Why this connection request may not go out now (its note's length, the weekly or monthly limit), read
+    afresh; "" for other channels."""
+    if msg.channel != "linkedin_connect":
+        return ""
+    if len(msg.body) > connect_note_limit(company):
+        return _note_too_long(company, len(msg.body))
+    return connect_blocked_message(_connect_state(c, company, now))
+
+
+def _agent_state(c: sqlite3.Connection, company: Company, now: datetime) -> dict[str, Any]:
+    """Whether the agent may send now, and why not: the queue's header."""
+    cfg = company.outreach
+    paused_until = cfg.agent_paused_until if cfg.agent_paused_until and _utc(cfg.agent_paused_until) > now else None
+    sent = _agent_sent_since(c, company.id, now - AGENT_WINDOW)
+    remaining = max(0, cfg.agent_daily_limit - len(sent))
+    if not cfg.agent_sending:
+        blocked = "disabled"
+    elif paused_until is not None:
+        blocked = "paused"
+    elif remaining == 0:
+        blocked = "daily_limit"
+    else:
+        blocked = ""
+    # When the limit is reached, a slot frees up once the oldest counted send is 24 hours old.
+    frees_at = (datetime.fromisoformat(sent[len(sent) - cfg.agent_daily_limit]["sent_at"]) + AGENT_WINDOW
+                if remaining == 0 and sent else None)
+    return {
+        "enabled": cfg.agent_sending,
+        "paused_until": iso(paused_until) if paused_until else None,
+        "pause_reason": cfg.agent_pause_reason if paused_until else "",
+        "daily_limit": cfg.agent_daily_limit,
+        "sent_last_24h": len(sent),
+        "remaining": remaining,
+        "blocked_reason": blocked,
+        "sent_by_agent_24h": sum(1 for r in sent if r["sent_via"] == "agent"),
+        "marked_by_claude_24h": sum(1 for r in sent if r["sent_via"] == "claude"),
+        "limit_frees_at": iso(frees_at) if frees_at else None,
+        **_connect_state(c, company, now),
+    }
+
+
+def agent_blocked_message(state: dict[str, Any]) -> str:
+    """Why the agent may not send now, in words for the agent and the user ("" when it may)."""
+    if state["blocked_reason"] == "disabled":
+        return ("AI agent sending is turned off for this company. Only the user can turn it on, in the dashboard "
+                "(company settings, Outreach)")
+    if state["blocked_reason"] == "paused":
+        return (f"AI agent sending is paused until {state['paused_until']} after a reported problem "
+                f"({state['pause_reason'] or 'no details'}). Only the user can resume it, in the dashboard")
+    if state["blocked_reason"] == "daily_limit":
+        when = f"; the next slot frees up at {state['limit_frees_at']}" if state["limit_frees_at"] else ""
+        return (f"the daily limit of {state['daily_limit']} LinkedIn messages in 24 hours is reached "
+                f"({state['sent_last_24h']} sent){when}. Stop sending for now")
+    return ""
+
+
+def _followup_wait_days(company: Company, step: int) -> int:
+    days = company.outreach.followup_days or [3]
+    return days[max(0, min(step - 1, len(days) - 1))]
+
+
+def _agent_send_problem(c: sqlite3.Connection, company: Company, msg: Message, lead: Lead, now: datetime) -> str:
+    """Why the agent must not send this message, or "" if it may (status and company switches aside)."""
+    if msg.direction != "outbound":
+        return "it is not an outbound message"
+    if msg.sent_at is not None:  # e.g. sent, then set back to approved: never again, and never uncounted
+        return f"it was already recorded as sent on {iso(msg.sent_at)}: a message is never sent twice"
+    if msg.channel not in AGENT_CHANNELS:
+        return f"{msg.channel} messages are never sent by the agent (LinkedIn only): send it yourself"
+    if lead.company_id != company.id:
+        return "the lead belongs to another company"
+    if lead.kind != "person":
+        return "the lead is a company with no contact person"
+    if lead.status in NO_AGENT_LEAD_STATUSES:
+        return f"the lead's status is '{lead.status}': a person handles this conversation"
+    thread = [_message_from_row(r) for r in c.execute("SELECT * FROM messages WHERE lead_id = ? ORDER BY id",
+                                                       (lead.id,))]
+    if any(m.direction == "inbound" for m in thread):
+        return "the lead has replied: answer them yourself"
+    _, reasons, excluded = icp_fit(LeadFacts.from_obj(lead), company.icp)
+    if excluded:
+        return f"the lead is excluded by the ICP ({reasons[0].removeprefix('! ') if reasons else 'never contact'})"
+    if not linkedin_profile_url(lead.linkedin_url):
+        return "the lead has no LinkedIn profile URL (https://www.linkedin.com/in/...)"
+    if msg.channel == "linkedin_connect" and len(msg.body) > connect_note_limit(company):
+        return _note_too_long(company, len(msg.body))
+    # Sent = marked sent or replied, or sent once and set back to another status later (sent_at stays).
+    sent = [m for m in thread if m.id != msg.id and m.direction == "outbound"
+            and (m.status in ("sent", "replied") or m.sent_at is not None)]
+    if msg.channel == "linkedin_connect" and any(m.channel == "linkedin_connect" for m in sent):
+        return "a connection request was already sent to this lead"
+    if any(m.channel == msg.channel and m.step == msg.step for m in sent):
+        return f"step {msg.step} was already sent to this lead on {msg.channel}"
+    sent_times = [_utc(m.sent_at) for m in sent if m.sent_at]
+    if sent_times:
+        due = max(sent_times) + timedelta(days=_followup_wait_days(company, max(m.step for m in sent)))
+        if due > now:
+            return f"the next message to this lead is not due before {iso(due)} (follow-up wait)"
+    return ""
+
+
+def lead_counted_sends(lead_id: int, now: datetime | None = None, conn: sqlite3.Connection | None = None) -> int:
+    """How many of the lead's messages count toward its company's agent limits right now (deleting the lead
+    would free those slots): the daily limit, and the connection-request limits (7 days, or 30 on a free
+    LinkedIn account, whoever sent them)."""
+    now = _utc(now or utcnow())
+    marks = ", ".join("?" * len(AGENT_CHANNELS))
+    with _conn(conn) as c:
+        lead = get_lead(lead_id, conn=c)
+        connect_window = CONNECT_WEEK if monthly_note_limit(get_company(lead.company_id, conn=c)) is None else NOTE_MONTH
+        return c.execute(f"SELECT COUNT(*) FROM messages WHERE lead_id = ? AND direction = 'outbound' AND ("
+                         f"(channel IN ({marks}) AND sent_via IN ({', '.join('?' * len(_AGENT_COUNTED_VIA))}) "
+                         f"AND sent_at > ?) OR (channel = 'linkedin_connect' AND sent_at > ?))",
+                         (lead_id, *AGENT_CHANNELS, *_AGENT_COUNTED_VIA, iso(now - AGENT_WINDOW),
+                          iso(now - connect_window))).fetchone()[0]
+
+
+def agent_sending_status(company_id: int, now: datetime | None = None,
+                         conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """send_queue's header without the items: on/off, pause, limit, sends in the last 24 hours, blocked_reason."""
+    with _conn(conn) as c:
+        return _agent_state(c, get_company(company_id, conn=c), _utc(now or utcnow()))
+
+
+def send_queue(company_id: int, limit: int = 10, now: datetime | None = None,
+               conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """The LinkedIn messages an AI agent may send now, exactly as approved, oldest first.
+
+    Empty with a blocked_reason when agent sending is off ("disabled"), paused after a reported problem
+    ("paused") or the rolling 24-hour limit is used up ("daily_limit"). Holds at most one message per lead
+    and never more than the remaining daily allowance. Connection requests also stay within the weekly
+    limit (AGENT_WEEKLY_CONNECT_LIMIT in any 7 days) and, on a free LinkedIn account, the monthly note
+    limit (5 in any 30 days): beyond them connection requests are left out, with connect_blocked_reason
+    ("weekly_connect_limit" or "monthly_note_limit") and a reason in `skipped`, while LinkedIn messages
+    still flow. Approved LinkedIn messages that may not be sent are listed in `skipped` with the reason.
+    Reading the queue changes nothing.
+    """
+    now = _utc(now or utcnow())
+    limit = max(1, min(int(limit), AGENT_QUEUE_MAX))
+    with _conn(conn) as c:
+        company = get_company(company_id, conn=c)
+        state = _agent_state(c, company, now)
+        out: dict[str, Any] = {**state, "items": [], "skipped": [], "eligible_total": 0}
+        if state["blocked_reason"]:
+            return out
+        rows = c.execute(
+            f"SELECT * FROM messages WHERE company_id = ? AND direction = 'outbound' AND status = 'approved' "
+            f"AND channel IN ({', '.join('?' * len(AGENT_CHANNELS))}) ORDER BY created_at, id",
+            (company_id, *AGENT_CHANNELS)).fetchall()
+        leads: dict[int, Lead] = {}
+        queued_leads: set[int] = set()
+        connects = 0  # connection requests queued so far: they take the weekly / monthly slots that are left
+        for row in rows:
+            msg = _message_from_row(row)
+            if msg.lead_id not in leads:
+                leads[msg.lead_id] = get_lead(msg.lead_id, conn=c)
+            lead = leads[msg.lead_id]
+            problem = _agent_send_problem(c, company, msg, lead, now)
+            if not problem and lead.id in queued_leads:
+                problem = "another message to this lead is ahead in the queue (one message per lead at a time)"
+            if not problem and msg.channel == "linkedin_connect" and connects >= state["connect_remaining"]:
+                problem = connect_blocked_message(state, ahead=connects)
+                queued_leads.add(lead.id)  # the lead's connection request goes first, when a slot frees up
+            if problem:
+                out["skipped"].append({"message_id": msg.id, "lead_id": lead.id, "reason": problem})
+                continue
+            queued_leads.add(lead.id)
+            connects += msg.channel == "linkedin_connect"
+            out["eligible_total"] += 1
+            if len(out["items"]) < min(limit, state["remaining"]):
+                out["items"].append({
+                    "message_id": msg.id, "lead_id": lead.id, "lead_name": lead.full_name, "lead_title": lead.title,
+                    "lead_company": lead.lead_company, "linkedin_url": linkedin_profile_url(lead.linkedin_url),
+                    "channel": msg.channel, "step": msg.step, "body": msg.body,
+                })
+        return out
+
+
+def confirm_agent_sent(message_id: int, now: datetime | None = None,
+                       conn: sqlite3.Connection | None = None) -> Message:
+    """Record that the AI agent sent this approved LinkedIn message, exactly as approved.
+
+    Refused (ValueError, with the reason) unless the company has agent sending on, isn't paused and is under
+    its rolling 24-hour limit, and the message is approved and in the send queue; a connection request also
+    needs a note within the account's length limit and a free slot in the weekly connection limit and, on a
+    free LinkedIn account, the monthly note limit. Every check runs under SQLite's write lock (BEGIN
+    IMMEDIATE), and the UPDATE repeats the limits, the never-sent and the duplicate-step checks itself, so two
+    agents confirming at once can't both take the last slot or send the same step twice. Marks the message
+    sent like update_message(status="sent") does, with sent_via="agent", and moves a new or qualified lead
+    to 'contacted'. Confirming again a message the agent already confirmed returns it unchanged.
+    """
+    now = _utc(now or utcnow())
+    with _write_locked(conn) as c:
+        msg = get_message(message_id, conn=c)
+        if msg.status == "sent" and msg.sent_via == "agent":
+            return msg
+        company = get_company(msg.company_id, conn=c)
+        state = _agent_state(c, company, now)
+        if state["blocked_reason"]:
+            raise ValueError(f"not recorded: {agent_blocked_message(state)}")
+        if msg.status != "approved":
+            raise ValueError(f"not recorded: message {message_id} is '{msg.status}', not 'approved'. The agent only "
+                             "sends messages the user approved, from get_send_queue")
+        problem = _agent_send_problem(c, company, msg, get_lead(msg.lead_id, conn=c), now)
+        if problem:
+            raise ValueError(f"not recorded: message {message_id} is not in the send queue: {problem}")
+        if msg.channel == "linkedin_connect" and state["connect_blocked_reason"]:
+            raise ValueError(f"not recorded: {connect_blocked_message(state)}")
+        stamp = iso(now)
+        # The connection-request limits, repeated in the UPDATE like the daily limit: the note's length for the
+        # account, the weekly limit and, on a free account, the monthly note limit.
+        connect_sql, connect_args = "", []
+        if msg.channel == "linkedin_connect":
+            connect_sql = (f"AND length(body) <= ? AND (SELECT COUNT(*) FROM messages WHERE {_CONNECT_SENT_SQL}) < ? ")
+            connect_args = [connect_note_limit(company), company.id, iso(now - CONNECT_WEEK),
+                            AGENT_WEEKLY_CONNECT_LIMIT]
+            notes_max = monthly_note_limit(company)
+            if notes_max is not None:
+                connect_sql += f"AND (SELECT COUNT(*) FROM messages WHERE {_CONNECT_SENT_SQL}) < ? "
+                connect_args += [company.id, iso(now - NOTE_MONTH), notes_max]
+        cur = c.execute(
+            f"UPDATE messages SET status = 'sent', sent_at = ?, sent_via = 'agent', updated_at = ? "
+            f"WHERE id = ? AND status = 'approved' AND sent_at IS NULL AND channel = ? "
+            f"AND (SELECT COUNT(*) FROM messages WHERE {_AGENT_SENT_SQL}) < ? {connect_sql}"
+            f"AND NOT EXISTS (SELECT 1 FROM messages o WHERE o.lead_id = ? AND o.id != ? AND o.direction = 'outbound' "
+            f"AND (o.status IN ('sent', 'replied') OR o.sent_at IS NOT NULL) AND o.channel = ? "
+            f"AND (o.step = ? OR o.channel = 'linkedin_connect'))",
+            (stamp, stamp, message_id, msg.channel, company.id, *AGENT_CHANNELS, *_AGENT_COUNTED_VIA,
+             iso(now - AGENT_WINDOW), company.outreach.agent_daily_limit, *connect_args,
+             msg.lead_id, message_id, msg.channel, msg.step))
+        if cur.rowcount != 1:  # another process got there first: it confirmed this message, or took the last slot
+            again = get_message(message_id, conn=c)
+            if again.status == "sent" and again.sent_via == "agent":
+                return again
+            if again.status != "approved":
+                raise ValueError(f"not recorded: message {message_id} is now '{again.status}', not 'approved'")
+            reason = agent_blocked_message(_agent_state(c, company, now)) or _agent_send_problem(
+                c, company, again, get_lead(again.lead_id, conn=c), now) or _connect_problem(
+                c, company, again, now) or (
+                f"the daily limit of {company.outreach.agent_daily_limit} LinkedIn messages in 24 hours is reached. "
+                "Stop sending for now")
+            raise ValueError(f"not recorded: {reason}")
+        c.execute("UPDATE leads SET status = 'contacted', updated_at = ? WHERE id = ? "
+                  "AND status IN ('new', 'qualified')", (stamp, msg.lead_id))
+        return get_message(message_id, conn=c)
+
+
+def update_message_as(message_id: int, via: str, *, status: str | None = None, body: str | None = None,
+                      subject: str | None = None, now: datetime | None = None,
+                      conn: sqlite3.Connection | None = None) -> Message:
+    """update_message, also recording who marked it sent (Message.sent_via) when this call marks it sent.
+
+    The MCP server passes via="claude": LinkedIn messages Claude records as sent count toward the agent's
+    daily limit, so recording a send this way never gets around it. That includes an outbound message first
+    recorded as 'replied' (sent, then answered), which update_message dates as sent too.
+    """
+    if via not in ("agent", "claude"):
+        raise ValueError("via must be 'agent' or 'claude'")
+    with _conn(conn) as c:
+        before = get_message(message_id, conn=c)
+        updated = update_message(message_id, status=status, body=body, subject=subject, conn=c)
+        if ((status == "sent" and before.status != "sent")
+                or (status == "replied" and before.direction == "outbound" and before.sent_at is None)):
+            stamp = iso(_utc(now or utcnow()))
+            c.execute("UPDATE messages SET sent_via = ?, sent_at = ?, updated_at = ? WHERE id = ?",
+                      (via, stamp, stamp, message_id))
+            updated = get_message(message_id, conn=c)
+        return updated
+
+
+def _save_agent_pause(c: sqlite3.Connection, company_id: int, until: datetime | None, reason: str) -> None:
+    """Write only the pause fields of a company's outreach settings (no rescoring).
+
+    Callers hold the write lock (_write_locked), as update_company does, so a profile save at the same
+    moment can't undo the pause, and the pause can't undo the save.
+    """
+    row = c.execute("SELECT outreach FROM companies WHERE id = ?", (company_id,)).fetchone()
+    if row is None:
+        raise NotFound(f"company {company_id} not found")
+    current = _loads(row["outreach"], {})
+    outreach = {**(current if isinstance(current, dict) else {}),
+                "agent_paused_until": iso(until) if until is not None else None,
+                "agent_pause_reason": reason[:AGENT_PAUSE_REASON_MAX]}
+    c.execute("UPDATE companies SET outreach = ?, updated_at = ? WHERE id = ?",
+              (json.dumps(outreach), iso(), company_id))
+
+
+NO_PROBLEM_DETAILS = "The agent reported a problem without details"
+
+
+def report_send_problem(company_id: int, problem: str, message_id: int | None = None, hours: int = 24,
+                        now: datetime | None = None, conn: sqlite3.Connection | None = None) -> Company:
+    """The agent's kill switch: pause agent sending for the company and store the problem.
+
+    It always pauses: an empty problem is stored as NO_PROBLEM_DETAILS, and a message_id that is unknown or
+    belongs to another company never stops the pause (the other company, sent from the same browser, is
+    paused too). The pause lasts `hours` (an existing longer pause is kept) and only the user lifts it early,
+    in the dashboard. The message the agent was working on stays approved, or goes back to approved if the
+    agent confirmed it in the last 24 hours, so nothing is lost; the pause reason then says so, because it
+    may have gone out on LinkedIn: the user checks before resuming.
+    Raises NotFound only when neither the company nor the message exists.
+    """
+    now = _utc(now or utcnow())
+    text = " ".join(str(problem or "").split()) or NO_PROBLEM_DETAILS
+    hours = max(1, min(int(hours), MAX_AGENT_PAUSE_HOURS))
+    with _write_locked(conn) as c:
+        row = c.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone() if message_id else None
+        msg = _message_from_row(row) if row is not None else None
+        targets = [cid for cid in dict.fromkeys([company_id, msg.company_id if msg else None]) if cid is not None
+                   and c.execute("SELECT 1 FROM companies WHERE id = ?", (cid,)).fetchone()]
+        if not targets:
+            raise NotFound(f"company {company_id} not found")
+        if (msg is not None and msg.direction == "outbound" and msg.status == "sent" and msg.sent_via == "agent"
+                and msg.sent_at and _utc(msg.sent_at) > now - AGENT_WINDOW):
+            c.execute("UPDATE messages SET status = 'approved', sent_at = NULL, sent_via = '', updated_at = ? "
+                      "WHERE id = ?", (iso(now), msg.id))
+            note = (f" [OpenBerry: message {msg.id} had been confirmed as sent and is approved again. Check on "
+                    "LinkedIn whether it went out, and click Mark sent if it did, before you resume.]")
+            text = text[:AGENT_PAUSE_REASON_MAX - len(note)] + note
+        for cid in targets:
+            current = get_company(cid, conn=c).outreach.agent_paused_until
+            until = now + timedelta(hours=hours)
+            if current is not None and _utc(current) > until:
+                until = _utc(current)
+            _save_agent_pause(c, cid, until, text)
+        return get_company(targets[0], conn=c)
+
+
+def resume_agent_sending(company_id: int, conn: sqlite3.Connection | None = None) -> Company:
+    """Lift the agent's pause (the dashboard's Resume button). Agent sending stays on or off as it was."""
+    with _write_locked(conn) as c:
+        _save_agent_pause(c, company_id, None, "")
+        return get_company(company_id, conn=c)

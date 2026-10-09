@@ -25,7 +25,7 @@
         {% if lead.linkedin_url|safe_url %}<a class="btn btn-sm" href="{{ lead.linkedin_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("linkedin", 14) }}LinkedIn</a>{% endif %}
         {% if lead.profile_url|safe_url %}<a class="btn btn-sm" href="{{ lead.profile_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("external", 14) }}Profile</a>{% endif %}
         {% if lead.website|safe_url %}<a class="btn btn-sm" href="{{ lead.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("globe", 14) }}Website</a>{% endif %}
-        {% if lead.email|mailto %}<a class="btn btn-sm" href="{{ lead.email|mailto }}">{{ m.icon("mail", 14) }}{{ lead.email }}</a>{% endif %}
+        {% if lead.email|mailto %}<a class="btn btn-sm" href="{{ lead.email|mailto }}" target="_blank" rel="noopener noreferrer">{{ m.icon("mail", 14) }}{{ lead.email }}</a>{% endif %}
         {% if lead.phone %}<span class="btn btn-sm btn-static">{{ m.icon("phone", 14) }}{{ lead.phone }}</span>{% endif %}
         {% if lead.github_username %}<a class="btn btn-sm" href="https://github.com/{{ lead.github_username|urlencode }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("github", 14) }}{{ lead.github_username }}</a>{% endif %}
       </p>
@@ -107,8 +107,9 @@
     </section>
 
     <section class="card" id="outreach" aria-labelledby="outreach-title">
-      <header class="card-head"><div><h2 id="outreach-title">Outreach</h2><p class="card-sub">Drafts are never sent automatically. Approve, copy, send it yourself, then mark it sent.</p></div></header>
+      <header class="card-head"><div><h2 id="outreach-title">Outreach</h2><p class="card-sub">Drafts are never sent. Approve, copy, send it yourself, then mark it sent{% if company.outreach.agent_sending %}, or let your AI agent send approved LinkedIn messages (<a href="{{ base }}/outreach#agent">agent sending</a>){% endif %}.</p></div></header>
       {% if messages %}
+      {% set note_max = connect_note_limit(company) %}
       <div class="chat">
         {% for msg in messages %}
         {% set connect = msg.channel == "linkedin_connect" %}
@@ -128,11 +129,12 @@
             <input class="input" id="msg-{{ msg.id }}-subject" name="subject" value="{{ msg.subject }}" placeholder="Subject">
             {% endif %}
             <label class="sr-only" for="msg-{{ msg.id }}-body">Message</label>
-            <textarea class="input" id="msg-{{ msg.id }}-body" name="body" rows="{{ 4 if connect else 7 }}"{% if connect %} data-maxlen="{{ LINKEDIN_CONNECT_LIMIT }}" data-counter="msg-{{ msg.id }}-count"{% endif %}>{{ msg.body }}</textarea>
-            {% if connect %}<p class="counter{{ ' over' if msg.body|length > LINKEDIN_CONNECT_LIMIT }}" id="msg-{{ msg.id }}-count" aria-live="polite">{{ msg.body|length }} / {{ LINKEDIN_CONNECT_LIMIT }}{% if msg.body|length > LINKEDIN_CONNECT_LIMIT %}: too long for a connection note{% endif %}</p>{% endif %}
+            <textarea class="input" id="msg-{{ msg.id }}-body" name="body" rows="{{ 4 if connect else 7 }}"{% if connect %} data-maxlen="{{ note_max }}" data-counter="msg-{{ msg.id }}-count"{% endif %}>{{ msg.body }}</textarea>
+            {% if connect %}<p class="counter{{ ' over' if msg.body|length > note_max }}" id="msg-{{ msg.id }}-count" aria-live="polite">{{ msg.body|length }} / {{ note_max }}{% if msg.body|length > note_max %}: too long for a connection note{% endif %}</p>
+            <p class="help">Notes from a {{ linkedin_account_label(company) }} LinkedIn account: up to {{ note_max }} characters{% if note_max == LINKEDIN_CONNECT_LIMIT_FREE %}, on {{ LINKEDIN_FREE_NOTES_PER_MONTH }} connection requests a month (Premium: {{ LINKEDIN_CONNECT_LIMIT }} characters, every request){% endif %}. <a href="{{ base }}/settings#f-outreach-linkedin_account">Change</a></p>{% endif %}
             <div class="btn-row">
               <button class="btn btn-sm" type="submit" name="action" value="save">Save</button>
-              {% if msg.status == "draft" %}<button class="btn btn-sm" type="submit" name="action" value="approve">{{ m.icon("check", 14) }}Approve</button>{% endif %}
+              {% if msg.status == "draft" %}<button class="btn btn-sm" type="submit" name="action" value="approve">{{ m.icon("check", 14) }}Approve</button>{% else %}<button class="btn btn-sm" type="submit" name="action" value="approve" title="Saving changed text without approving makes it a draft again">{{ m.icon("check", 14) }}Save &amp; approve</button>{% endif %}
               <button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button>
               {{ m.copy_button("#msg-" ~ msg.id ~ "-body") }}
               <span class="spacer"></span>
@@ -143,7 +145,7 @@
         </article>
         {% else %}
         <article class="bubble bubble-out" id="msg-{{ msg.id }}">
-          <header class="bubble-head">{{ m.msg_pill(msg.status) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ m.when(msg.sent_at or msg.updated_at) }}</span></header>
+          <header class="bubble-head">{{ m.msg_pill(msg.status) }}{{ m.sent_via(msg) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ m.when(msg.sent_at or msg.updated_at) }}</span></header>
           {% if msg.subject %}<p class="bubble-subject">{{ msg.subject }}</p>{% endif %}
           <div class="bubble-body" id="msg-{{ msg.id }}-text">{{ msg.body }}</div>
           <div class="btn-row">

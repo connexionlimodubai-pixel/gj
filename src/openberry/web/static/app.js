@@ -217,7 +217,13 @@
   function valueOf(field) {
     const boxes = $$('input[type="checkbox"]', field);
     if (boxes.length) {
-      return boxes.filter((b) => b.checked).map((b) => b.closest("label").textContent.trim()).join(", ");
+      // A checkbox card (one yes/no option) shows its title, not its description.
+      const text = (b) => {
+        const label = b.closest("label");
+        const title = label && $(".radio-title", label);
+        return (title || label).textContent.trim();
+      };
+      return boxes.filter((b) => b.checked).map(text).join(", ");
     }
     const radios = $$('input[type="radio"]', field);
     if (radios.length) {

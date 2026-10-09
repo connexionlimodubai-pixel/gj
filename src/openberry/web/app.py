@@ -148,8 +148,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/healthz", include_in_schema=False)
-    def healthz() -> dict[str, bool]:
-        return {"ok": True}
+    def healthz() -> dict[str, bool | str]:
+        # "app" tells OpenBerry apart from another program's health check on the same port (desktop.py).
+        return {"ok": True, "app": "openberry"}
 
     app.include_router(auth.router)
     app.include_router(api.router)

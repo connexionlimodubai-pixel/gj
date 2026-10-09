@@ -60,6 +60,12 @@ SCAN_STATUSES: dict[str, str] = {
     "nothing_configured": "No sources configured",
 }
 JOB_BOARD_PROVIDERS = ("greenhouse", "lever", "ashby")
+# Channels an AI agent may send through the send queue (email is always sent by the user).
+AGENT_CHANNELS = ("linkedin_connect", "linkedin_dm")
+# Message.sent_via: who recorded the send. "" = the user (dashboard, API, CSV), "agent" = confirm_message_sent,
+# "claude" = Claude marked it sent with update_message (counts toward the agent's daily limit too).
+SENT_VIA = ("", "agent", "claude")
+AGENT_PAUSE_REASON_MAX = 500
 
 
 # --------------------------------------------------------------------------------------
@@ -203,6 +209,36 @@ class OutreachConfig(_Model):
         default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot lead, however it turned hot (scan, Claude, import or edit). Nothing is ever sent automatically.")
     banned_words: StrList = Field(default_factory=list, description="Words/phrases messages must never use")
     extra_instructions: str = Field(default="", description="Anything Claude must respect when writing messages")
+    # LinkedIn's own limits on connection-request notes depend on the account (LinkedIn help a563153, a6239760):
+    # outreach.connect_note_limit() and the AI agent's send queue apply the matching ones.
+    linkedin_account: Literal["free", "premium"] = Field(
+        default="free", description="The LinkedIn account messages are sent from. free (Basic): LinkedIn lets you add "
+                                    "a personal note to at most 5 connection requests a month, each at most 200 "
+                                    "characters. premium: a note on every request, up to 300 characters.")
+    # AI agent sending: an MCP-capable browser agent in the user's own browser sends the LinkedIn messages the
+    # user approved, through the send queue (repo.send_queue). These four are changed in the dashboard only.
+    agent_sending: bool = Field(
+        default=False, description="Let an AI agent in your own browser send the LinkedIn messages you approved")
+    agent_daily_limit: int = Field(
+        default=15, ge=1, le=50, description="Most LinkedIn messages the agent may send in any 24 hours")
+    agent_paused_until: datetime | None = Field(
+        default=None, description="Agent sending is paused until then (the agent reported a problem)")
+    agent_pause_reason: str = Field(default="", description="The problem the agent reported")
+
+    @field_validator("linkedin_account", mode="before")
+    @classmethod
+    def _account_word(cls, v: Any) -> Any:
+        return v.strip().lower() if isinstance(v, str) else v
+
+    @field_validator("agent_paused_until")
+    @classmethod
+    def _utc_pause(cls, v: datetime | None) -> datetime | None:
+        return v.replace(tzinfo=timezone.utc) if v is not None and v.tzinfo is None else v
+
+    @field_validator("agent_pause_reason")
+    @classmethod
+    def _short_reason(cls, v: str) -> str:
+        return v[:AGENT_PAUSE_REASON_MAX]
 
 
 class NotifyConfig(_Model):
@@ -381,6 +417,8 @@ class Message(_Model):
     created_at: datetime
     updated_at: datetime
     sent_at: datetime | None = None
+    sent_via: str = Field(default="", description="'' = marked sent by the user, 'agent' = the AI agent sent it, "
+                                                   "'claude' = Claude marked it sent")
 
 
 class ScanRun(_Model):

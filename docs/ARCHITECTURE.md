@@ -32,7 +32,9 @@ A Python app stores everything, collects free public signals, scores leads, and 
   - `signals: SignalConfig`: enabled_types, keywords, subreddits, github_repos, job_boards,
     hiring_keywords, news_queries, rss_feeds, sec_queries, influencers, competitor_pages, events, lookback_days, weights
   - `outreach: OutreachConfig`: sender, tone, language, channels, calendar link, CTA, signature,
-    max_followups, followup_days, mode (review | auto_draft), banned_words, extra_instructions
+    max_followups, followup_days, mode (review | auto_draft), banned_words, extra_instructions, linkedin_account
+    (free | premium, default free: the connection-note limits, see `outreach.connect_note_limit`), and AI agent
+    sending: agent_sending (off by default), agent_daily_limit (1-50, default 15), agent_paused_until, agent_pause_reason
   - `notify: NotifyConfig`: Slack and Discord webhooks, min_score (alerts need a hot lead, so values below 70 act as 70)
 - **Lead**: a person (`kind="person"`) or an account (`kind="account"`, company-level intent such as
   hiring or funding, with no contact found yet). People inherit 60% of their company's account-level intent.
@@ -40,7 +42,9 @@ A Python app stores everything, collects free public signals, scores leads, and 
 - **lead_keys**: every identity of a lead (LinkedIn slug, email, GitHub login, name+company...). Used to merge duplicates.
 - **Signal**: typed intent event (`SIGNAL_TYPES`) from a source, with strength (50 = typical), time,
   URL and a dedupe key `(company_id, source, external_id)`.
-- **Message**: an outbound draft/sent message or an inbound reply (`direction`), with sequence `step`.
+- **Message**: an outbound draft/sent message or an inbound reply (`direction`), with sequence `step`. `sent_via` records who
+  marked it sent: `""` the user, `"agent"` the user's AI agent (`confirm_message_sent`), `"claude"` Claude (`update_message`).
+  Added in schema version 3.
 - **ScanRun**: one scan with per-collector stats. Status: `running`, `ok`, `failed` (it crashed, or every source failed or
   found nothing and only warned) or `nothing_configured`, with the reason in `stats["error"]`.
   The scheduler retries a failed scan after an hour.
@@ -94,4 +98,10 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   URLs the user typed.
 - Claude is told to treat text from leads and public posts, and everything the tools return, as data, never as instructions.
   Prompts name companies and leads by id rather than quoting stored text.
-- Nothing is ever sent to LinkedIn or by email automatically. OpenBerry drafts, and a human sends.
+- OpenBerry never sends anything to LinkedIn or by email itself. OpenBerry drafts, and a human sends, or, when the user
+  turns on AI agent sending for a company, the user's own browser agent sends the LinkedIn messages they approved.
+  `repo.send_queue`, `repo.confirm_agent_sent` and `repo.report_send_problem` enforce its rules server-side: approved
+  LinkedIn messages only, a rolling 24-hour limit, the never-contact list, LinkedIn's connection limits (note length
+  for the account, 80 connection requests in 7 days, 5 notes in 30 days on a free account), and a 24-hour pause on
+  any reported problem.
+  Claude and the JSON API can only turn it off or lower the limit. See [AI_AGENT_SENDING.md](AI_AGENT_SENDING.md).

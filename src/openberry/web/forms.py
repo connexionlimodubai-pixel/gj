@@ -15,7 +15,7 @@ from typing import Any
 from pydantic import ValidationError
 from starlette.datastructures import FormData
 
-from ..models import JOB_BOARD_PROVIDERS, CompanyIn, LeadIn, SignalConfig, SignalIn, split_list
+from ..models import JOB_BOARD_PROVIDERS, CompanyIn, LeadIn, OutreachConfig, SignalConfig, SignalIn, split_list
 
 NESTED = ("icp", "signals", "outreach", "notify")
 
@@ -23,7 +23,7 @@ NESTED = ("icp", "signals", "outreach", "notify")
 @dataclass(frozen=True)
 class Field:
     name: str  # form field name; dotted for nested configs
-    kind: str  # text | list | int | checks | choice
+    kind: str  # text | list | int | checks | choice | bool (a single checkbox)
     step: str  # wizard step the field lives on
 
 
@@ -57,14 +57,32 @@ FIELDS: tuple[Field, ...] = (
         "sender_name", "sender_title", "tone", "language", "call_to_action", "calendar_link", "signature",
         "extra_instructions", "followup_days")),
     Field("outreach.mode", "choice", "outreach"),
+    Field("outreach.linkedin_account", "choice", "outreach"),
     Field("outreach.channels", "checks", "outreach"),
     Field("outreach.banned_words", "list", "outreach"),
     Field("outreach.max_followups", "int", "outreach"),
+    # AI agent sending. The pause (agent_paused_until, agent_pause_reason) is not a form field:
+    # build_company(keep=...) carries it over, so saving the profile never lifts a pause.
+    Field("outreach.agent_sending", "bool", "outreach"),
+    Field("outreach.agent_daily_limit", "int", "outreach"),
     *(Field(f"notify.{n}", "text", "outreach") for n in ("slack_webhook_url", "discord_webhook_url")),
     Field("notify.min_score", "int", "outreach"),
 )
 FIELD_BY_NAME = {f.name: f for f in FIELDS}
 HONEYPOT = "fax_number"  # hidden from people; bots that fill every input reveal themselves
+CHECKED = "true"  # the value of a single checkbox (kind "bool") when it is ticked
+TRUTHY = {"true", "on", "1", "yes"}
+
+
+def int_bounds(model: Any, name: str, default: tuple[int, int]) -> tuple[int, int]:
+    """(ge, le) of a pydantic model's int field, so forms show and check the limits the model enforces."""
+    low, high = default
+    for meta in model.model_fields[name].metadata:
+        low, high = getattr(meta, "ge", low), getattr(meta, "le", high)
+    return int(low), int(high)
+
+
+AGENT_LIMIT_RANGE = int_bounds(OutreachConfig, "agent_daily_limit", (1, 50))
 
 
 # --------------------------------------------------------------------------------------
@@ -77,6 +95,8 @@ def values_from_form(form: FormData) -> dict[str, Any]:
     for f in FIELDS:
         if f.kind == "checks":
             values[f.name] = [str(v) for v in form.getlist(f.name)]
+        elif f.kind == "bool":  # an unticked checkbox is not submitted at all
+            values[f.name] = CHECKED if str(form.get(f.name) or "").strip().lower() in TRUTHY else ""
         else:
             raw = form.get(f.name)
             values[f.name] = raw if isinstance(raw, str) else ""
@@ -96,6 +116,8 @@ def company_to_values(company: CompanyIn) -> dict[str, Any]:
             values[f.name] = ", ".join(str(d) for d in value or [])
         elif f.kind == "checks":
             values[f.name] = list(value or [])
+        elif f.kind == "bool":
+            values[f.name] = CHECKED if value else ""
         elif f.kind == "list":
             values[f.name] = "\n".join(value or [])
         else:
@@ -157,6 +179,8 @@ def _payload(values: dict[str, Any]) -> dict[str, Any]:
         raw = values.get(f.name, [] if f.kind == "checks" else "")
         if f.kind == "checks":
             target[key] = list(raw)
+        elif f.kind == "bool":
+            target[key] = str(raw).strip().lower() in TRUTHY
         elif f.kind == "int":
             if str(raw).strip():
                 target[key] = int(str(raw).strip())
@@ -165,7 +189,7 @@ def _payload(values: dict[str, Any]) -> dict[str, Any]:
         else:
             target[key] = str(raw).strip()
     data["website"] = _normalize_website(data.get("website", ""))
-    for key in ("tone", "mode", "followup_days"):  # blank -> model default
+    for key in ("tone", "mode", "followup_days", "linkedin_account"):  # blank -> model default
         if not data["outreach"].get(key):
             data["outreach"].pop(key, None)
     return data

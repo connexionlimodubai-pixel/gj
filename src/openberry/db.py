@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS messages (
     generated_by TEXT NOT NULL DEFAULT 'template',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    sent_at TEXT
+    sent_at TEXT,
+    sent_via TEXT NOT NULL DEFAULT ''  -- who recorded the send: '' the user, 'agent' the AI agent, 'claude' Claude
 );
 CREATE INDEX IF NOT EXISTS ix_messages_company_status ON messages(company_id, status);
 
@@ -136,7 +137,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 CREATE INDEX IF NOT EXISTS ix_scan_runs_company ON scan_runs(company_id, started_at DESC);
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -149,6 +150,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE leads ADD COLUMN alerted_at TEXT")
             # Leads already hot were alerted by the scan that made them hot: don't alert them all again.
             conn.execute("UPDATE leads SET alerted_at = updated_at WHERE tier = 'hot'")
+        message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        if "sent_via" not in message_columns:  # version 3: AI agent sending counts the agent's sends
+            conn.execute("ALTER TABLE messages ADD COLUMN sent_via TEXT NOT NULL DEFAULT ''")
+        # After the column exists (an old database gets it just above): the agent's rolling 24-hour count.
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_messages_company_sent ON messages(company_id, sent_via, sent_at)")
+        # Older versions left sent_at empty on an outbound message recorded straight away as 'replied' (sent, then
+        # answered). The connection-request limits count sends by sent_at, so date those by their last update.
+        conn.execute("UPDATE messages SET sent_at = updated_at WHERE direction = 'outbound' "
+                     "AND status IN ('sent', 'replied') AND sent_at IS NULL")
         if 0 < version < 2:  # identity keys became Unicode-aware (accents, Arabic, CJK...): re-key old rows
             from . import repo
 

@@ -23,8 +23,9 @@
   <section class="card" aria-labelledby="h-desktop">
     <h2 id="h-desktop" class="title-icon">{{ m.icon("sparkles") }}Claude Desktop</h2>
     <p>Add this to <code>claude_desktop_config.json</code> (Settings → Developer → Edit config), then restart Claude:</p>
+    {% if install_warning %}<p class="callout callout-warning" id="install-warning">{{ m.icon("alert", 14) }}<span>{{ install_warning }}</span></p>{% endif %}
     <div class="code-block"><pre id="cfg-desktop">{{ desktop_config }}</pre>{{ m.copy_button("#cfg-desktop", "Copy", "btn btn-sm btn-ghost") }}</div>
-    <p class="small muted">{% if launch.docker %}This runs <code>openberry mcp</code> inside the <code>openberry</code> container, so Docker must be running on the machine where Claude is.{% else %}The command is a full path because Claude Desktop doesn't use your terminal's PATH. Moved the folder or the virtual environment? Reopen this page for an updated snippet.{% endif %}</p>
+    <p class="small muted">{% if launch.docker %}This runs <code>openberry mcp</code> inside the <code>openberry</code> container, so Docker must be running on the machine where Claude is.{% elif packaged %}The command is the <code>openberry-cli</code> program that comes with OpenBerry. Claude can use it while OpenBerry is closed. Moved OpenBerry to another folder? Reopen this page and copy the settings again.{% else %}The command is a full path because Claude Desktop doesn't use your terminal's PATH. Moved the folder or the virtual environment? Reopen this page for an updated snippet.{% endif %}</p>
   </section>
 
   <section class="card" aria-labelledby="h-remote">
@@ -67,7 +68,7 @@
 
   <section class="card span-all" aria-labelledby="h-api">
     <h2 id="h-api" class="title-icon">{{ m.icon("plug") }}JSON API</h2>
-    <p>For n8n, Activepieces, Make or your own scripts. {% if auth_enabled or api_token_set %}Send <code>Authorization: Bearer $OPENBERRY_API_TOKEN</code> with every request.{% else %}Local mode: the API is open on this machine. Set <code>OPENBERRY_PASSWORD</code> and <code>OPENBERRY_API_TOKEN</code> before exposing it.{% endif %} The OpenAPI schema is at <a href="/api/openapi.json">/api/openapi.json</a>.</p>
+    <p>For n8n, Activepieces, Make or your own scripts. {% if auth_enabled or api_token_set %}Send <code>Authorization: Bearer $OPENBERRY_API_TOKEN</code> with every request.{% else %}Local mode: the API is open on this machine. Set <code>OPENBERRY_PASSWORD</code> and <code>OPENBERRY_API_TOKEN</code> before exposing it.{% endif %} The OpenAPI schema is at <a href="/api/openapi.json" target="_blank" rel="noopener noreferrer">/api/openapi.json</a>.</p>
     <div class="table-wrap">
       <table class="table table-compact api-table">
         <thead><tr><th scope="col">Method</th><th scope="col">Path</th><th scope="col">What it does</th></tr></thead>

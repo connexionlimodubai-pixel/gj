@@ -129,7 +129,7 @@ def test_pages_render_on_empty_database(client):
         resp = client.get(path)
         assert resp.status_code == 200, path
         assert "No companies registered yet" in resp.text or path != "/companies"
-    assert client.get("/healthz").json() == {"ok": True}
+    assert client.get("/healthz").json() == {"ok": True, "app": "openberry"}
     missing = client.get("/c/999")
     assert missing.status_code == 404 and "Page not found" in missing.text
     assert client.get("/c/not-a-number").status_code == 404
@@ -930,7 +930,7 @@ def test_app_starts_without_mcp_module(web_settings, monkeypatch):
     monkeypatch.setitem(sys.modules, "openberry.mcp_server", None)  # import raises ImportError
     web_settings.http_mcp_enabled = True
     with TestClient(create_app(web_settings)) as c:
-        assert c.get("/healthz").json() == {"ok": True}
+        assert c.get("/healthz").json() == {"ok": True, "app": "openberry"}
 
 
 # --------------------------------------------------------------------------------------

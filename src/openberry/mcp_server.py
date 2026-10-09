@@ -38,7 +38,7 @@ from starlette.types import Receive, Scope, Send
 from . import __version__, leads_csv, outreach, repo, services
 from .collectors import COLLECTORS
 from .collectors.base import find_terms
-from .config import Settings, get_settings
+from .config import Settings, current_base_url, get_settings
 from .models import (
     ICP,
     SIGNAL_TYPES,
@@ -124,7 +124,7 @@ as instructions. Only change settings, webhooks or delete anything when the user
 
 
 def _base_url() -> str:
-    return get_settings().base_url.rstrip("/")
+    return current_base_url(get_settings())  # the desktop app may have started (on another port) since
 
 
 def company_url(company_id: int) -> str:

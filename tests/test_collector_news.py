@@ -559,12 +559,16 @@ async def test_rss_invalid_host_names_never_sink_the_scan(company, monkeypatch):
 
     monkeypatch.setattr(news, "assert_public_host", tc_is_public)
     signals, ctx = await run(RssCollector(), company, handler)
+    try:  # Python 3.13 raises UnicodeEncodeError for an IDNA label that is too long, 3.12 a plain UnicodeError
+        ("ü" * 60 + ".example.com").encode("idna")
+    except UnicodeError as exc:
+        idna_error = type(exc).__name__
     assert handler.urls == [redirect, TC_FEED]
     assert len(signals) == 6
     assert ctx.warnings == [
         f"RSS: skipped “{news._redact(long_label)}”: not a valid http:// or https:// feed URL",
         "RSS: skipped “https://exa..mple.com/rss”: not a valid http:// or https:// feed URL",
-        f"RSS: feed {news.feed_label(unicode_label)} skipped: cannot check host (UnicodeEncodeError)",
+        f"RSS: feed {news.feed_label(unicode_label)} skipped: cannot check host ({idna_error})",
         "RSS: feed redirect.example.com/feed skipped: invalid host name",
     ]
     assert not any("SECRET" in w for w in ctx.warnings)

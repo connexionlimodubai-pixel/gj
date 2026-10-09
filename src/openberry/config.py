@@ -45,20 +45,36 @@ DESKTOP_STATE_FILE = "desktop.json"
 
 
 def desktop_url(home: Path | None = None) -> str:
-    """The dashboard URL the desktop app wrote to OPENBERRY_HOME/desktop.json, or "" if there is none.
+    """The dashboard URL of the running desktop app (OPENBERRY_HOME/desktop.json), or "" if there is none.
 
     `openberry mcp`, which Claude Desktop starts, uses it for its dashboard links when
-    OPENBERRY_BASE_URL is not set: the app may have picked another port than 8000.
+    OPENBERRY_BASE_URL is not set: the app may have picked another port than 8000. A file left
+    behind by a crash or a force quit is ignored: no app holds OPENBERRY_HOME/desktop.lock then.
     """
+    home = home or OPENBERRY_HOME
     try:
-        data = json.loads(((home or OPENBERRY_HOME) / DESKTOP_STATE_FILE).read_text(encoding="utf-8"))
+        data = json.loads((home / DESKTOP_STATE_FILE).read_text(encoding="utf-8"))
         url = data.get("url") if isinstance(data, dict) else None
         parts = urlsplit(url) if isinstance(url, str) else None
     except (OSError, ValueError):  # unreadable, not JSON, or a malformed URL
         return ""
     if parts is None or parts.scheme not in {"http", "https"} or not parts.netloc:
         return ""
-    return url.strip().rstrip("/")
+    from .desktop import app_is_running  # desktop.py imports this module
+
+    return url.strip().rstrip("/") if app_is_running(home) else ""
+
+
+def current_base_url(settings: Settings) -> str:
+    """The dashboard address for links, checked each time it is needed.
+
+    Without OPENBERRY_BASE_URL (environment or .env) it is the running desktop app's address: a
+    long-running `openberry mcp` (Claude Desktop starts it with Claude, maybe before the app) then
+    links to the port the app is using now. Otherwise, and when no app runs, settings.base_url.
+    """
+    if not os.environ.get("OPENBERRY_BASE_URL") and (url := desktop_url()):
+        return url
+    return settings.base_url.rstrip("/")
 
 
 def _bool(name: str, default: bool) -> bool:

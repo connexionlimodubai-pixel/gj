@@ -6,9 +6,14 @@ Run from the repository root (Pillow and Playwright are build-time tools, not ru
     .venv/bin/python packaging/make_icons.py            # render and rewrite packaging/icons/*
     .venv/bin/python packaging/make_icons.py --check    # verify the committed icons (no browser needed)
 
-Rendering uses Playwright's Chromium (`playwright install chromium` if it is missing), or the browser
-passed with `--chromium /path/to/chrome`. The output is byte-for-byte reproducible for a given Chromium
-build and Pillow version.
+The committed icons were made with Chromium 1194 (Playwright's build) and Pillow 12.3:
+
+    .venv/bin/python packaging/make_icons.py --chromium /opt/pw-browsers/chromium-1194/chrome-linux/chrome
+
+Rendering uses the browser passed with `--chromium`, else Playwright's own Chromium, else the newest
+Chromium any Playwright version installed (under $PLAYWRIGHT_BROWSERS_PATH or the ms-playwright cache);
+`.venv/bin/playwright install chromium` fetches one. The output is byte-for-byte reproducible for a
+given Chromium build and Pillow version.
 
 The artwork is src/openberry/web/static/favicon.svg, used unchanged, so the app icon always matches the
 dashboard's logo (a berry-coloured rounded square with the white berry). Change the favicon and rerun
@@ -24,6 +29,7 @@ snapped to whole pixels so edges stay crisp:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from collections.abc import Iterable, Sequence
@@ -31,8 +37,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # Pillow is only imported when rendering or checking.
+if TYPE_CHECKING:  # Pillow and Playwright are only imported when rendering or checking.
     from PIL.Image import Image
+    from playwright.sync_api import Browser, Playwright
 
 ROOT = Path(__file__).resolve().parent.parent
 MARK_SVG = ROOT / "src" / "openberry" / "web" / "static" / "favicon.svg"
@@ -50,6 +57,17 @@ BERRY_POINT = (16.0, 23.0)
 
 _SVG_RE = re.compile(r"<svg\b(?P<attrs>[^>]*)>(?P<body>.*)</svg>\s*$", re.DOTALL)
 _VIEWBOX_RE = re.compile(r'viewBox="(?P<box>[^"]+)"')
+# Chromium executables inside a Playwright browsers folder, e.g. chromium-1194/chrome-linux/chrome.
+_CHROMIUM_GLOBS = (
+    "chromium-*/chrome-*/chrome",
+    "chromium-*/chrome-*/chrome.exe",
+    "chromium-*/chrome-*/Chromium.app/Contents/MacOS/Chromium",
+    "chromium_headless_shell-*/*/headless_shell",
+    "chromium_headless_shell-*/*/headless_shell.exe",
+    "chromium_headless_shell-*/*/chrome-headless-shell",
+    "chromium_headless_shell-*/*/chrome-headless-shell.exe",
+)
+_REVISION_RE = re.compile(r"^(?P<kind>chromium(?:_headless_shell)?)-(?P<revision>\d+)$")
 
 
 @dataclass(frozen=True)
@@ -108,6 +126,56 @@ def icon_svg(mark: Mark, size: int, style: IconStyle) -> str:
     )
 
 
+def playwright_browser_dirs() -> list[Path]:
+    """Folders where Playwright installs browsers: $PLAYWRIGHT_BROWSERS_PATH, else the per-OS caches."""
+    configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if configured and configured != "0":
+        return [Path(configured).expanduser()]
+    home = Path.home()
+    local_app_data = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+    return [home / ".cache" / "ms-playwright", home / "Library" / "Caches" / "ms-playwright",
+            local_app_data / "ms-playwright"]
+
+
+def find_chromium(roots: Iterable[Path] | None = None) -> str | None:
+    """The newest Chromium installed by any Playwright version, or None.
+
+    Playwright only launches the build its own version expects; this finds the others so a slightly
+    older or newer install still renders. Full Chromium wins over the headless shell of the same build.
+    """
+    found: list[tuple[int, bool, str]] = []
+    for root in roots if roots is not None else playwright_browser_dirs():
+        if not root.is_dir():
+            continue
+        for pattern in _CHROMIUM_GLOBS:
+            for exe in root.glob(pattern):
+                build = _REVISION_RE.match(exe.relative_to(root).parts[0])
+                if build and exe.is_file():
+                    found.append((int(build["revision"]), build["kind"] == "chromium", str(exe)))
+    return max(found)[2] if found else None
+
+
+def _launch(pw: Playwright, chromium: str | None) -> Browser:
+    """Start headless Chromium: `chromium` if given, else Playwright's own, else `find_chromium()`."""
+    from playwright.sync_api import Error as PlaywrightError
+
+    candidates: list[str | None] = [chromium] if chromium else [None]  # None: Playwright's own build
+    if not chromium and (found := find_chromium()):
+        candidates.append(found)
+    reason = ""
+    for executable in candidates:
+        try:
+            return pw.chromium.launch(
+                executable_path=executable, args=["--force-color-profile=srgb", "--disable-lcd-text"]
+            )
+        except PlaywrightError as exc:
+            reason = reason or str(exc).splitlines()[0]
+    raise RuntimeError(
+        f"could not start Chromium ({reason}). Run `.venv/bin/playwright install chromium` "
+        "or pass --chromium /path/to/chrome."
+    )
+
+
 def _page(svg: str) -> str:
     return (
         "<!doctype html><html><head><meta charset='utf-8'><style>"
@@ -121,22 +189,11 @@ def render(svgs: Sequence[tuple[str, int]], chromium: str | None = None) -> list
     from io import BytesIO
 
     from PIL import Image as PILImage
-    from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
     images: list[Image] = []
     with sync_playwright() as pw:
-        try:
-            browser = pw.chromium.launch(
-                executable_path=chromium,
-                args=["--force-color-profile=srgb", "--disable-lcd-text"],
-            )
-        except PlaywrightError as exc:
-            reason = str(exc).splitlines()[0]
-            raise RuntimeError(
-                f"could not start Chromium ({reason}). Run `.venv/bin/playwright install chromium` "
-                "or pass --chromium /path/to/chrome."
-            ) from None
+        browser = _launch(pw, chromium)
         try:
             page = browser.new_page(device_scale_factor=1)
             for svg, size in svgs:

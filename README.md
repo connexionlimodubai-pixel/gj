@@ -28,6 +28,16 @@ thinking through MCP, and a web dashboard (with a registration board for your co
 
 See [docs/GOJIBERRY_COMPARISON.md](docs/GOJIBERRY_COMPARISON.md) for a feature-by-feature comparison.
 
+## Desktop app (no terminal needed)
+
+Download OpenBerry for **Windows**, **Mac** (Apple silicon) or **Linux** from the
+[Releases page](https://github.com/connexionlimodubai-pixel/gj/releases), unzip it and double-click **OpenBerry**.
+The dashboard opens in its own window, and your data stays on your computer. Claude Desktop connects to it
+through the **Connect Claude** page in the app. You don't need Python or a terminal.
+
+The app isn't code-signed yet, so Windows and macOS ask you to confirm the first time you open it.
+[docs/DESKTOP.md](docs/DESKTOP.md) explains each step, how to update, and how to build and release the app.
+
 ## Quick start (5 minutes)
 
 You need [uv](https://docs.astral.sh/uv/getting-started/installation/), a fast Python installer. Python 3.11+ is fetched automatically.
@@ -61,7 +71,8 @@ Add OpenBerry to **Claude Desktop** (*Settings → Developer → Edit Config*):
 }
 ```
 Claude Desktop doesn't always see your shell's `PATH`: if it can't start `uv`, put uv's full path (`which uv`) in `"command"`.
-The dashboard's **Connect Claude** page (`/help`) shows the exact command and config for your install, Docker included.
+The dashboard's **Connect Claude** page (`/help`) shows the exact command and config for your install, Docker and the
+desktop app included (the app's config runs its bundled `openberry-cli mcp`).
 
 For **Claude Code**: run `claude` inside this folder (the included `.mcp.json` registers the server), or run
 `claude mcp add openberry -- uv --directory /ABSOLUTE/PATH/TO/openberry run openberry mcp`.
@@ -101,6 +112,7 @@ or in the environment. See [`.env.example`](.env.example) for the other settings
 
 ```bash
 openberry serve [--host 0.0.0.0 --port 8000]   # dashboard + /mcp + background scheduler
+openberry desktop [--no-window]                # the dashboard in its own window (uv sync --extra desktop), else the browser
 openberry mcp                                  # MCP over stdio (what Claude Desktop runs)
 openberry mcp --http --port 8001               # standalone MCP over HTTP (bearer token)
 openberry scan [--company 1] [--source hackernews]

@@ -4,9 +4,10 @@
 on 127.0.0.1 in a background thread and show it in a native window (pywebview). Without pywebview or
 a GUI toolkit, or with --no-window, the default browser opens it instead and it serves until Ctrl+C.
 
-One app per user: the running app writes OPENBERRY_HOME/desktop.json ({url, pid, version}), and
-opening the app again shows that server instead of starting a second one. `openberry mcp`, which
-Claude Desktop starts, reads the URL from it for its dashboard links (config.desktop_url).
+One app per user: the app serving OPENBERRY_HOME holds an OS lock on OPENBERRY_HOME/desktop.lock
+(released by the OS even if it crashes) and writes OPENBERRY_HOME/desktop.json ({url, pid, version}).
+Opening the app again shows that server instead of starting a second one. `openberry mcp`, which
+Claude Desktop starts, reads the URL from desktop.json for its dashboard links (config.desktop_url).
 
 The packaged executable doubles as the command line: `OpenBerry mcp` runs `openberry mcp`.
 """
@@ -18,7 +19,6 @@ import contextlib
 import html
 import json
 import logging
-import multiprocessing
 import os
 import secrets
 import signal
@@ -27,11 +27,11 @@ import sys
 import threading
 import time
 import webbrowser
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from . import __version__, config
@@ -47,13 +47,16 @@ DEFAULT_PORTS = range(8000, 8100)  # 8000 first, as `openberry serve`, so the RE
 STARTUP_TIMEOUT = 30.0
 STOP_TIMEOUT = 10.0
 PROBE_TIMEOUT = 2.0
+EXIT_GRACE = 15.0  # seconds a packaged app may take to exit normally after its window closed
 WINDOW_TITLE = "OpenBerry"
 WINDOW_SIZE = (1280, 860)
 MIN_WINDOW_SIZE = (960, 640)
 LOG_FILE_BYTES = 1_000_000
 LOG_FILE_BACKUPS = 2
+LOCK_FILE = "desktop.lock"
 SECRET_KEY_FILE = "desktop-secret-key"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+HEALTHZ_APP = "openberry"  # /healthz answers {"ok": true, "app": "openberry"} (web/app.py)
 # First arguments handed to the command line (cli.main), so the packaged app's executable also works
 # as `openberry`: Claude Desktop can start `OpenBerry mcp`, and CI can run `OpenBerry desktop --smoke`.
 CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "demo", "rescore", "init-db", "--version", "-h", "--help"})
@@ -67,11 +70,23 @@ class DesktopError(RuntimeError):
 # Command line
 # --------------------------------------------------------------------------------------
 
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError:
+        port = -1
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a port number (0-65535)")
+    return port
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     """The desktop options, shared by `openberry desktop` and `openberry-desktop`."""
-    parser.add_argument("--port", type=int, help=f"port on {HOST}; 0 picks any free one "
-                                                 f"(default: {DEFAULT_PORTS[0]}, or the next free one up to {DEFAULT_PORTS[-1]})")
-    parser.add_argument("--no-window", action="store_true", help="open the dashboard in your browser instead of a window")
+    parser.add_argument("--port", type=_port,
+                        help=f"port on {HOST}; 0 picks any free one (default: {DEFAULT_PORTS[0]}, "
+                             f"or the next free one up to {DEFAULT_PORTS[-1]})")
+    parser.add_argument("--no-window", action="store_true",
+                        help="open the dashboard in your browser instead of a window")
     parser.add_argument("--smoke", action="store_true",
                         help="start the server, check that it works, then stop: for tests and CI, needs no display")
 
@@ -88,15 +103,44 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> None:
     """Entry point of the desktop app: `openberry-desktop` and the packaged executable."""
     if getattr(sys, "frozen", False):
+        import multiprocessing
+
         multiprocessing.freeze_support()  # a packaged Windows app must not re-launch itself for child processes
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] in CLI_COMMANDS:
-        from .cli import main as cli_main
+        from . import cli
 
-        cli_main(args)
+        # The windowed executable has no console: `OpenBerry serve` would crash in uvicorn's log setup
+        # (sys.stdout.isatty()) and `OpenBerry mcp` on reading stdin.
+        _ensure_std_streams()
+        cli.main(args)
         return
-    if code := run(parse_args(args)):
+    code = run(parse_args(args))
+    if getattr(sys, "frozen", False):
+        exit_after(EXIT_GRACE, code)
+    if code:
         raise SystemExit(code)
+
+
+def exit_after(grace: float, code: int) -> threading.Timer:
+    """End this process within `grace` seconds, even if something keeps it alive after the app is done.
+
+    A packaged app that lingers without a window (a GUI toolkit or .NET thread that doesn't stop, a
+    scan still running) would keep holding desktop.lock: the next start would wait for it and give up.
+    Normal interpreter shutdown runs first; the timer only fires if it hangs.
+    """
+    timer = threading.Timer(grace, _hard_exit, args=(code,))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _hard_exit(code: int) -> None:
+    log.warning("OpenBerry did not exit within %.0f seconds of closing: stopping it", EXIT_GRACE)
+    for handler in logging.getLogger().handlers:
+        with contextlib.suppress(Exception):
+            handler.flush()
+    os._exit(code)
 
 
 # --------------------------------------------------------------------------------------
@@ -115,16 +159,17 @@ def configure_logging(home: Path) -> Path | None:
     handlers: list[logging.Handler] = []
     log_file: Path | None = None
     if getattr(sys, "frozen", False) or not (_usable(sys.stdout) and _usable(sys.stderr)):
+        path = home / "logs" / "desktop.log"
         try:
-            (home / "logs").mkdir(parents=True, exist_ok=True)
-            file_handler = RotatingFileHandler(home / "logs" / "desktop.log", maxBytes=LOG_FILE_BYTES,
-                                               backupCount=LOG_FILE_BACKUPS, encoding="utf-8")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(path, maxBytes=LOG_FILE_BYTES, backupCount=LOG_FILE_BACKUPS,
+                                               encoding="utf-8")
         except OSError:
             pass  # a read-only home: run without a log file rather than not at all
         else:
             file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
             handlers.append(file_handler)
-            log_file = home / "logs" / "desktop.log"
+            log_file = path
     if _usable(sys.stderr):
         handlers.append(logging.StreamHandler(sys.stderr))
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s",
@@ -134,23 +179,108 @@ def configure_logging(home: Path) -> Path | None:
 
 
 def _ensure_std_streams() -> None:
-    """A packaged windowed app may have no stdout/stderr (None). Give libraries a sink that accepts writes."""
-    for name in ("stdout", "stderr"):
+    """A packaged windowed app may have no stdin/stdout/stderr (None). Give libraries streams that work:
+    writes go nowhere, reads see the end of the input."""
+    for name, mode in (("stdin", "r"), ("stdout", "w"), ("stderr", "w")):
         if getattr(sys, name) is None:
-            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))  # noqa: SIM115 (lives as long as the app)
+            setattr(sys, name, open(os.devnull, mode, encoding="utf-8"))  # noqa: SIM115 (lives as long as the app)
 
 
 # --------------------------------------------------------------------------------------
-# One app per user: desktop.json names the running server
+# One app per user: desktop.lock is held by the running app, desktop.json names its server
 # --------------------------------------------------------------------------------------
+
+class InstanceLock:
+    """An exclusive OS lock on OPENBERRY_HOME/desktop.lock, held while this process serves the app.
+
+    The OS releases it when the process ends, even after a crash, so a stale lock never blocks a
+    start. It catches what desktop.json alone can't: an app opened twice in quick succession, while
+    the first one is still starting.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._file: IO[bytes] | None = None
+
+    @property
+    def held(self) -> bool:
+        return self._file is not None
+
+    def acquire(self) -> bool:
+        """Take the lock if no other process holds it. True if this process holds it now."""
+        if self._file is not None:
+            return True
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(self.path, "a+b")  # noqa: SIM115 (kept open while the lock is held)
+        except OSError as exc:  # can't lock in this folder: start anyway, as without the lock
+            log.warning("could not open %s (%s): not checking for another running OpenBerry", self.path, exc)
+            return True
+        try:
+            _lock_exclusive(fh)
+        except OSError:
+            fh.close()
+            return False
+        self._file = fh
+        return True
+
+    def release(self) -> None:
+        if self._file is not None:
+            if os.name == "nt":  # Windows may release a lock some time after its file is closed
+                with contextlib.suppress(OSError):
+                    _unlock_windows(self._file)
+            self._file.close()  # closing the file releases the lock
+            self._file = None
+
+
+def _lock_exclusive(fh: IO[bytes]) -> None:
+    """Lock `fh` without waiting; OSError if another open file holds the lock."""
+    if os.name == "nt":
+        import msvcrt
+
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_windows(fh: IO[bytes]) -> None:
+    import msvcrt
+
+    fh.seek(0)
+    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def app_is_running(home: Path) -> bool:
+    """True while an OpenBerry desktop app serves `home`: a process holds its desktop.lock.
+
+    A desktop.json left behind by a crash, a force quit or a power cut names a server that is gone;
+    this tells it apart without connecting anywhere. When the lock file can't be opened it can't
+    tell, and says True (desktop.json is then trusted, as without the lock).
+    """
+    probe = InstanceLock(home / LOCK_FILE)
+    if not probe.acquire():
+        return True
+    if not probe.held:
+        return True
+    probe.release()
+    return False
+
 
 def write_state(home: Path, url: str) -> None:
     """Write OPENBERRY_HOME/desktop.json for this process's server (atomically: readers never see half a file)."""
     path = home / DESKTOP_STATE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps({"url": url, "pid": os.getpid(), "version": __version__}), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps({"url": url, "pid": os.getpid(), "version": __version__}), encoding="utf-8")
+        os.replace(tmp, path)  # Windows: fails while another program has desktop.json open
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def remove_state(home: Path, url: str) -> None:
@@ -161,7 +291,8 @@ def remove_state(home: Path, url: str) -> None:
     except (OSError, ValueError):
         return
     if isinstance(data, dict) and data.get("url") == url and data.get("pid") == os.getpid():
-        path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            path.unlink()
 
 
 def is_local_url(url: str) -> bool:
@@ -173,6 +304,11 @@ def is_local_url(url: str) -> bool:
         return False
 
 
+def is_openberry_health(data: Any) -> bool:
+    """True for OpenBerry's /healthz answer; another program's health check (say {"ok": true}) is not it."""
+    return isinstance(data, dict) and data.get("ok") is True and data.get("app") == HEALTHZ_APP
+
+
 def answers_like_openberry(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
     """True if `url`/healthz answers as OpenBerry's does."""
     import httpx
@@ -180,7 +316,7 @@ def answers_like_openberry(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
     try:
         # trust_env=False: never send a local address through an HTTP(S)_PROXY.
         resp = httpx.get(f"{url}/healthz", timeout=timeout, trust_env=False)
-        return resp.status_code == 200 and resp.json() == {"ok": True}
+        return resp.status_code == 200 and is_openberry_health(resp.json())
     except (httpx.HTTPError, ValueError):
         return False
 
@@ -194,9 +330,38 @@ def running_instance(home: Path) -> str | None:
     return url if url and is_local_url(url) and answers_like_openberry(url) else None
 
 
+def wait_for_instance(home: Path, lock: InstanceLock, timeout: float | None = None) -> str | None:
+    """Another process holds the lock: wait until its server answers and return its URL.
+
+    None once it has quit and this process holds the lock instead (it should start the app itself).
+    """
+    timeout = STARTUP_TIMEOUT if timeout is None else timeout
+    deadline = time.monotonic() + timeout
+    while True:
+        if url := running_instance(home):
+            return url
+        if lock.acquire():
+            return None
+        if time.monotonic() > deadline:
+            raise DesktopError(f"OpenBerry is already starting, but it did not open within {timeout:.0f} seconds. "
+                               "Close it (or restart your computer) and open OpenBerry again.")
+        time.sleep(0.25)
+
+
 # --------------------------------------------------------------------------------------
 # The dashboard server, in a background thread
 # --------------------------------------------------------------------------------------
+
+def _port_answers(host: str, port: int) -> bool:
+    """True if a program already accepts connections on host:port.
+
+    On macOS a socket with SO_REUSEADDR may bind 127.0.0.1:<port> while another program listens on
+    all addresses (0.0.0.0:<port>), and would quietly take that program's local traffic.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex((host, port)) == 0
+
 
 def bind_port(ports: Sequence[int], host: str = HOST) -> socket.socket:
     """A listening socket on the first free port of `ports`.
@@ -204,10 +369,12 @@ def bind_port(ports: Sequence[int], host: str = HOST) -> socket.socket:
     The server is handed this socket, so no other program can take the port between the check and the start.
     """
     for port in ports:
+        if port and os.name != "nt" and _port_answers(host, port):
+            continue
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             if os.name == "nt":  # never share a port with another program
-                sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE"), 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)  # type: ignore[attr-defined]
             else:  # as uvicorn does: a port the last run left in TIME_WAIT is free
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((host, port))
@@ -229,7 +396,7 @@ def socket_url(sock: socket.socket) -> str:
 def desktop_settings(url: str, home: Path) -> Settings:
     """Settings from the environment and .env files, with this app's address and a lasting session key."""
     settings = Settings.from_env()
-    if not os.environ.get("OPENBERRY_BASE_URL"):  # the user's own setting wins
+    if not os.environ.get("OPENBERRY_BASE_URL"):  # the user's own setting (environment or .env) wins
         # Links on the dashboard and in Claude's replies; the Host check accepts it too.
         os.environ["OPENBERRY_BASE_URL"] = settings.base_url = url
     if not os.environ.get("OPENBERRY_SECRET_KEY"):
@@ -279,8 +446,12 @@ class DashboardServer:
 def _serve(server: uvicorn.Server, sock: socket.socket) -> None:
     try:
         server.run(sockets=[sock])
+    except SystemExit:  # uvicorn exits this way when the app's startup fails; it has logged why
+        log.error("the OpenBerry server could not start")
     except Exception:  # a thread's traceback would go to a console the packaged app doesn't have
         log.exception("the OpenBerry server stopped")
+    finally:
+        sock.close()
 
 
 def start_server(settings: Settings, sock: socket.socket, timeout: float = STARTUP_TIMEOUT) -> DashboardServer:
@@ -290,6 +461,7 @@ def start_server(settings: Settings, sock: socket.socket, timeout: float = START
     from .web.app import create_app
 
     host, port = sock.getsockname()[:2]
+    url = socket_url(sock)
     server = uvicorn.Server(uvicorn.Config(
         create_app(settings), host=host, port=port, log_level="info",
         log_config=None,  # log through our handlers: uvicorn's own config needs a console
@@ -300,22 +472,26 @@ def start_server(settings: Settings, sock: socket.socket, timeout: float = START
     deadline = time.monotonic() + timeout
     while not server.started:
         if not thread.is_alive():
-            sock.close()
             raise DesktopError("The OpenBerry server stopped while starting. The log has the details.")
         if time.monotonic() > deadline:
             server.should_exit = True
+            thread.join(1)
             raise DesktopError(f"The OpenBerry server did not start within {timeout:.0f} seconds.")
         time.sleep(0.05)
-    log.info("OpenBerry %s is running at %s (data: %s)", __version__, socket_url(sock), settings.db_path)
-    return DashboardServer(socket_url(sock), server, thread)
+    log.info("OpenBerry %s is running at %s (data: %s)", __version__, url, settings.db_path)
+    return DashboardServer(url, server, thread)
 
 
 # --------------------------------------------------------------------------------------
 # Window, or the browser
 # --------------------------------------------------------------------------------------
 
-def open_window(url: str, home: Path) -> bool:
+def open_window(url: str, home: Path, on_closing: Callable[[], None] | None = None) -> bool:
     """Show `url` in a native window and return when the person closes it.
+
+    `on_closing` runs (on the GUI thread, so it must be quick) as the window closes. It is the only
+    code that runs when macOS quits the app (Cmd+Q, log out, shut down): the process then ends
+    without returning from webview.start().
 
     False when no window could be shown: pywebview isn't installed, there is no GUI toolkit
     (e.g. Linux without GTK/Qt WebKit) or, on Windows, only Internet Explorer's engine.
@@ -323,7 +499,10 @@ def open_window(url: str, home: Path) -> bool:
     try:
         import webview
     except ImportError:
-        log.info("pywebview is not installed (pip install 'openberry[desktop]'): using the browser")
+        if getattr(sys, "frozen", False):  # the Linux build leaves pywebview out on purpose
+            log.info("this build of OpenBerry has no window: using the browser")
+        else:
+            log.info("pywebview is not installed (pip install 'openberry[desktop]'): using the browser")
         return False
     logging.getLogger("pywebview").handlers.clear()  # its console handler; ours write to the log file too
     webview.settings["ALLOW_DOWNLOADS"] = True  # CSV export
@@ -340,11 +519,14 @@ def open_window(url: str, home: Path) -> bool:
     try:
         window = webview.create_window(WINDOW_TITLE, url, width=WINDOW_SIZE[0], height=WINDOW_SIZE[1],
                                        min_size=MIN_WINDOW_SIZE)
+        if on_closing is not None:
+            window.events.closing += on_closing
         # private_mode=False keeps cookies (the login) between runs, in OPENBERRY_HOME rather than
-        # pywebview's folder shared by every pywebview app.
+        # pywebview's folder shared by every pywebview app (macOS ignores storage_path).
         webview.start(check_engine, (window,), private_mode=False, storage_path=str(home / "webview"))
-    except Exception:
-        log.warning("could not open a window: using the browser", exc_info=True)
+    except Exception as exc:
+        log.warning("could not open a window (%s): using the browser", exc)
+        log.debug("window error", exc_info=True)
         return False
     if fallback:
         log.warning("%s: using the browser", fallback[0])
@@ -384,9 +566,9 @@ def serve_until_stopped(server: DashboardServer, stop: threading.Event) -> None:
 
 
 def show(url: str, home: Path, window: bool, server: DashboardServer | None = None,
-         stop: threading.Event | None = None) -> None:
+         stop: threading.Event | None = None, on_closing: Callable[[], None] | None = None) -> None:
     """Show the dashboard in a window, else in the browser; with `server`, serve until the person is done."""
-    if window and open_window(url, home):
+    if window and open_window(url, home, on_closing):
         return
     open_browser(url)
     if server is not None:
@@ -422,25 +604,40 @@ def run(args: argparse.Namespace, stop: threading.Event | None = None) -> int:
     if ignored := getattr(args, "ignored", None):
         log.info("ignoring unknown arguments: %s", " ".join(ignored))
     ports = DEFAULT_PORTS if args.port is None else [args.port]
+    interactive = not args.no_window and not args.smoke
     try:
         if args.smoke:
             return smoke(home, ports)
         _run_app(home, ports, window=not args.no_window, stop=stop)
     except DesktopError as exc:
         log.error("%s", exc)
-        if not args.no_window and not args.smoke:
+        if interactive:
             show_error(str(exc), log_file)
         return 1
     except KeyboardInterrupt:  # Ctrl+C while a window was open; the server has been stopped
         return 130
+    except Exception as exc:  # a bug: say so where the person looks, the window or the log
+        log.exception("OpenBerry stopped because of an unexpected error")
+        if interactive:
+            show_error(f"Unexpected error: {exc}", log_file)
+        return 1
     return 0
 
 
 def _run_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Event | None) -> None:
-    if url := running_instance(home):
-        log.info("OpenBerry is already running at %s: showing it", url)
-        show(url, home, window)
-        return
+    lock = InstanceLock(home / LOCK_FILE)
+    try:
+        if not lock.acquire() and (url := wait_for_instance(home, lock)):
+            log.info("OpenBerry is already running at %s: showing it", url)
+            show(url, home, window)
+            return
+        _serve_app(home, ports, window, stop)
+    finally:
+        lock.release()
+
+
+def _serve_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Event | None) -> None:
+    """Start this process's server, show it, and stop it when the person is done."""
     sock = bind_port(ports)
     url = socket_url(sock)
     try:
@@ -448,9 +645,14 @@ def _run_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Eve
     except BaseException:
         sock.close()
         raise
-    write_state(home, url)
     try:
-        show(url, home, window, server=server, stop=stop)
+        write_state(home, url)
+    except OSError as exc:  # only Claude's dashboard links and a second start need it
+        log.warning("could not write %s: %s", home / DESKTOP_STATE_FILE, exc)
+    try:
+        # macOS ends the process when the app is quit (Cmd+Q) without coming back here: forget the
+        # server as its window closes, so `openberry mcp` and the next start don't trust a dead address.
+        show(url, home, window, server=server, stop=stop, on_closing=lambda: remove_state(home, url))
     finally:
         server.stop()
         remove_state(home, url)
@@ -462,8 +664,8 @@ def smoke_problems(url: str) -> list[str]:
     import httpx
 
     problems = []
-    checks = (("/healthz", lambda r: r.json() == {"ok": True}), ("/", lambda r: "OpenBerry" in r.text),
-              ("/static/app.css", lambda r: bool(r.content)))
+    checks = (("/healthz", lambda r: is_openberry_health(r.json())), ("/", lambda r: "OpenBerry" in r.text),
+              ("/help", lambda r: "mcpServers" in r.text), ("/static/app.css", lambda r: bool(r.content)))
     with httpx.Client(base_url=url, timeout=10, trust_env=False, follow_redirects=True) as client:
         for path, ok in checks:
             try:
@@ -484,7 +686,7 @@ def smoke_problems(url: str) -> list[str]:
 def smoke(home: Path, ports: Sequence[int]) -> int:
     """Start the server, check it, stop it: proves a (packaged) app works, with no display needed.
 
-    It leaves desktop.json alone, so a running app is never disturbed.
+    It leaves desktop.json and the lock alone, so a running app is never disturbed.
     """
     sock = bind_port(ports)
     url = socket_url(sock)

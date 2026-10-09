@@ -4,9 +4,11 @@ outreach queue, company profile (settings) and help."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +204,33 @@ def bundled_cli() -> str:
     return str(cli if cli.is_file() else app)
 
 
+MOVE_TO_APPLICATIONS = ("macOS is running OpenBerry from a temporary copy, so Claude would not find it later. "
+                        "Quit OpenBerry, drag it into your Applications folder, open it from there, "
+                        "then come back to this page.")
+EXTRACT_THE_ZIP = ("OpenBerry is running from a temporary folder, probably from inside the zip file, so Claude "
+                   "would not find it later. Close OpenBerry, extract the zip file (right-click it, Extract All), "
+                   "open OpenBerry from the extracted folder, then come back to this page.")
+
+
+def _temp_dir() -> str:
+    return tempfile.gettempdir()
+
+
+def unstable_location(command: str) -> str:
+    """Why the packaged app's command would not work for Claude later, or "" if its place is fine.
+
+    A downloaded Mac app opened where it was unzipped runs from a random, temporary copy (App
+    Translocation), and Windows runs an app opened inside a zip file from a temporary folder: both
+    folders disappear, and Claude Desktop's config would point at nothing.
+    """
+    if "/AppTranslocation/" in command:
+        return MOVE_TO_APPLICATIONS
+    temp = os.path.normcase(os.path.realpath(_temp_dir()))
+    if os.path.normcase(os.path.realpath(command)).startswith(temp.rstrip(os.sep) + os.sep):
+        return EXTRACT_THE_ZIP
+    return ""
+
+
 def shell_line(words: list[str]) -> str:
     return " ".join(w if _SHELL_SAFE.fullmatch(w) else '"' + w.replace('"', '\\"') + '"' for w in words)
 
@@ -235,6 +264,7 @@ def help_page(request: Request) -> Response:
     # Commands use the address this page was opened on: OPENBERRY_BASE_URL may still be the
     # default :8000 while the server runs on another port.
     page_url = str(request.base_url).rstrip("/")
+    packaged = bool(getattr(sys, "frozen", False))
     return render(request, "help.html", {
         "active": "help", "title": "Connect Claude & API", "db_path": str(settings.db_path.resolve()),
         "api_token_set": bool(settings.api_token), "example_company": companies[0].id if companies else 1,
@@ -243,6 +273,7 @@ def help_page(request: Request) -> Response:
         "desktop_config": json.dumps(desktop, indent=2, ensure_ascii=False),
         "page_url": page_url, "base_url_differs": page_url != settings.base_url.rstrip("/"),
         "reddit_ready": bool(settings.reddit_client_id and settings.reddit_client_secret),
+        "packaged": packaged, "install_warning": unstable_location(launch["command"]) if packaged else "",
     })
 
 

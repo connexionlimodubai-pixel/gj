@@ -25,7 +25,7 @@
         {% if lead.linkedin_url|safe_url %}<a class="btn btn-sm" href="{{ lead.linkedin_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("linkedin", 14) }}LinkedIn</a>{% endif %}
         {% if lead.profile_url|safe_url %}<a class="btn btn-sm" href="{{ lead.profile_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("external", 14) }}Profile</a>{% endif %}
         {% if lead.website|safe_url %}<a class="btn btn-sm" href="{{ lead.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("globe", 14) }}Website</a>{% endif %}
-        {% if lead.email|mailto %}<a class="btn btn-sm" href="{{ lead.email|mailto }}">{{ m.icon("mail", 14) }}{{ lead.email }}</a>{% endif %}
+        {% if lead.email|mailto %}<a class="btn btn-sm" href="{{ lead.email|mailto }}" target="_blank" rel="noopener noreferrer">{{ m.icon("mail", 14) }}{{ lead.email }}</a>{% endif %}
         {% if lead.phone %}<span class="btn btn-sm btn-static">{{ m.icon("phone", 14) }}{{ lead.phone }}</span>{% endif %}
         {% if lead.github_username %}<a class="btn btn-sm" href="https://github.com/{{ lead.github_username|urlencode }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("github", 14) }}{{ lead.github_username }}</a>{% endif %}
       </p>

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def _dotenv_value(raw: str) -> str:
@@ -37,6 +39,26 @@ def _load_dotenv(path: Path) -> None:
 # Fixed per-user home so the dashboard and Claude Desktop (which starts `openberry mcp` from an
 # unpredictable working directory) always share the same database and .env file.
 OPENBERRY_HOME = Path(os.environ.get("OPENBERRY_HOME", "~/.openberry")).expanduser()
+DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+# Written by the desktop app (desktop.py) while it runs: {"url": ..., "pid": ..., "version": ...}.
+DESKTOP_STATE_FILE = "desktop.json"
+
+
+def desktop_url(home: Path | None = None) -> str:
+    """The dashboard URL the desktop app wrote to OPENBERRY_HOME/desktop.json, or "" if there is none.
+
+    `openberry mcp`, which Claude Desktop starts, uses it for its dashboard links when
+    OPENBERRY_BASE_URL is not set: the app may have picked another port than 8000.
+    """
+    try:
+        data = json.loads(((home or OPENBERRY_HOME) / DESKTOP_STATE_FILE).read_text(encoding="utf-8"))
+        url = data.get("url") if isinstance(data, dict) else None
+        parts = urlsplit(url) if isinstance(url, str) else None
+    except (OSError, ValueError):  # unreadable, not JSON, or a malformed URL
+        return ""
+    if parts is None or parts.scheme not in {"http", "https"} or not parts.netloc:
+        return ""
+    return url.strip().rstrip("/")
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -59,7 +81,7 @@ class Settings:
     db_path: Path = field(default_factory=lambda: OPENBERRY_HOME / "openberry.db")
     # Public URL of the dashboard: links in MCP replies, an allowed Host name, and Secure
     # session cookies when it is https://.
-    base_url: str = "http://127.0.0.1:8000"
+    base_url: str = DEFAULT_BASE_URL
     # Dashboard login. Empty = no login (fine on localhost, NOT for a public server).
     password: str = ""
     secret_key: str = ""
@@ -106,7 +128,8 @@ class Settings:
         db = os.environ.get("OPENBERRY_DB")
         s = cls(
             db_path=Path(db).expanduser().resolve() if db else OPENBERRY_HOME / "openberry.db",
-            base_url=os.environ.get("OPENBERRY_BASE_URL", "http://127.0.0.1:8000").rstrip("/"),
+            # Unset: the running desktop app's address, else the default `openberry serve` address.
+            base_url=(os.environ.get("OPENBERRY_BASE_URL") or desktop_url() or DEFAULT_BASE_URL).rstrip("/"),
             password=os.environ.get("OPENBERRY_PASSWORD", ""),
             secret_key=os.environ.get("OPENBERRY_SECRET_KEY", ""),
             api_token=os.environ.get("OPENBERRY_API_TOKEN", ""),

@@ -188,6 +188,20 @@ def source_checkout() -> Path | None:
     return root if (root / "pyproject.toml").is_file() and (root / "src" / "openberry").is_dir() else None
 
 
+CLI_EXECUTABLE = "openberry-cli"  # the packaged app's console executable
+
+
+def bundled_cli() -> str:
+    """The packaged app's command-line executable: `openberry-cli` (.exe on Windows) next to the
+    app's own executable (on macOS both sit in OpenBerry.app/Contents/MacOS).
+
+    Without it, the app's executable, which also runs CLI commands (desktop.main).
+    """
+    app = Path(sys.executable)
+    cli = app.with_name(CLI_EXECUTABLE + (".exe" if sys.platform == "win32" else ""))
+    return str(cli if cli.is_file() else app)
+
+
 def shell_line(words: list[str]) -> str:
     return " ".join(w if _SHELL_SAFE.fullmatch(w) else '"' + w.replace('"', '\\"') + '"' for w in words)
 
@@ -196,8 +210,11 @@ def mcp_launch(db_path: str) -> dict[str, Any]:
     """How Claude starts `openberry mcp` on this machine: command, args and env.
 
     Claude Desktop starts servers without the shell's PATH, so the command is an absolute path:
-    uv for a clone (as in the README), else this Python. In a container, `docker exec` runs it there.
+    the packaged desktop app's own CLI, uv for a clone (as in the README), else this Python.
+    In a container, `docker exec` runs it there.
     """
+    if getattr(sys, "frozen", False):  # the packaged desktop app (PyInstaller): there is no Python to run
+        return {"command": bundled_cli(), "args": ["mcp"], "env": {"OPENBERRY_DB": db_path}, "docker": False}
     if in_container():
         return {"command": DOCKER_MCP[0], "args": DOCKER_MCP[1:], "env": {}, "docker": True}
     root, uv = source_checkout(), shutil.which("uv")

@@ -1,4 +1,4 @@
-"""Command line: `openberry serve | mcp | scan | demo | rescore | init-db`."""
+"""Command line: `openberry serve | desktop | mcp | scan | demo | rescore | init-db`."""
 
 from __future__ import annotations
 
@@ -17,6 +17,13 @@ def _serve(args: argparse.Namespace) -> None:
     from .web.app import create_app
 
     uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info", proxy_headers=True)
+
+
+def _desktop(args: argparse.Namespace) -> None:
+    from .desktop import run
+
+    if code := run(args):
+        sys.exit(code)
 
 
 def _mcp(args: argparse.Namespace) -> None:
@@ -97,7 +104,9 @@ def _init_db(_: argparse.Namespace) -> None:
     print(f"Database ready at {init_db()}")
 
 
-def main(argv: list[str] | None = None) -> None:
+def build_parser() -> argparse.ArgumentParser:
+    from .desktop import add_arguments as add_desktop_arguments
+
     parser = argparse.ArgumentParser(prog="openberry", description="Open-source intent-signal lead generation.")
     parser.add_argument("--version", action="version", version=f"openberry {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -106,6 +115,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.set_defaults(func=_serve)
+
+    p = sub.add_parser("desktop", help="open the dashboard in its own window, like an app")
+    add_desktop_arguments(p)
+    p.set_defaults(func=_desktop)
 
     p = sub.add_parser("mcp", help="run the MCP server for Claude (stdio by default)")
     p.add_argument("--http", action="store_true", help="serve Streamable HTTP instead of stdio")
@@ -121,8 +134,11 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("demo", help="create a demo company with sample leads").set_defaults(func=_demo)
     sub.add_parser("rescore", help="recompute every lead score").set_defaults(func=_rescore)
     sub.add_parser("init-db", help="create the SQLite database").set_defaults(func=_init_db)
+    return parser
 
-    args = parser.parse_args(argv)
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
     # Logs go to stderr: stdout belongs to the MCP protocol in `openberry mcp`.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # it logs full request URLs at INFO; webhook URLs are secrets

@@ -10,10 +10,10 @@ thinking through MCP, and a web dashboard (with a registration board for your co
 
 | Windows 10/11 | Mac (Apple silicon) | Linux |
 |---|---|---|
-| [**OpenBerry for Windows**](https://github.com/connexionlimodubai-pixel/gj/releases/download/v0.1.0/OpenBerry-0.1.0-windows-x64.zip) (39 MB) | [**OpenBerry for Mac**](https://github.com/connexionlimodubai-pixel/gj/releases/download/v0.1.0/OpenBerry-0.1.0-macos-arm64.zip) (39 MB) | [**OpenBerry for Linux**](https://github.com/connexionlimodubai-pixel/gj/releases/download/v0.1.0/OpenBerry-0.1.0-linux-x64.tar.gz) (43 MB) |
+| [**OpenBerry for Windows**](https://github.com/connexionlimodubai-pixel/gj/releases/latest/download/OpenBerry-windows-x64.zip) (39 MB) | [**OpenBerry for Mac**](https://github.com/connexionlimodubai-pixel/gj/releases/latest/download/OpenBerry-macos-arm64.zip) (39 MB) | [**OpenBerry for Linux**](https://github.com/connexionlimodubai-pixel/gj/releases/latest/download/OpenBerry-linux-x64.tar.gz) (43 MB) |
 | Unzip (right-click → **Extract All**), then double-click **OpenBerry.exe**. If Windows says it protected your PC, click **More info → Run anyway**. | Unzip, drag **OpenBerry.app** to Applications, then right-click it → **Open** the first time. | Extract and run `./OpenBerry`: it opens in your browser. |
 
-Version 0.1.0. The newest version and release notes are always on the [Releases page](https://github.com/connexionlimodubai-pixel/gj/releases/latest).
+These links always download the newest version. Release notes and older versions are on the [Releases page](https://github.com/connexionlimodubai-pixel/gj/releases).
 The app isn't code-signed, which is why Windows and macOS ask you to confirm once. Step-by-step help: [docs/DESKTOP.md](docs/DESKTOP.md).
 
 ## What it does
@@ -29,6 +29,7 @@ The app isn't code-signed, which is why Windows and macOS ask you to confirm onc
 4. **Draft outreach** with Claude (or a free local Ollama model, or templates): LinkedIn notes, DMs, emails and follow-ups.
    **Nothing is sent without your approval.** You review, copy, send and mark as sent, or, if you choose, let your own
    AI agent send the LinkedIn messages you approved ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)).
+   Approve drafts one at a time, or tick several on the Outreach page and approve them together.
 5. **Alert you** on Slack or Discord when a person lead turns hot, whether a scan, Claude, the API, a CSV import or an edit
    made it hot. Alerts go out after each scan and, while `openberry serve` runs, within a few minutes.
    Export to CSV or use the JSON API with n8n or Activepieces.
@@ -172,7 +173,7 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ```bash
 uv sync --extra dev
-uv run pytest            # ~880 tests, no network needed
+uv run pytest            # ~890 tests, no network needed
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

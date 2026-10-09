@@ -921,7 +921,7 @@ def test_connect_claude_warns_when_the_app_runs_from_a_place_that_disappears(
     assert pages.unstable_location(str(translocated)) == pages.MOVE_TO_APPLICATIONS
     assert "drag it into your Applications folder" in html_lib.unescape(help_page_for(translocated))
     # Windows runs an app opened inside its zip file from a temporary folder.
-    in_zip = temp / "Temp1_OpenBerry-0.1.0-windows-x64.zip" / "OpenBerry" / "OpenBerry"
+    in_zip = temp / "Temp1_OpenBerry-windows-x64.zip" / "OpenBerry" / "OpenBerry"
     assert pages.unstable_location(str(in_zip)) == pages.EXTRACT_THE_ZIP
     assert "Extract All" in help_page_for(in_zip)
     # Where it belongs: no warning, and the note talks about the app, not a virtual environment.

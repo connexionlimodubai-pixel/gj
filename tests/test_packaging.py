@@ -248,9 +248,9 @@ def test_platform_tag(system: str, machine: str, tag: str) -> None:
 
 
 def test_archive_names() -> None:
-    assert build.archive_name("1.2.3", "windows-x64") == "OpenBerry-1.2.3-windows-x64.zip"
-    assert build.archive_name("1.2.3", "macos-arm64") == "OpenBerry-1.2.3-macos-arm64.zip"
-    assert build.archive_name("1.2.3", "linux-x64") == "OpenBerry-1.2.3-linux-x64.tar.gz"
+    assert build.archive_name("windows-x64") == "OpenBerry-windows-x64.zip"
+    assert build.archive_name("macos-arm64") == "OpenBerry-macos-arm64.zip"
+    assert build.archive_name("linux-x64") == "OpenBerry-linux-x64.tar.gz"
 
 
 def test_layouts(tmp_path: Path) -> None:
@@ -373,7 +373,7 @@ def test_build_archives_the_app_and_reports_its_paths(built: tuple[Path, Path], 
     assert outputs["cli"] == layout.cli.as_posix() and outputs["gui"] == layout.gui.as_posix()
     assert outputs["app"] == layout.app.as_posix() and outputs["version"] == openberry.__version__
     archive = Path(outputs["archive"])
-    assert archive.name == build.archive_name(openberry.__version__, build.platform_tag()) and archive.is_file()
+    assert archive.name == build.archive_name(build.platform_tag()) and archive.is_file()
     assert "Download:" in capsys.readouterr().out
 
 
@@ -623,7 +623,7 @@ def test_readme_links_the_desktop_guide() -> None:
 def test_desktop_guide_matches_the_build() -> None:
     guide = (ROOT / "docs" / "DESKTOP.md").read_text(encoding="utf-8")
     for tag in ("windows-x64", "macos-arm64", "linux-x64"):
-        assert build.archive_name("<version>", tag) in guide
+        assert build.archive_name(tag) in guide
     assert "OpenBerry.app/Contents/MacOS/openberry-cli" in guide and "openberry-cli.exe" in guide
     for name in ("packaging/build.py", "packaging/smoke_test.py", "More info", "Run anyway", "Open Anyway",
                  "Connect Claude", "~/.openberry", "logs/desktop.log", "git tag v"):

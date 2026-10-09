@@ -285,6 +285,55 @@ def _approved_note(company_id: int, message: Message) -> str:
     return "Approved. Your AI agent will send it exactly as it is, or copy it and send it yourself."
 
 
+def _bulk_selection(form: FormData) -> list[tuple[int, str]]:
+    """The ticked drafts as (message id, message_version) pairs; malformed values are ignored."""
+    selected: list[tuple[int, str]] = []
+    for value in form.getlist("message"):
+        raw_id, _, version = value.partition(":") if isinstance(value, str) else ("", "", "")
+        if raw_id.isdigit() and version and (int(raw_id), version) not in selected:
+            selected.append((int(raw_id), version))
+    return selected
+
+
+def _bulk_problems(problems: dict[str, int]) -> str:
+    parts = [f"{count} {reason}" for reason, count in problems.items()]
+    return ", ".join(parts[:-1]) + (" and " if len(parts) > 1 else "") + parts[-1]
+
+
+@router.post("/c/{company_id}/outreach/bulk")
+def bulk_message_action(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Approve or skip the drafts ticked on the Outreach page's Drafts tab."""
+    company = repo.get_company(company_id)
+    back = safe_next(form.get("next"), f"/c/{company_id}/outreach?tab=drafts")
+    action = _form_text(form, "action")
+    if action not in repo.BULK_ACTIONS:
+        flash(request, "Unknown action.", "error")
+        return redirect(back)
+    selected = _bulk_selection(form)
+    if not selected:
+        flash(request, "Tick the drafts you want first, then choose Approve or Skip.", "error")
+        return redirect(back)
+    if len(selected) > repo.BULK_MESSAGES_MAX:
+        flash(request, f"Select at most {repo.BULK_MESSAGES_MAX} drafts at a time. Nothing was changed.", "error")
+        return redirect(back)
+    result = repo.bulk_update_drafts(company_id, selected, action)
+    done, problems = result["done"], result["problems"]
+    verb = "Approved" if action == "approve" else "Skipped"
+    if done:
+        text = f"{verb} {len(done)} draft{'' if len(done) == 1 else 's'}."
+        if action == "approve":
+            text += (" Your AI agent can send the LinkedIn ones." if company.outreach.agent_sending
+                     else f" Send {'it' if len(done) == 1 else 'them'} from the Approved tab.")
+        if problems:
+            text += f" {sum(problems.values())} not {verb.lower()}: {_bulk_problems(problems)}."
+    else:
+        text = f"Nothing was {verb.lower()}: {_bulk_problems(problems)}."
+    if repo.BULK_CHANGED in problems:
+        text += " Review the edited ones, then try again."
+    flash(request, text, "success" if done and not problems else "warning" if done else "error")
+    return redirect(back)
+
+
 @router.post("/c/{company_id}/messages/{message_id}")
 def message_action(request: Request, company_id: int, message_id: int,
                    form: FormData = Depends(checked_form)) -> Response:

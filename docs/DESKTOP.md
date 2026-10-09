@@ -19,11 +19,11 @@ release, and under **Assets** download the file for your computer:
 
 | Your computer | The file to download |
 |---|---|
-| Windows 10 or 11 | `OpenBerry-<version>-windows-x64.zip` |
-| Mac with Apple silicon (M1 or newer), macOS 11 or later | `OpenBerry-<version>-macos-arm64.zip` |
-| Linux, 64-bit | `OpenBerry-<version>-linux-x64.tar.gz` |
+| Windows 10 or 11 | `OpenBerry-windows-x64.zip` |
+| Mac with Apple silicon (M1 or newer), macOS 11 or later | `OpenBerry-macos-arm64.zip` |
+| Linux, 64-bit | `OpenBerry-linux-x64.tar.gz` |
 
-`<version>` is the release number, for example `OpenBerry-0.1.0-windows-x64.zip`.
+The file names are the same for every version (version 0.1.0 used names like `OpenBerry-0.1.0-windows-x64.zip`); the release title says which version you have.
 
 There is no download for Macs with an Intel processor yet. To check which kind you have, open the
 Apple menu and click **About This Mac**: "Chip: Apple M…" means Apple silicon.
@@ -75,7 +75,7 @@ The window uses Microsoft Edge WebView2, which Windows 10 and 11 already include
 ## Linux
 
 1. Extract it: right-click the `.tar.gz` file and choose **Extract Here**, or run
-   `tar -xzf OpenBerry-*-linux-x64.tar.gz`.
+   `tar -xzf OpenBerry-linux-x64.tar.gz`.
 2. Run `./OpenBerry/OpenBerry` from a terminal. The dashboard opens in your web browser. The Linux app has
    no window of its own: that would need system libraries (GTK or Qt) that differ between Linux distributions.
 3. To stop OpenBerry, press **Ctrl+C** in that terminal. If you started it by double-clicking, there is no
@@ -234,7 +234,7 @@ What the build makes in `dist/`:
 |---|---|---|---|
 | The app | `OpenBerry/OpenBerry.exe` | `OpenBerry.app` | `OpenBerry/OpenBerry` |
 | Command line (Claude Desktop runs `openberry-cli mcp`) | `OpenBerry/openberry-cli.exe` | `OpenBerry.app/Contents/MacOS/openberry-cli` | `OpenBerry/openberry-cli` |
-| The download | `OpenBerry-<version>-windows-x64.zip` | `OpenBerry-<version>-macos-arm64.zip` | `OpenBerry-<version>-linux-x64.tar.gz` |
+| The download | `OpenBerry-windows-x64.zip` | `OpenBerry-macos-arm64.zip` | `OpenBerry-linux-x64.tar.gz` |
 
 How it fits together:
 

@@ -54,6 +54,25 @@
     });
   }
 
+  // Success and info messages fade after a few seconds (not while hovered or focused);
+  // errors and warnings stay until the user closes them.
+  function initFlashes() {
+    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    document.querySelectorAll(".flashes .flash-success, .flashes .flash-info").forEach((el) => {
+      let timer = null;
+      const leave = () => {
+        if (el.matches(":hover") || el.contains(document.activeElement)) { start(); return; }
+        if (reduce) { el.remove(); return; }
+        el.classList.add("is-leaving");
+        setTimeout(() => el.remove(), 260);
+      };
+      const start = () => { clearTimeout(timer); timer = setTimeout(leave, 6000); };
+      el.addEventListener("mouseenter", () => clearTimeout(timer));
+      el.addEventListener("mouseleave", start);
+      start();
+    });
+  }
+
   function openDetails(id) {
     const details = document.getElementById(id);
     if (!details || details.tagName !== "DETAILS") return false;
@@ -62,6 +81,47 @@
     const field = $("input, select, textarea", details);
     if (field) field.focus({ preventScroll: true });
     return true;
+  }
+
+  // Outreach Drafts tab: tick drafts, then approve or skip them together. Without this script the
+  // checkboxes and buttons still work; it adds "Select all", the live count and the confirm text.
+  function initBulk() {
+    const form = $("form[data-bulk]");
+    if (!form) return;
+    const items = $$('input[data-bulk-item]').filter((el) => el.form === form);
+    const all = $("[data-bulk-all]", form);
+    const count = $("[data-bulk-count]", form);
+    const buttons = $$("[data-bulk-action]", form);
+    const drafts = (n) => n + (n === 1 ? " draft" : " drafts");
+    const update = () => {
+      const n = items.filter((el) => el.checked).length;
+      if (all) {
+        all.checked = n > 0 && n === items.length;
+        all.indeterminate = n > 0 && n < items.length;
+      }
+      count.textContent = n ? drafts(n) + " selected" : "Tick drafts to approve or skip them together.";
+      buttons.forEach((btn) => {
+        const approve = btn.getAttribute("data-bulk-action") === "approve";
+        btn.disabled = n === 0;
+        $("[data-bulk-label]", btn).textContent = (approve ? "Approve" : "Skip") + " selected" + (n ? " (" + n + ")" : "");
+        btn.setAttribute("data-confirm", approve
+          ? "Approve " + drafts(n) + " exactly as written? Approved LinkedIn messages can be sent by your AI agent if it is on."
+          : "Skip " + drafts(n) + "? They leave the queue and won't be sent.");
+      });
+    };
+    if (all) {
+      $$("[data-bulk-js]", form).forEach((el) => { el.hidden = false; });
+      all.addEventListener("change", () => {
+        items.forEach((el) => { el.checked = all.checked; });
+        update();
+      });
+    }
+    items.forEach((el) => el.addEventListener("change", update));
+    // Against double submits; after the browser has read the clicked button's action (a disabled one isn't sent).
+    form.addEventListener("submit", () => setTimeout(() => buttons.forEach((btn) => { btn.disabled = true; }), 0));
+    // Restore after the browser's back button, which can bring back ticked boxes.
+    window.addEventListener("pageshow", update);
+    update();
   }
 
   function initDetailsLinks() {
@@ -376,6 +436,8 @@
     initAutosubmit();
     initConfirm();
     initDismiss();
+    initFlashes();
+    initBulk();
     initDetailsLinks();
     initCopy();
     initCounters();

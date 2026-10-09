@@ -171,6 +171,9 @@
   <div class="card">{% call m.empty("clock", "No follow-ups due") %}<p>Leads you contacted show up here once the follow-up delay has passed without a reply.</p>{% endcall %}</div>
   {% endif %}
 {% elif messages %}
+{# Drafts can be approved or skipped together. The checkboxes belong to #bulk-form (form="..."), which sits after the
+   list, so no form is nested in another; each carries message_version, so only the text on this page is approved. #}
+{% set bulk = tab == "drafts" %}
 <ul class="queue">
   {% for msg in messages %}
   {% set lead = leads.get(msg.lead_id) %}
@@ -178,6 +181,9 @@
   {% set too_long = msg.channel == "linkedin_connect" and msg.status in ("draft", "approved") and msg.body|length > note_max %}
   <li class="card queue-item" id="q-{{ msg.id }}">
     <div class="queue-head">
+      {% if bulk and msg.status == "draft" %}
+      <label class="bulk-pick"><input type="checkbox" name="message" value="{{ msg.id }}:{{ message_version(msg) }}" form="bulk-form" data-bulk-item><span class="sr-only">Select the draft to {{ (lead.full_name or lead.lead_company or "this lead") if lead else "this lead" }}</span></label>
+      {% endif %}
       {% if lead %}
       {{ m.avatar(lead.full_name, lead.kind) }}
       <div class="min0 grow"><a class="lead-name" href="{{ base }}/leads/{{ lead.id }}">{{ m.lead_title(lead) }}</a><span class="sub">{{ m.lead_sub(lead) }}{% if lead.lead_company and lead.kind == "person" %} · {{ lead.lead_company }}{% endif %}</span></div>
@@ -208,6 +214,17 @@
   </li>
   {% endfor %}
 </ul>
+{% if bulk %}
+<form method="post" action="{{ base }}/outreach/bulk" id="bulk-form" class="bulk-bar" data-bulk aria-label="Approve or skip several drafts">
+  {{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab=drafts">
+  <label class="bulk-all" data-bulk-js hidden><input type="checkbox" data-bulk-all>Select all</label>
+  <p class="bulk-count" data-bulk-count aria-live="polite">Tick drafts to approve or skip them together.</p>
+  <div class="btn-row">
+    <button class="btn btn-sm btn-primary" type="submit" name="action" value="approve" data-bulk-action="approve" data-confirm="Approve the selected drafts exactly as they are written?">{{ m.icon("check", 14) }}<span data-bulk-label>Approve selected</span></button>
+    <button class="btn btn-sm" type="submit" name="action" value="skip" data-bulk-action="skip" data-confirm="Skip the selected drafts? They leave the queue and won't be sent.">{{ m.icon("x", 14) }}<span data-bulk-label>Skip selected</span></button>
+  </div>
+</form>
+{% endif %}
 {% else %}
 <div class="card">
   {% if tab == "drafts" %}

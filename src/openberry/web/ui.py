@@ -294,6 +294,7 @@ def _build_env() -> jinja2.Environment:
         SCAN_STATUS_LABELS=SCAN_STATUS_LABELS,
         DOCS_URL=DOCS_URL, AGENT_DOCS_URL=AGENT_DOCS_URL, ICONS=ICONS, LOGO=LOGO,
         AGENT_LIMIT_RANGE=AGENT_LIMIT_RANGE,
+        message_version=repo.message_version, BULK_MESSAGES_MAX=repo.BULK_MESSAGES_MAX,
         SIZE_OPTIONS=[(s, f"{s} employees") for s in COMPANY_SIZES],
         SIZE_CHIPS=[(s, s) for s in COMPANY_SIZES],
         COMPANY_TYPE_OPTIONS=[(t, "SMB" if t == "smb" else t.capitalize()) for t in COMPANY_TYPES],

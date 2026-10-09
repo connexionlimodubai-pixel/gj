@@ -29,6 +29,7 @@ The app isn't code-signed, which is why Windows and macOS ask you to confirm onc
 4. **Draft outreach** with Claude (or a free local Ollama model, or templates): LinkedIn notes, DMs, emails and follow-ups.
    **Nothing is sent without your approval.** You review, copy, send and mark as sent, or, if you choose, let your own
    AI agent send the LinkedIn messages you approved ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)).
+   Approve drafts one at a time, or tick several on the Outreach page and approve them together.
 5. **Alert you** on Slack or Discord when a person lead turns hot, whether a scan, Claude, the API, a CSV import or an edit
    made it hot. Alerts go out after each scan and, while `openberry serve` runs, within a few minutes.
    Export to CSV or use the JSON API with n8n or Activepieces.
@@ -172,7 +173,7 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ```bash
 uv sync --extra dev
-uv run pytest            # ~880 tests, no network needed
+uv run pytest            # ~890 tests, no network needed
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

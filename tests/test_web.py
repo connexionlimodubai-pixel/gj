@@ -1797,3 +1797,151 @@ def test_flash_messages_float_where_they_are_seen():
     js = (static / "app.js").read_text(encoding="utf-8")
     assert "function initFlashes()" in js and "initFlashes();" in js
     assert ".flashes .flash-success, .flashes .flash-info" in js  # errors and warnings are never auto-dismissed
+
+
+# --------------------------------------------------------------------------------------
+# Bulk approve / skip on the Outreach page's Drafts tab
+# --------------------------------------------------------------------------------------
+
+class _BulkPage(HTMLParser):
+    """The bulk form's checkboxes (inputs with form="bulk-form") and any form opened inside another one."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.depth, self.nested, self.bulk_form = 0, False, False
+        self.boxes: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        a = {k: v or "" for k, v in attrs}
+        if tag == "form":
+            self.nested |= self.depth > 0
+            self.depth += 1
+            self.bulk_form |= a.get("id") == "bulk-form"
+        elif tag == "input" and a.get("form") == "bulk-form" and a.get("type") == "checkbox":
+            self.boxes.append(a.get("value", ""))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "form":
+            self.depth -= 1
+
+
+def bulk_page(client: TestClient, path: str) -> _BulkPage:
+    reader = _BulkPage()
+    reader.feed(client.get(path).text)
+    return reader
+
+
+def draft_for(company_id: int, name: str, body: str = "", channel: str = "linkedin_dm", subject: str = ""):
+    slug = name.lower().replace(" ", "-")
+    lead, _ = repo.upsert_lead(company_id, LeadIn(full_name=name, lead_company="Northwind",
+                                                  linkedin_url=f"https://www.linkedin.com/in/{slug}"))
+    return repo.create_message(lead.id, body or f"Hi {name.split()[0]}, saw your post.", channel=channel,
+                               subject=subject)
+
+
+def bulk(client: TestClient, company_id: int, action: str, values: list[str]):
+    base = f"/c/{company_id}"
+    return client.post(f"{base}/outreach/bulk", follow_redirects=False, data={
+        "csrf_token": token(client, f"{base}/outreach"), "action": action, "message": values,
+        "next": f"{base}/outreach?tab=drafts"})
+
+
+def picked(*messages) -> list[str]:
+    return [f"{msg.id}:{repo.message_version(msg)}" for msg in messages]
+
+
+def test_bulk_approve_and_skip_ticked_drafts(client, company):
+    base = f"/c/{company.id}"
+    note = draft_for(company.id, "Omar Haddad", channel="linkedin_connect")
+    dm = draft_for(company.id, "Sara Ali")
+    mail = draft_for(company.id, "Lina Noor", channel="email", subject="Airport transfers")
+
+    page = bulk_page(client, f"{base}/outreach")
+    assert page.bulk_form and not page.nested  # the checkboxes join the form by its id: no nested forms
+    assert sorted(page.boxes) == sorted(picked(note, dm, mail))
+    html = client.get(f"{base}/outreach").text
+    assert "Approve selected" in html and "Skip selected" in html and "Select the draft to Omar Haddad" in html
+
+    resp = bulk(client, company.id, "approve", picked(note, dm))
+    assert resp.status_code == 303 and resp.headers["location"] == f"{base}/outreach?tab=drafts"
+    assert [repo.get_message(m.id).status for m in (note, dm, mail)] == ["approved", "approved", "draft"]
+    flashed = text_of(client.get(resp.headers["location"]).text)
+    assert "Approved 2 drafts. Send them from the Approved tab." in flashed
+    assert bulk_page(client, f"{base}/outreach").boxes == picked(mail)
+
+    resp = bulk(client, company.id, "skip", picked(mail))
+    assert repo.get_message(mail.id).status == "skipped"
+    assert "Skipped 1 draft." in text_of(client.get(resp.headers["location"]).text)
+    # Only the Drafts tab offers it.
+    for tab in ("approved", "sent", "replies", "followups"):
+        assert bulk_page(client, f"{base}/outreach?tab={tab}").boxes == []
+        assert 'id="bulk-form"' not in client.get(f"{base}/outreach?tab={tab}").text
+
+
+def test_bulk_approve_with_agent_sending_on_says_the_agent_may_send(client, company):
+    agent_on(company.id)
+    dm = draft_for(company.id, "Sara Ali")
+    resp = bulk(client, company.id, "approve", picked(dm))
+    assert "Approved 1 draft. Your AI agent can send the LinkedIn ones." in text_of(
+        client.get(resp.headers["location"]).text)
+    assert [i["message_id"] for i in repo.send_queue(company.id)["items"]] == [dm.id]
+
+
+def test_bulk_approve_only_takes_this_companys_drafts_as_shown(client, company):
+    other = repo.create_company(CompanyIn(name="Other Co"))
+    theirs = draft_for(other.id, "Someone Else")
+    shown = draft_for(company.id, "Sara Ali")
+    approved = draft_for(company.id, "Omar Haddad")
+    repo.update_message(approved.id, status="approved")
+    long_note = draft_for(company.id, "Lina Noor", body="Hi Lina, " + "x" * 241, channel="linkedin_connect")
+    good = draft_for(company.id, "Ali Reza")
+    stale = picked(shown)
+    repo.update_message(shown.id, body="Hi Sara, Claude rewrote this after the page was opened.")
+
+    resp = bulk(client, company.id, "approve", [*picked(theirs, approved, long_note, good), *stale])
+    assert repo.get_message(theirs.id).status == "draft"  # another company's draft, even with its fingerprint
+    assert repo.get_message(shown.id).status == "draft"  # the text changed after the page was shown
+    assert repo.get_message(long_note.id).status == "draft"  # 250 characters: too long for a free account
+    assert repo.get_message(approved.id).status == "approved" and repo.get_message(good.id).status == "approved"
+    flashed = text_of(client.get(resp.headers["location"]).text)
+    assert ("Approved 1 draft. Send it from the Approved tab. 4 not approved: 1 not found, 1 no longer a draft, "
+            "1 connection note too long and 1 edited since the page opened. Review the edited ones, then try again."
+            ) in flashed
+
+    assert "…" not in flashed[flashed.index("Approved 1 draft"):flashed.index("try again.")]
+    # Skipping doesn't care about the note's length, but still needs the text that was shown.
+    bulk(client, company.id, "skip", [*picked(long_note), *stale])
+    assert repo.get_message(long_note.id).status == "skipped" and repo.get_message(shown.id).status == "draft"
+
+
+def test_bulk_actions_refuse_bad_requests(client, company):
+    base = f"/c/{company.id}"
+    dm = draft_for(company.id, "Sara Ali")
+    assert client.post(f"{base}/outreach/bulk", data={"action": "approve", "message": picked(dm)}).status_code == 403
+    for action, values, expected in (
+        ("approve", [], "Tick the drafts you want first"),
+        ("approve", ["abc", f"{dm.id}", f"-{dm.id}:x", ":"], "Tick the drafts you want first"),
+        ("send", picked(dm), "Unknown action."),
+        ("approve", [f"{i}:abc" for i in range(1, repo.BULK_MESSAGES_MAX + 2)], "Select at most 200 drafts"),
+        ("approve", [f"{dm.id}:0000000000000000"], "Nothing was approved: 1 edited since the page opened. Review the edited ones"),
+    ):
+        resp = bulk(client, company.id, action, values)
+        assert resp.status_code == 303 and expected in text_of(client.get(resp.headers["location"]).text)
+        assert repo.get_message(dm.id).status == "draft"
+    # The same draft ticked twice is approved once.
+    resp = bulk(client, company.id, "approve", picked(dm) * 2)
+    assert "Approved 1 draft." in text_of(client.get(resp.headers["location"]).text)
+    assert bulk(client, 9999, "approve", picked(dm)).status_code == 404
+    with pytest.raises(ValueError):
+        repo.bulk_update_drafts(company.id, picked_pairs(dm), "send")
+
+
+def picked_pairs(*messages) -> list[tuple[int, str]]:
+    return [(msg.id, repo.message_version(msg)) for msg in messages]
+
+
+def test_bulk_bar_script_keeps_the_clicked_action():
+    js = (Path(__file__).parent.parent / "src" / "openberry" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "function initBulk()" in js and "initBulk();" in js
+    # A button disabled before the browser reads the form would drop action=approve from the request.
+    assert "setTimeout(() => buttons.forEach((btn) => { btn.disabled = true; }), 0)" in js

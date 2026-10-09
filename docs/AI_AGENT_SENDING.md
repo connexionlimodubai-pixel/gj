@@ -85,6 +85,10 @@ X of 5**.
 
 - Approve drafts on the **Outreach** page (the **Drafts** tab) or on a lead's page. Read every message first: your agent
   sends it word for word.
+- To approve several at once, tick them on the **Drafts** tab (or **Select all**) and click **Approve selected**.
+  Only the text you see is approved: a draft that Claude or another tab changed after you opened the page stays a
+  draft, and so does a connection note too long for your LinkedIn account. **Skip selected** takes drafts out of the
+  queue the same way.
 - Approved messages your agent will send carry a **Queued for your agent** tag. When you approve one, OpenBerry also
   tells you, while agent sending is on, whether your agent will send it, or why not.
 - Under the queue, *"… can't be sent by your agent"* lists approved LinkedIn messages that are held back, each with the

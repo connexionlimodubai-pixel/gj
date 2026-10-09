@@ -901,6 +901,64 @@ def delete_message(message_id: int, conn: sqlite3.Connection | None = None) -> N
         c.execute("DELETE FROM messages WHERE id = ?", (message_id,))
 
 
+BULK_MESSAGES_MAX = 200  # the Drafts tab lists at most 200 messages
+BULK_ACTIONS = {"approve": "approved", "skip": "skipped"}
+BULK_NOT_FOUND = "not found"
+BULK_NOT_DRAFT = "no longer a draft"
+BULK_CHANGED = "edited since the page opened"
+BULK_NOTE_TOO_LONG = "connection note too long"
+
+
+def message_version(msg: Message) -> str:
+    """A fingerprint of the text a reviewer sees. Bulk actions carry it, so an approval covers the text on the page
+    and not one Claude or another tab saved after the page was opened."""
+    text = "\0".join((msg.channel, msg.subject, msg.body))
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def bulk_update_drafts(company_id: int, selected: list[tuple[int, str]], action: str,
+                       conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Approve or skip several drafts of one company in one transaction.
+
+    `selected` holds (message id, message_version) pairs. A message is changed only while it is still an outbound
+    draft of this company with the same text; an approval also needs a connection note that fits the company's
+    LinkedIn account. Returns {"done": [ids], "problems": {reason: count}}.
+    """
+    if action not in BULK_ACTIONS:
+        raise ValueError(f"action must be one of {', '.join(BULK_ACTIONS)}")
+    if len(selected) > BULK_MESSAGES_MAX:
+        raise ValueError(f"select at most {BULK_MESSAGES_MAX} messages at a time")
+    done: list[int] = []
+    problems: dict[str, int] = {}
+    with _write_locked(conn) as c:
+        company = get_company(company_id, conn=c)
+        now = iso()
+        seen: set[int] = set()
+        for message_id, version in selected:
+            if message_id in seen:
+                continue
+            seen.add(message_id)
+            row = c.execute("SELECT * FROM messages WHERE id = ? AND company_id = ?",
+                            (message_id, company_id)).fetchone()
+            msg = _message_from_row(row) if row is not None else None
+            if msg is None:
+                problem = BULK_NOT_FOUND
+            elif msg.direction != "outbound" or msg.status != "draft":
+                problem = BULK_NOT_DRAFT
+            elif message_version(msg) != version:
+                problem = BULK_CHANGED
+            elif (action == "approve" and msg.channel == "linkedin_connect"
+                  and len(msg.body) > connect_note_limit(company)):
+                problem = BULK_NOTE_TOO_LONG
+            else:
+                c.execute("UPDATE messages SET status = ?, updated_at = ? WHERE id = ? AND status = 'draft'",
+                          (BULK_ACTIONS[action], now, message_id))
+                done.append(message_id)
+                continue
+            problems[problem] = problems.get(problem, 0) + 1
+    return {"done": done, "problems": problems}
+
+
 def list_messages(company_id: int, *, status: str | None = None, lead_id: int | None = None,
                   direction: str | None = None, limit: int = 100, offset: int = 0,
                   conn: sqlite3.Connection | None = None) -> list[Message]:

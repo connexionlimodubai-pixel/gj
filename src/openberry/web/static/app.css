@@ -548,6 +548,16 @@ a.lead-name:hover { color: var(--accent-text); }
 .queue-meta { color: var(--muted); font-size: 12.5px; }
 .queue-subject { font-weight: 500; }
 .queue-body, .bubble-body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); background: var(--surface-2); border-radius: var(--radius-sm); padding: var(--s3); font-size: 13.5px; }
+/* Bulk approve on the Drafts tab: a checkbox per draft, and a bar that stays in view while the list scrolls. */
+.bulk-pick { display: inline-grid; place-items: center; width: 32px; height: 32px; margin: -6px 0 -6px -8px; border-radius: var(--radius-sm); cursor: pointer; }
+.bulk-pick:hover { background: var(--surface-2); }
+.bulk-pick input, .bulk-all input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.queue-item:has([data-bulk-item]:checked) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.bulk-bar { position: sticky; bottom: var(--s3); z-index: 5; margin-top: var(--s3); display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; padding: var(--s3) var(--s4); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.bulk-all { display: inline-flex; align-items: center; gap: var(--s2); font-weight: 600; font-size: 13.5px; cursor: pointer; }
+.bulk-all[hidden] { display: none; }
+.bulk-count { flex: 1 1 160px; color: var(--text-2); font-size: 13px; }
+.bulk-bar .btn-row { margin-left: auto; }
 .counter { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .counter.over { color: var(--danger); font-weight: 600; }
 

@@ -10,10 +10,10 @@ thinking through MCP, and a web dashboard (with a registration board for your co
 
 | Windows 10/11 | Mac (Apple silicon) | Linux |
 |---|---|---|
-| [**OpenBerry for Windows**](https://github.com/connexionlimodubai-pixel/gj/releases/download/v0.1.0/OpenBerry-0.1.0-windows-x64.zip) (39 MB) | [**OpenBerry for Mac**](https://github.com/connexionlimodubai-pixel/gj/releases/download/v0.1.0/OpenBerry-0.1.0-macos-arm64.zip) (39 MB) | [**OpenBerry for Linux**](https://github.com/connexionlimodubai-pixel/gj/releases/download/v0.1.0/OpenBerry-0.1.0-linux-x64.tar.gz) (43 MB) |
+| [**OpenBerry for Windows**](https://github.com/connexionlimodubai-pixel/gj/releases/latest/download/OpenBerry-windows-x64.zip) (39 MB) | [**OpenBerry for Mac**](https://github.com/connexionlimodubai-pixel/gj/releases/latest/download/OpenBerry-macos-arm64.zip) (39 MB) | [**OpenBerry for Linux**](https://github.com/connexionlimodubai-pixel/gj/releases/latest/download/OpenBerry-linux-x64.tar.gz) (43 MB) |
 | Unzip (right-click → **Extract All**), then double-click **OpenBerry.exe**. If Windows says it protected your PC, click **More info → Run anyway**. | Unzip, drag **OpenBerry.app** to Applications, then right-click it → **Open** the first time. | Extract and run `./OpenBerry`: it opens in your browser. |
 
-Version 0.1.0. The newest version and release notes are always on the [Releases page](https://github.com/connexionlimodubai-pixel/gj/releases/latest).
+These links always download the newest version. Release notes and older versions are on the [Releases page](https://github.com/connexionlimodubai-pixel/gj/releases).
 The app isn't code-signed, which is why Windows and macOS ask you to confirm once. Step-by-step help: [docs/DESKTOP.md](docs/DESKTOP.md).
 
 ## What it does

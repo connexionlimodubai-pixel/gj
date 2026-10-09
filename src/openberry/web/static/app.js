@@ -54,6 +54,25 @@
     });
   }
 
+  // Success and info messages fade after a few seconds (not while hovered or focused);
+  // errors and warnings stay until the user closes them.
+  function initFlashes() {
+    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    document.querySelectorAll(".flashes .flash-success, .flashes .flash-info").forEach((el) => {
+      let timer = null;
+      const leave = () => {
+        if (el.matches(":hover") || el.contains(document.activeElement)) { start(); return; }
+        if (reduce) { el.remove(); return; }
+        el.classList.add("is-leaving");
+        setTimeout(() => el.remove(), 260);
+      };
+      const start = () => { clearTimeout(timer); timer = setTimeout(leave, 6000); };
+      el.addEventListener("mouseenter", () => clearTimeout(timer));
+      el.addEventListener("mouseleave", start);
+      start();
+    });
+  }
+
   function openDetails(id) {
     const details = document.getElementById(id);
     if (!details || details.tagName !== "DETAILS") return false;
@@ -376,6 +395,7 @@
     initAutosubmit();
     initConfirm();
     initDismiss();
+    initFlashes();
     initDetailsLinks();
     initCopy();
     initCounters();

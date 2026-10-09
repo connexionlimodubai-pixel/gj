@@ -6,6 +6,7 @@ import asyncio
 import html as html_lib
 import json
 import re
+from pathlib import Path
 import sys
 import time
 import types
@@ -1785,3 +1786,14 @@ def test_a_sent_note_is_never_flagged_too_long(client, company):
     item = text_of(raw)
     assert "250 characters" in item and "/ 200" not in item and "too long" not in item and "shorten" not in item
     assert "counter over" not in raw
+
+
+def test_flash_messages_float_where_they_are_seen():
+    """Redirects land on a section (#agent, #outreach): the confirmation must not be scrolled out of view."""
+    static = Path(__file__).parent.parent / "src" / "openberry" / "web" / "static"
+    css = (static / "app.css").read_text(encoding="utf-8")
+    flashes_rule = re.search(r"\.flashes \{[^}]*\}", css).group(0)
+    assert "position: fixed" in flashes_rule
+    js = (static / "app.js").read_text(encoding="utf-8")
+    assert "function initFlashes()" in js and "initFlashes();" in js
+    assert ".flashes .flash-success, .flashes .flash-info" in js  # errors and warnings are never auto-dismissed

@@ -254,7 +254,15 @@ img, svg { vertical-align: middle; }
 .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s3); }
 
 /* ------------------------------------------------------------------ flashes, alerts, empty states */
-.flashes { display: grid; gap: var(--s2); margin-bottom: var(--s5); }
+/* Flash messages float in the top-right corner so they are seen even when a redirect scrolls the
+   page to a section (#agent, #outreach...). Successes fade out (app.js); errors stay until dismissed. */
+.flashes { position: fixed; top: var(--s4); right: var(--s4); z-index: 60; display: grid; gap: var(--s2);
+  width: min(420px, calc(100vw - 2 * var(--s4))); pointer-events: none; }
+.flashes .flash { pointer-events: auto; background: var(--surface); border: 1px solid var(--border);
+  border-left: 4px solid currentColor; box-shadow: var(--shadow); animation: flash-in 0.18s ease-out; }
+.flash.is-leaving { opacity: 0; transform: translateY(-4px); transition: opacity 0.25s ease, transform 0.25s ease; }
+@keyframes flash-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .flashes .flash { animation: none; } .flash.is-leaving { transition: none; } }
 .flash { display: flex; align-items: flex-start; gap: var(--s3); padding: var(--s3) var(--s3) var(--s3) var(--s4); border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow-sm); }
 .flash > .icon { margin-top: 2px; }
 .flash p { flex: 1; }
@@ -264,6 +272,7 @@ img, svg { vertical-align: middle; }
 .flash-warning { background: var(--warning-bg); border-color: transparent; color: var(--warning); }
 .flash-info { background: var(--info-bg); border-color: transparent; color: var(--info); }
 .flash p, .flash-success p, .flash-error p { color: var(--text); }
+.flashes .flash-success, .flashes .flash-error, .flashes .flash-warning, .flashes .flash-info { background: var(--surface); border-color: var(--border); border-left-color: currentColor; }
 .form-alert { display: flex; gap: var(--s3); padding: var(--s4); margin-bottom: var(--s4); border-radius: var(--radius-sm); background: var(--danger-bg); color: var(--danger); }
 .form-alert .error-where { font-weight: 600; }
 .form-alert div { color: var(--text); }
@@ -725,6 +734,7 @@ a.lead-name:hover { color: var(--accent-text); }
   .how-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
+  .flashes { top: calc(56px + var(--s2)); right: var(--s3); width: calc(100vw - 2 * var(--s3)); }
   .with-sidebar .main { margin-left: 0; }
   .topbar { display: flex; align-items: center; gap: var(--s2); position: sticky; top: 0; z-index: 30; height: 56px; padding: 0 var(--s3); background: var(--surface); border-bottom: 1px solid var(--border); }
   .topbar-company { margin-left: auto; font-size: 13px; font-weight: 600; color: var(--text-2); max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

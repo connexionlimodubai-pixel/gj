@@ -2,9 +2,12 @@
 
 Runs PyInstaller with packaging/openberry.spec, then packs the result into one archive in dist/:
 
-  OpenBerry-<version>-windows-x64.zip    the OpenBerry folder (OpenBerry.exe, openberry-cli.exe, _internal)
-  OpenBerry-<version>-macos-arm64.zip    OpenBerry.app, zipped with `ditto` to keep its symlinks and signature
-  OpenBerry-<version>-linux-x64.tar.gz   the OpenBerry folder, with its file permissions
+  OpenBerry-windows-x64.zip    the OpenBerry folder (OpenBerry.exe, openberry-cli.exe, _internal)
+  OpenBerry-macos-arm64.zip    OpenBerry.app, zipped with `ditto` to keep its symlinks and signature
+  OpenBerry-linux-x64.tar.gz   the OpenBerry folder, with its file permissions
+
+The names carry no version number on purpose: the release says which version it is, and
+https://github.com/<owner>/<repo>/releases/latest/download/<name> then always gets the newest one.
 
 Needs the project and PyInstaller in the Python that runs it, e.g.
 `uv pip install -e '.[desktop]' pyinstaller pyinstaller-hooks-contrib` (no `[desktop]` on Linux).
@@ -59,9 +62,10 @@ def platform_tag(system: str = sys.platform, machine: str | None = None) -> str:
     return f"{os_name(system)}-{ARCH_NAMES.get(machine, machine or 'unknown')}"
 
 
-def archive_name(version: str, tag: str) -> str:
+def archive_name(tag: str) -> str:
+    """The download's file name: the same for every version, so .../releases/latest/download/<name> works."""
     extension = "tar.gz" if tag.startswith("linux") else "zip"
-    return f"{APP_NAME}-{version}-{tag}.{extension}"
+    return f"{APP_NAME}-{tag}.{extension}"
 
 
 @dataclass(frozen=True)
@@ -177,7 +181,7 @@ def build(args: argparse.Namespace) -> Layout:
     outputs = {"version": version, "app": layout.app.as_posix(), "gui": layout.gui.as_posix(),
                "cli": layout.cli.as_posix()}
     if not args.no_archive:
-        archive = make_archive(layout.app, dist / archive_name(version, platform_tag()))
+        archive = make_archive(layout.app, dist / archive_name(platform_tag()))
         print(f"Download: {archive} ({megabytes(archive.stat().st_size)})")
         outputs["archive"] = archive.as_posix()
     write_github_output(outputs)

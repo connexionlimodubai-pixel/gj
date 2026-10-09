@@ -1,6 +1,6 @@
 [project]
 name = "openberry"
-version = "0.1.0"
+version = "0.1.1"
 description = "Free, self-hosted, open-source alternative to Gojiberry: intent-signal lead generation driven by Claude via MCP, with a web dashboard."
 readme = "README.md"
 license = "MIT"

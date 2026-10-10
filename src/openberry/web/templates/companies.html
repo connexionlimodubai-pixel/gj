@@ -45,7 +45,7 @@
       <span class="contact">{{ m.icon("user", 14) }}{% if c.contact_name %}{{ c.contact_name }}{% else %}<span class="muted">No contact person</span>{% endif %}{% if c.contact_email %}<span class="muted"> · {{ c.contact_email }}</span>{% endif %}</span>
       <span class="btn-row">
         {% if c.status == "paused" %}
-        <form method="post" action="/c/{{ c.id }}/status">{{ m.csrf() }}<input type="hidden" name="status" value="active"><input type="hidden" name="next" value="/companies">
+        <form method="post" action="/c/{{ c.id }}/status" data-keep-scroll>{{ m.csrf() }}<input type="hidden" name="status" value="active"><input type="hidden" name="next" value="/companies">
           <button class="btn btn-sm" type="submit">{{ m.icon("play", 14) }}Activate</button></form>
         {% endif %}
         <a class="btn btn-sm btn-ghost" href="/c/{{ c.id }}/settings">{{ "Review" if pending_review(c) else "Edit" }}</a>

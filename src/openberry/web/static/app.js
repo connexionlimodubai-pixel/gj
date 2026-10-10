@@ -83,18 +83,45 @@
     return true;
   }
 
-  // Keep your place across a reload. Tabs (.tabs a) and forms or links marked data-keep-scroll load
-  // the same page again; without this the browser starts at the top. Just before leaving, remember
-  // where the page's [data-scroll-anchor] was on screen; the next page on the same path puts it back
-  // there, so the list stays where it was even if something above it changed height.
+  // Keep your place across a reload. Tabs (.tabs a) and links or forms marked data-keep-scroll load the
+  // same page again; without this the browser starts at the top. Just before leaving, remember where the
+  // page's [data-scroll-anchor] (else the page itself) was on screen; if the next page is the one the action
+  // was going to, put it back there. early.js hides the content until then (same rule as keepScrollApplies),
+  // so the top of the page doesn't flash first.
   const KEEP_SCROLL_KEY = "openberry-keep-scroll";
   const KEEP_SCROLL_MS = 15000;
 
-  function rememberScroll(focusTab) {
+  function keepScrollApplies(state) {
+    const age = state ? Date.now() - state.at : -1;
+    return !!state && state.to === location.pathname + location.search && !location.hash
+      && age >= 0 && age < KEEP_SCROLL_MS;
+  }
+
+  // The top of what the user can see: below the sticky top bar on a phone.
+  function screenTop() {
+    const bar = $(".topbar");
+    return bar ? Math.max(0, bar.getBoundingClientRect().bottom) : 0;
+  }
+
+  function byKeyboard() {
+    const el = document.activeElement;
+    try { return !!el && el !== document.body && el.matches(":focus-visible"); } catch (err) { return false; }
+  }
+
+  function rememberScroll(to, focus, leaving) {
     const anchor = $("[data-scroll-anchor]");
+    // List items the action takes away (the one acted on, the ticked drafts) leave a gap after the reload. The part
+    // of it above the screen would pull items not read yet out of view, so the page comes back that much higher.
+    const top = screenTop();
+    let removed = 0;
+    (leaving || []).forEach((li) => {
+      const next = li.nextElementSibling;
+      const end = next ? next.getBoundingClientRect().top : li.getBoundingClientRect().bottom;
+      removed += Math.max(0, Math.min(end, top) - li.getBoundingClientRect().top);
+    });
     const state = {
-      path: location.pathname, y: window.scrollY, at: Date.now(), focusTab: focusTab,
-      top: anchor ? anchor.getBoundingClientRect().top : null,
+      to: to, at: Date.now(), focus: focus || null, y: window.scrollY - removed,
+      top: anchor ? anchor.getBoundingClientRect().top + removed : null,
     };
     try { sessionStorage.setItem(KEEP_SCROLL_KEY, JSON.stringify(state)); } catch (err) { /* storage blocked */ }
   }
@@ -102,34 +129,80 @@
   function restoreScroll() {
     let state = null;
     try {
-      state = JSON.parse(sessionStorage.getItem(KEEP_SCROLL_KEY) || "null");
+      const raw = sessionStorage.getItem(KEEP_SCROLL_KEY);
       sessionStorage.removeItem(KEEP_SCROLL_KEY);
+      state = JSON.parse(raw || "null");
     } catch (err) { return; }
-    // Another page, an old click, or a #section link (it decides where to land) start as usual.
-    if (!state || state.path !== location.pathname || location.hash) return;
-    if (!(Date.now() - state.at >= 0 && Date.now() - state.at < KEEP_SCROLL_MS)) return;
+    // Another page, an old or abandoned click and a #section link (it decides where to land) start as usual,
+    // and so does a form shown again with errors: they are listed at its top.
+    if (!keepScrollApplies(state) || $(".form-alert")) return;
     const anchor = $("[data-scroll-anchor]");
-    const y = anchor && typeof state.top === "number"
+    let y = anchor && typeof state.top === "number"
       ? anchor.getBoundingClientRect().top + window.scrollY - state.top
       : state.y;
-    if (typeof y === "number" && isFinite(y)) window.scrollTo(0, Math.max(0, y));
-    if (state.focusTab) {
-      const current = $('.tabs a[aria-current="page"]');
-      if (current) current.focus({ preventScroll: true });
+    if (typeof y !== "number" || !isFinite(y)) return;
+    y = Math.max(0, y);
+    // A short page (an empty tab) would stop above y and move the tabs: give it room below instead.
+    const main = $(".main");
+    const short = y - (document.documentElement.scrollHeight - window.innerHeight);
+    if (short > 0 && main) {
+      main.style.paddingBottom = (parseFloat(getComputedStyle(main).paddingBottom) || 0) + Math.ceil(short) + "px";
     }
+    window.scrollTo(0, y);
+    if (!state.focus) return;
+    // From the keyboard, the next Tab goes on from where the user was, not from the top of the page.
+    let target = null;
+    if (state.focus === "tab") {
+      target = $('.tabs a[aria-current="page"]');
+    } else {
+      const form = $$("form[data-keep-scroll]").find((f) => f.getAttribute("action") === state.focus.action);
+      target = form && $$("button[type=submit], button:not([type])", form).find((b) => b.value === state.focus.value);
+      if (!target) {
+        const li = $$(".queue > li").find((el) => el.getBoundingClientRect().bottom > screenTop());
+        target = li && $("input:not([type=hidden]), a[href], button:not([disabled])", li);
+      }
+    }
+    if (target) target.focus({ preventScroll: true });
+  }
+
+  // A phone shows only part of the tab strip: bring the current tab into it (scrollIntoView would move the page).
+  function showCurrentTab() {
+    const strip = $(".tabs");
+    const current = $('.tabs a[aria-current="page"]');
+    if (!strip || !current) return;
+    const s = strip.getBoundingClientRect();
+    const c = current.getBoundingClientRect();
+    if (c.left < s.left || c.right > s.right) strip.scrollLeft += c.left - s.left - (s.width - c.width) / 2;
   }
 
   function initKeepScroll() {
+    document.documentElement.classList.remove("keep-scroll");  // set by early.js; hidden things can't take focus
+    showCurrentTab();
     restoreScroll();
     document.addEventListener("click", (e) => {
       const link = e.target.closest(".tabs a[href], a[data-keep-scroll]");
       if (!link || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       if (link.target && link.target !== "_self") return;
-      // A keyboard press on a tab (click with detail 0) gets the focus back on the tab it opened.
-      rememberScroll(e.detail === 0 && link.matches(".tabs a"));
+      // A tab opened from the keyboard (a click with detail 0) gets the focus back.
+      rememberScroll(link.pathname + link.search, e.detail === 0 && link.matches(".tabs a") ? "tab" : null);
     });
     document.addEventListener("submit", (e) => {
-      if (!e.defaultPrevented && e.target.matches("form[data-keep-scroll]")) rememberScroll(false);
+      const form = e.target;
+      if (e.defaultPrevented || !form.matches("form[data-keep-scroll]")) return;
+      // Where the server sends the user back: the form's "next" (a #section there wins), else this page.
+      const next = form.querySelector('input[name="next"]');
+      let to = location.pathname + location.search;
+      if (next && next.value) {
+        try { const url = new URL(next.value, location.href); to = url.pathname + url.search; } catch (err) { /* keep */ }
+      }
+      // Cards the action takes off the list: the ticked drafts, or the card of a form marked data-keep-scroll="remove".
+      let leaving = [];
+      const card = form.closest(".queue > li");
+      if (form.matches("[data-bulk]")) leaving = $$(".queue > li").filter((li) => $("[data-bulk-item]:checked", li));
+      else if (card && form.getAttribute("data-keep-scroll") === "remove") leaving = [card];
+      const submitter = e.submitter || form.querySelector("button[type=submit], button:not([type])");
+      const focus = byKeyboard() ? { action: form.getAttribute("action"), value: submitter ? submitter.value : "" } : null;
+      rememberScroll(to, focus, leaving);
     });
   }
 

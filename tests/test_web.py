@@ -1970,10 +1970,63 @@ def test_outreach_tabs_and_list_actions_keep_your_place(client, company):
 
 
 def test_keep_scroll_script():
-    js = (Path(__file__).parent.parent / "src" / "openberry" / "web" / "static" / "app.js").read_text(encoding="utf-8")
-    assert "function initKeepScroll()" in js
+    static = Path(__file__).parent.parent / "src" / "openberry" / "web" / "static"
+    js = (static / "app.js").read_text(encoding="utf-8")
     init = js[js.index("function init() {"):]
     assert init.index("initKeepScroll();") < init.index("initNav();")  # restore before anything else runs
-    keep = js[js.index("function rememberScroll"):js.index("function initKeepScroll")]
-    assert "state.path !== location.pathname || location.hash" in keep  # other pages and #section links: as usual
-    assert "sessionStorage" in keep and "try {" in keep  # storage can be blocked
+    keep = js[js.index("const KEEP_SCROLL_KEY"):js.index("function initBulk")]
+    assert 'closest(".tabs a[href], a[data-keep-scroll]")' in keep  # tab clicks are remembered...
+    assert 'form.matches("form[data-keep-scroll]")' in keep  # ...and so are marked forms (Approve, Mark sent, bulk)
+    assert "window.scrollTo(0, y)" in keep  # and the place is put back
+    # Only on the page the action was going to (its "next"), never over a #section link or a form with errors.
+    assert "state.to === location.pathname + location.search && !location.hash" in keep
+    assert '$(".form-alert")' in keep
+    # Cards taken off the list above the screen don't pull unread ones out of view.
+    assert '$$(".queue > li").filter((li) => $("[data-bulk-item]:checked", li))' in keep
+    assert 'form.getAttribute("data-keep-scroll") === "remove"' in keep
+    assert "sessionStorage" in keep and "catch (err)" in keep  # storage can be blocked
+    # early.js hides the content until app.js has restored it (no flash of the top), with the same rule, for 1 s.
+    early = (static / "early.js").read_text(encoding="utf-8")
+    assert 'keep.to === location.pathname + location.search && !location.hash' in early
+    assert 'classList.add("keep-scroll")' in early and "1000" in early
+    assert 'document.documentElement.classList.remove("keep-scroll")' in keep
+    css = (static / "app.css").read_text(encoding="utf-8")
+    assert ".keep-scroll .main { visibility: hidden; }" in css
+    assert "scroll-padding-top" in css  # phones: #section links land below the sticky top bar
+
+
+def test_other_pages_keep_your_place_too(client, company):
+    """Saving the profile, Activate on the board and the lead page's forms come back to the same page."""
+    base = f"/c/{company.id}"
+    settings = client.get(f"{base}/settings").text
+    assert re.search(r'<form method="post" action="[^"]*" class="company-form"[^>]*data-keep-scroll', settings)
+    assert "data-keep-scroll" not in client.get("/register").text  # the wizard moves between steps itself
+    repo.update_company(company.id, {"status": "paused"})
+    board = client.get("/companies").text
+    assert re.search(rf'<form method="post" action="/c/{company.id}/status" data-keep-scroll>', board)
+    msg = draft_for(company.id, "Sara Ali")
+    lead_page = client.get(f"{base}/leads/{msg.lead_id}").text
+    for action in (f"{base}/messages/{msg.id}", f"{base}/leads/{msg.lead_id}/update",
+                   f"{base}/leads/{msg.lead_id}/profile"):
+        assert re.search(rf'<form method="post" action="{re.escape(action)}"[^>]*data-keep-scroll', lead_page), action
+    outreach_page = client.get(f"{base}/outreach").text
+    # Approve and Mark sent take their card off the list.
+    assert outreach_page.count(f'action="{base}/messages/{msg.id}" data-keep-scroll="remove"') == 2
+
+
+def test_lead_page_redirects_land_on_the_message(client, company):
+    base = f"/c/{company.id}"
+    lead, _ = repo.upsert_lead(company.id, LeadIn(full_name="Omar Haddad", lead_company="Northwind"))
+    lead_page = f"{base}/leads/{lead.id}"
+    resp = post(client, f"{lead_page}/draft", {"channel": "linkedin_dm", "engine": "template"}, page=lead_page)
+    [draft] = repo.list_messages(company.id, lead_id=lead.id)
+    assert resp.headers["location"] == f"{lead_page}#msg-{draft.id}"  # the new draft, not the card's head
+    # Deleting a message: its #msg anchor is gone, so no fragment (the form keeps the place instead).
+    resp = post(client, f"{base}/messages/{draft.id}", {"action": "delete", "next": f"{lead_page}#msg-{draft.id}"},
+                page=lead_page)
+    assert resp.headers["location"] == lead_page
+    resp = post(client, f"{lead_page}/reply", {"body": "Sounds good", "channel": "linkedin_dm"}, page=lead_page)
+    [reply] = repo.list_messages(company.id, lead_id=lead.id, direction="inbound")
+    assert resp.headers["location"] == f"{lead_page}#msg-{reply.id}"
+    resp = post(client, f"{lead_page}/reply", {"body": "  "}, page=lead_page)
+    assert resp.headers["location"] == f"{lead_page}#outreach"  # nothing logged: back to the form

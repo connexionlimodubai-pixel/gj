@@ -202,10 +202,10 @@
     {% endif %}
     <div class="btn-row">
       {% if msg.status == "draft" %}
-      <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll>{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm" type="submit" name="action" value="approve">{{ m.icon("check", 14) }}Approve</button></form>
+      <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll="remove">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm" type="submit" name="action" value="approve">{{ m.icon("check", 14) }}Approve</button></form>
       {% endif %}
       {% if msg.status in ("draft", "approved") %}
-      <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll>{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button></form>
+      <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll="remove">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button></form>
       {% endif %}
       {{ m.copy_button("#q-" ~ msg.id ~ "-body") }}
       {% if msg.direction == "outbound" and msg.status in ("draft", "approved") %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{{ m.icon("edit", 14) }}Edit</a>

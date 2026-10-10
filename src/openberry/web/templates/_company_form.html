@@ -4,7 +4,7 @@
 {% set step_count = steps|length if wizard else steps|length - 1 %}
 {% set step_labels = dict(steps) %}
 {% set error_steps = error_steps|default({}) %}
-<form method="post" action="{{ form_action }}" class="company-form{{ ' is-wizard' if wizard }}"{% if wizard %} data-wizard data-first-step="{{ first_step }}"{% endif %}>
+<form method="post" action="{{ form_action }}" class="company-form{{ ' is-wizard' if wizard }}"{% if wizard %} data-wizard data-first-step="{{ first_step }}"{% else %} data-keep-scroll{% endif %}>
 {{ m.csrf() }}
 {% if public_mode %}
 <div class="hp" aria-hidden="true"><label for="hp-field">Leave this empty</label><input id="hp-field" name="{{ honeypot }}" tabindex="-1" autocomplete="off"></div>

@@ -250,10 +250,10 @@ async def lead_draft(request: Request, company_id: int, lead_id: int,
             return redirect(back)
     else:
         subject, body = outreach.draft_template(company, lead, signals, channel, step)
-    await run_in_threadpool(lambda: repo.create_message(lead_id, body, channel=channel, subject=subject, step=step,
-                                                        generated_by=engine))
+    msg = await run_in_threadpool(lambda: repo.create_message(lead_id, body, channel=channel, subject=subject,
+                                                              step=step, generated_by=engine))
     flash(request, "Draft created. Review and edit it before you send it.")
-    return redirect(back)
+    return redirect(f"/c/{company_id}/leads/{lead_id}#msg-{msg.id}")
 
 
 @router.post("/c/{company_id}/leads/{lead_id}/reply")
@@ -263,10 +263,10 @@ def lead_reply(request: Request, company_id: int, lead_id: int, form: FormData =
     channel = choice(_form_text(form, "channel"), MESSAGE_CHANNELS) or "linkedin_dm"
     if not body:
         flash(request, "Paste the reply text first.", "error")
-    else:
-        repo.log_reply(lead_id, body, channel=channel)
-        flash(request, "Reply logged. The lead moved to 'replied' and pending drafts were skipped.")
-    return redirect(f"/c/{company_id}/leads/{lead_id}#outreach")
+        return redirect(f"/c/{company_id}/leads/{lead_id}#outreach")
+    msg = repo.log_reply(lead_id, body, channel=channel)
+    flash(request, "Reply logged. The lead moved to 'replied' and pending drafts were skipped.")
+    return redirect(f"/c/{company_id}/leads/{lead_id}#msg-{msg.id}")
 
 
 # --------------------------------------------------------------------------------------
@@ -345,7 +345,7 @@ def message_action(request: Request, company_id: int, message_id: int,
     if action == "delete":
         repo.delete_message(message_id)
         flash(request, "Message deleted.", "info")
-        return redirect(back)
+        return redirect(back.split("#", 1)[0])  # its #msg anchor is gone: the form's data-keep-scroll keeps the place
     if action not in MESSAGE_ACTIONS:
         flash(request, "Unknown action.", "error")
         return redirect(back)

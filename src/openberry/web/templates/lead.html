@@ -120,7 +120,7 @@
         </article>
         {% elif msg.status in ("draft", "approved") %}
         <article class="bubble bubble-out bubble-edit" id="msg-{{ msg.id }}">
-          <form method="post" action="{{ base }}/messages/{{ msg.id }}">
+          <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll>
             {{ m.csrf() }}
             <input type="hidden" name="next" value="{{ lead_url }}#msg-{{ msg.id }}">
             <header class="bubble-head">{{ m.msg_pill(msg.status) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ msg.generated_by }} · {{ m.when(msg.created_at) }}</span></header>
@@ -151,7 +151,7 @@
           <div class="btn-row">
             {{ m.copy_button("#msg-" ~ msg.id ~ "-text", "Copy", "btn btn-sm btn-ghost") }}
             {% if msg.status == "skipped" %}
-            <form method="post" action="{{ base }}/messages/{{ msg.id }}">{{ m.csrf() }}<input type="hidden" name="next" value="{{ lead_url }}#msg-{{ msg.id }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="draft">Back to drafts</button></form>
+            <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll>{{ m.csrf() }}<input type="hidden" name="next" value="{{ lead_url }}#msg-{{ msg.id }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="draft">Back to drafts</button></form>
             {% endif %}
           </div>
         </article>
@@ -199,7 +199,7 @@
   <aside class="lead-side">
     <section class="card" aria-labelledby="pipeline-title">
       <h2 id="pipeline-title" class="card-title">Pipeline</h2>
-      <form method="post" action="{{ lead_url }}/update" class="stack">
+      <form method="post" action="{{ lead_url }}/update" class="stack" data-keep-scroll>
         {{ m.csrf() }}
         <div class="field"><label for="lead-status">Status</label>
           <select class="input" id="lead-status" name="status">{% for value, label in STATUS_OPTIONS %}<option value="{{ value }}"{% if lead.status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
@@ -234,7 +234,7 @@
     <section class="card">
       <details class="profile-edit">
         <summary><span class="card-title">Edit profile</span>{{ m.icon("chevron-down", 16, "chev") }}</summary>
-        <form method="post" action="{{ lead_url }}/profile" class="stack">
+        <form method="post" action="{{ lead_url }}/profile" class="stack" data-keep-scroll>
           {{ m.csrf() }}
           {# An account lead stands for a company: a person's name or job title typed here would be stored
              but never shown, so people at the account are added as their own leads ("Add a person here"). #}

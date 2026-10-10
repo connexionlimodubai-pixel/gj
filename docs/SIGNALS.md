@@ -18,6 +18,7 @@ panel shows which collectors are enabled and what each one still needs.
 | **RSS / Atom feeds** | feed URLs (e.g. `https://techcrunch.com/feed/`) + keywords, competitors or news queries to match | `funding`, `job_change`, `company_news`, `keyword_mention` | the company / person when named | Free |
 | **SEC EDGAR** (US) | SEC queries + a contact e-mail (`OPENBERRY_CONTACT_EMAIL` or the company contact) | `funding` (Form D), `job_change` (8-K item 5.02) | the company | Free; SEC requires a declared User-Agent |
 | **Reddit** (optional) | `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` from a Reddit app, keywords/competitors, subreddits | `keyword_mention`, `competitor_engagement` | the Reddit user | ⚠️ Since 2026 Reddit requires OAuth and an agreement for commercial use, and is closing public API access in 2027 |
+| **Google Maps businesses** (Places API Text Search) | Google Maps searches + a Google Maps API key (API keys page) | `business_search` (strength 10, weight 10) | the business (account) with the email and phone from its own website | Free up to Google's 1,000 searches a month; OpenBerry stops at 900. Only Place IDs are kept (Google's terms) |
 
 How strong a signal is depends on what it says. "Anyone recommend a chauffeur service for a roadshow?" is stronger than a passing mention.
 A complaint about a competitor ("switching from X, too expensive") is strongest. Each collector's module docstring
@@ -33,6 +34,56 @@ The usual flow:
 2. Ask Claude: *"Find the decision-maker at the account leads of company 1 and add them."*
 3. Claude researches (website, LinkedIn MCP, search) and calls `add_leads` with the person.
    The person is scored with their own fit plus the company's hiring signal.
+
+### Google Maps businesses (a prospect list, not intent)
+
+For businesses that don't post online but are good customers, such as hotels, event planners, DMCs, law firms and
+corporate offices. Add searches under **Signals & requirements → Google Maps searches**, one per line, as you'd type them
+in Google Maps: `event management companies in Dubai`, `law firms in DIFC`. Put the place in the search. Then add your
+Google Maps API key on the dashboard's **API keys** page (or set `OPENBERRY_GOOGLE_PLACES_KEY`).
+
+How a search runs:
+
+- Google's [Text Search (New)](https://developers.google.com/maps/documentation/places/web-service/text-search) returns
+  pages of up to 20 businesses. OpenBerry reads up to 3 pages (60 businesses) per search and at most 10 pages per scan.
+  Each search runs at most once a week. Each page is one search on Google's bill: the first 1,000 a month are free, and
+  OpenBerry stops at 900 (`OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT`, or the API keys page). The page shows how many were
+  used this month.
+- For each business, OpenBerry opens its own website: the homepage, plus up to 2 contact or about pages when the
+  homepage lacks a phone number or an email on the site's own domain. For a page inside a bigger site (a hotel's page
+  on its chain's website, a law firm's Dubai office page), only pages under that page's own address are read, such as
+  the hotel's own contact page. It respects each site's robots.txt, only visits public addresses, and caps the size and
+  time of every page (1.5 MB, 10 seconds, 20 seconds per business).
+- Emails: `mailto:` links and the site's schema.org data for any domain except junk (noreply, example addresses,
+  site-builder placeholders such as `filler@godaddy.com`, image file names, error trackers); addresses in the text,
+  including `info [at] acme [dot] ae`, only on the site's own domain.
+  Addresses hidden by an email-protection service (Cloudflare) are not decoded: the site chose to hide them. Role
+  addresses such as `info@` come first. Phone numbers come from `tel:` links and the schema.org data.
+- Each business becomes an account lead with the name, website, email, phone and description its website publishes,
+  the place from your search ("Dubai") and a "Google Maps" link. A page inside a bigger site gets no domain and is
+  named by its own title plus the site's name ("Dubai – Beta Legal"), so a chain's hotels or two firms' Dubai offices
+  stay separate leads. Businesses without a website, or with only a social page, are skipped, as are sites that are
+  unreachable or keep robots out. The dashboard's scan history says how many were found, added and skipped, and which
+  searches aren't due yet.
+- A business found again (by another search, or a week later) is not visited again. It merges with leads found by other
+  sources by name, domain or Place ID, but two different Place IDs never merge by name alone. A lead you delete doesn't
+  come back: use **Disqualified** to keep one but ignore it. A scan that stops before it stores its leads (the app was
+  closed) loses nothing: those businesses are found again.
+- Google Maps businesses are not counted as new signals on the dashboard: they are a prospect list, shown as one line
+  ("Also 15 businesses found on Google Maps") under Recent signals.
+
+Google's terms forbid storing Google Maps content ("Customer will not ... pre-fetch, index, store, reshare, or rehost
+Google Maps Content outside the services"), except Place IDs, which "you can ... store ... indefinitely"
+([Places API policies](https://developers.google.com/maps/documentation/places/web-service/policies)). So the Place
+ID is all OpenBerry keeps from Google; everything else comes from the business's own website. Whether a list of
+businesses for outreach suits your use of Google Maps Platform is for you to check in Google's terms.
+
+Being on Google Maps is not intent: a `business_search` signal is worth little (weight 10, strength 10) and never counts
+toward signal stacking, so these leads are scored mostly on ICP fit and show as cold or warm. Use them as a prospect
+list, and ask Claude to find the right person at the ones that fit.
+
+Before you email them: these are business contact addresses, but email providers block mailboxes that send to people
+who didn't opt in, and anti-spam laws apply. Send few, personal, relevant emails and honour opt-outs.
 
 ## Signals Claude adds (no public API)
 
@@ -58,7 +109,8 @@ The usual flow:
   pipeline status cap the score at 15.
 
 Default weights: competitor engagement and profile visits 35, funding and job changes 30, topic posts and hiring 25,
-GitHub stars/forks and influencer engagement 20, events, company news and other signals 15.
+GitHub stars/forks and influencer engagement 20, events, company news and other signals 15, business searches 10 (they
+never count toward signal stacking).
 You can change the weight of each signal type per company (`signals.weights`, e.g. `{"hiring": 40}`) through the API or Claude.
 Sending `weights` replaces the whole map, so include every override you want to keep.
 

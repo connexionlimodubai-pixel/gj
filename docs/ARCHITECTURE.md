@@ -14,11 +14,12 @@ A Python app stores everything, collects free public signals, scores leads, and 
 │ openberry (Python)                                                                            │
 │  web/ FastAPI + Jinja dashboard: registration board, leads, signals, outreach, settings       │
 │  mcp_server.py   tools/resources/prompts over the same data                                    │
-│  services.py     run_scan → collectors → ingest → scoring → alerts (+ auto-draft)              │
-│  collectors/     Hacker News, Reddit, GitHub, Greenhouse/Lever/Ashby, News/RSS, SEC EDGAR      │
+│  services.py     run_scan → collectors → ingest → scoring → alerts (+ auto-draft, auto-approve)│
+│  collectors/     HN, Reddit, GitHub, Greenhouse/Lever/Ashby, News/RSS, SEC EDGAR, Google Maps  │
 │  scoring.py      ICP fit + time-decayed intent + signal stacking + optional Claude score       │
 │  outreach.py     template / Ollama drafting, outreach context for Claude                       │
-│  repo.py + db.py SQLite (WAL) – companies, leads, lead_keys, signals, messages, scan_runs      │
+│  repo.py + db.py SQLite (WAL) – companies, leads, lead_keys, signals, messages, scan_runs,     │
+│                  api_usage, place_searches, place_ids                                          │
 └───────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -30,11 +31,16 @@ A Python app stores everything, collects free public signals, scores leads, and 
   - `icp: ICP`: job_titles, seniorities, industries, company_sizes, locations, keywords,
     exclude_keywords, exclude_companies (never-contact list), company_types (guides Claude only, not scored)
   - `signals: SignalConfig`: enabled_types, keywords, subreddits, github_repos, job_boards,
-    hiring_keywords, news_queries, rss_feeds, sec_queries, influencers, competitor_pages, events, lookback_days, weights
+    hiring_keywords, news_queries, rss_feeds, sec_queries, places_queries (Google Maps searches, one per line),
+    influencers, competitor_pages, events, lookback_days, weights
   - `outreach: OutreachConfig`: sender, tone, language, channels, calendar link, CTA, signature,
     max_followups, followup_days, mode (review | auto_draft), banned_words, extra_instructions, linkedin_account
-    (free | premium, default free: the connection-note limits, see `outreach.connect_note_limit`), and AI agent
-    sending: agent_sending (off by default), agent_daily_limit (1-50, default 15), agent_paused_until, agent_pause_reason
+    (free | premium, default free: the connection-note limits, see `outreach.connect_note_limit`), AI agent
+    sending: agent_sending (off by default), agent_daily_limit (1-50, default 15), agent_paused_until, agent_pause_reason,
+    and auto-approve: auto_approve (off by default), auto_approve_hours (the review window, 1-72, default 2) and
+    auto_approve_since (when the user turned it on, made the window shorter, or activated the paused company). The
+    profile form shows neither the pause nor auto-approve, and `repo.update_company` keeps both as stored when it is
+    given a whole profile.
   - `notify: NotifyConfig`: Slack and Discord webhooks, min_score (alerts need a hot lead, so values below 70 act as 70)
 - **Lead**: a person (`kind="person"`) or an account (`kind="account"`, company-level intent such as
   hiring or funding, with no contact found yet). People inherit 60% of their company's account-level intent.
@@ -44,7 +50,17 @@ A Python app stores everything, collects free public signals, scores leads, and 
   URL and a dedupe key `(company_id, source, external_id)`.
 - **Message**: an outbound draft/sent message or an inbound reply (`direction`), with sequence `step`. `sent_via` records who
   marked it sent: `""` the user, `"agent"` the user's AI agent (`confirm_message_sent`), `"claude"` Claude (`update_message`).
-  Added in schema version 3.
+  Added in schema version 3. Schema version 4 added `auto_hold` (1 = the user, or Claude for them, held this draft: auto-approve
+  never approves it; setting an approved message back to draft on purpose holds it too, and so does a new LinkedIn profile
+  or a lead leaving the pipeline, for its LinkedIn drafts and lapsed approvals), `approved_via` (`"auto"` = auto-approve
+  approved it, `""` = a person did; cleared whenever it becomes a draft or a person approves it) and `auto_blocked`
+  (1 = auto-approve found a reason to leave this draft alone; once the reason goes away its window starts again).
+- **api_usage**: paid API calls per service and calendar month (UTC), the monthly cap on Google Maps searches.
+- **place_searches**: when each company last read every page of each Google Maps search (a search runs at most once a
+  week). **place_ids**: the Google Place IDs a company already handled (`added = 1`: became a lead, never added again,
+  written by `services.ingest` with the lead so an interrupted scan loses nothing; `added = 0`: skipped, checked again
+  after 30 days). Google's terms allow storing Place IDs and nothing else from Places.
+  The three tables are created with `CREATE TABLE IF NOT EXISTS` (no schema version change).
 - **ScanRun**: one scan with per-collector stats. Status: `running`, `ok`, `failed` (it crashed, or every source failed or
   found nothing and only warned) or `nothing_configured`, with the reason in `stats["error"]`.
   The scheduler retries a failed scan after an hour.
@@ -67,9 +83,34 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   not alerted yet; `repo.claim_new_hot_leads` hands each lead out exactly once. It runs after every scan, and the scheduler
   (`openberry serve`) runs it for every active company on each tick, so leads made hot by Claude, the API, CSV imports or
   edits are alerted too.
+- `repo.auto_approve_due(company_id, now=None, conn=None)` approves the drafts whose review window has passed, when the
+  company is active and has auto-approve on: a draft is due at `max(updated_at, auto_approve_since) + auto_approve_hours`,
+  so an edit restarts its window and turning auto-approve on never approves a backlog at once. It never approves a held
+  draft, a lead whose status is replied/meeting/won/lost/disqualified or who replied, a lead on the never-contact list or
+  matching excluded keywords (the agent queue's own checks), a step already sent to the lead (the agent's check too), a
+  connection note too long for the LinkedIn account, a draft with a banned word or an unfilled placeholder
+  (`outreach.unfilled_placeholder`), an email without a subject, the first `linkedin_dm` after a connection request (no one
+  knows whether it was accepted), or a second message to the same lead (one at a time, step by step, then in the order
+  written). A draft it leaves alone is flagged (`auto_blocked`); when the reason goes away, its `updated_at` is set to
+  now, so it waits a full window again rather than being approved at once. The approvals are one `BEGIN IMMEDIATE`
+  transaction of compare-and-set UPDATEs (still a draft, not held, same `updated_at`), and `repo.update_message` takes the
+  same lock, so an edit at the same moment wins: it either lands first, or sees the approval and makes the message a draft
+  again. It runs on every scheduler tick (`services.auto_approve_active_companies`, one company's error never stops the
+  others), at the end of `run_scan`, at the start of the MCP `get_send_queue`, when the Outreach page or a lead page
+  opens, and when Claude lists or reads drafts (MCP `list_outreach`, `get_lead`, `save_outreach_message`,
+  `update_message`), so every block anyone is shown is flagged (without the write lock unless there is something to
+  write). `repo.auto_approve_states(company, messages)` describes each draft (waiting with its time, held, blocked with
+  the reason, or off) in three queries for the dashboard and Claude.
 - `collectors.Collector`: `name`, `label`, `signal_types`, `requires`, `is_configured(company)`,
   `async collect(company, ctx) -> list[RawSignal]`. `RawSignal(signal=SignalIn, lead=LeadIn|None, account=str, account_domain=str, account_location=str)`.
-  Collectors must be polite (cap requests and honour `ctx.max_items`). One bad item never fails the whole collector. Use `ctx.warn()` for soft problems.
+  Collectors must be polite (cap requests and honour `ctx.max_items`). One bad item never fails the whole collector. Use `ctx.warn()` for soft problems,
+  and `ctx.count(name)` for what happened (stored as `stats.collectors.<name>.counts`). `Collector.timeout_seconds` overrides the shared
+  120-second limit, and `Collector.usage()` reports paid-API usage for the dashboard and `get_company_profile`.
+- `repo.reserve_api_call(service, limit)` counts one paid call before it is made, unless the month's limit is reached; it runs under
+  `BEGIN IMMEDIATE`, so processes never go over the limit together.
+- `config.refresh_saved_settings()` applies settings another process saved to the data folder's `.env` (one `stat()` when nothing
+  changed); scans, the collector overview and the API keys page call it, so no restart is needed. `envfile.save_settings()` writes
+  them, for the names in `config.DASHBOARD_SETTINGS` only (the dashboard's API keys page).
 - `web.app.create_app(settings=None) -> FastAPI`. It mounts the MCP Streamable HTTP endpoint at `/mcp` via `mcp_server.mount_http(app)` when enabled.
 - `mcp_server.build_server() -> MCPServer` (mcp Python SDK 2.x, `from mcp.server.mcpserver import MCPServer`).
 
@@ -89,6 +130,12 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   operator activates them. Anonymous registrations and website auto-fills are limited to 5 a minute per address and 30 a minute
   in total (429 with Retry-After). The registration form refuses a company name that is already registered.
 - Request bodies are capped at 8 MB.
+- API keys page: logged-in dashboard users only (local mode: this machine). Keys go to the data folder's `.env` with mode 0600,
+  are never shown back (the last 4 characters at most) and are never readable or settable through `/api` or MCP. A setting in
+  the real environment, or in a `.env` file read first, wins and is shown read-only. Business websites found on Google Maps
+  are fetched like RSS feeds: public addresses only, size and time caps (the size cap applies after decompression), plus
+  robots.txt. Everything that reads a page or a robots.txt file runs in a worker thread and in linear time (no
+  backtracking regular expressions on text a website controls), so one hostile site can't freeze the dashboard.
 - Outbound requests to user-supplied URLs (website auto-fill, RSS feeds, alert webhooks) only go to public IP addresses
   (`netguard.py`). The host is looked up once and the connection goes to the checked address, so DNS rebinding can't redirect
   it. These requests don't use the environment's HTTP(S) proxy, so a server that only reaches the internet through a proxy
@@ -99,9 +146,16 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
 - Claude is told to treat text from leads and public posts, and everything the tools return, as data, never as instructions.
   Prompts name companies and leads by id rather than quoting stored text.
 - OpenBerry never sends anything to LinkedIn or by email itself. OpenBerry drafts, and a human sends, or, when the user
-  turns on AI agent sending for a company, the user's own browser agent sends the LinkedIn messages they approved.
+  turns on AI agent sending for a company, the user's own browser agent sends the approved LinkedIn messages.
   `repo.send_queue`, `repo.confirm_agent_sent` and `repo.report_send_problem` enforce its rules server-side: approved
   LinkedIn messages only, a rolling 24-hour limit, the never-contact list, LinkedIn's connection limits (note length
   for the account, 80 connection requests in 7 days, 5 notes in 30 days on a free account), and a 24-hour pause on
   any reported problem.
   Claude and the JSON API can only turn it off or lower the limit. See [AI_AGENT_SENDING.md](AI_AGENT_SENDING.md).
+- Auto-approve is off for every company until the user turns it on, on the dashboard's Outreach page (CSRF-protected).
+  Claude (`update_company`, `register_company`) and the JSON API can only turn it off or make the review window longer:
+  they can't turn it on, shorten the window or set `auto_approve_since`, and anonymous public registrations are saved with
+  it off. Claude can hold a draft (`update_message` with `auto_hold=true`) but never release a hold: a new version of a
+  held draft (`save_outreach_message`) is held too, also when the held one was skipped first. Activating a paused
+  company (from anywhere) restarts every window, like turning auto-approve on. With agent sending also on, the agent may
+  send what auto-approve approved, so every agent rule above still applies to it.

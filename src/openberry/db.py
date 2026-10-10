@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -121,7 +123,10 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     sent_at TEXT,
-    sent_via TEXT NOT NULL DEFAULT ''  -- who recorded the send: '' the user, 'agent' the AI agent, 'claude' Claude
+    sent_via TEXT NOT NULL DEFAULT '',  -- who recorded the send: '' the user, 'agent' the AI agent, 'claude' Claude
+    auto_hold INTEGER NOT NULL DEFAULT 0,  -- 1: the user held this draft, so auto-approve never approves it
+    approved_via TEXT NOT NULL DEFAULT '',  -- 'auto': auto-approve approved it after its review window
+    auto_blocked INTEGER NOT NULL DEFAULT 0  -- 1: auto-approve found a reason not to approve this draft (yet)
 );
 CREATE INDEX IF NOT EXISTS ix_messages_company_status ON messages(company_id, status);
 
@@ -135,9 +140,41 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     stats TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS ix_scan_runs_company ON scan_runs(company_id, started_at DESC);
+
+-- Paid API calls, per service and calendar month (UTC): the monthly cap on Google Maps searches. One row per
+-- month; repo.reserve_api_call adds to it under BEGIN IMMEDIATE so processes never go over the cap together.
+CREATE TABLE IF NOT EXISTS api_usage (
+    service TEXT NOT NULL,              -- e.g. 'google_places_search'
+    month TEXT NOT NULL,                -- 'YYYY-MM', UTC
+    used INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (service, month)
+);
+
+-- Google Maps searches (signals.places_queries): when each company last read every page of each search, so a
+-- search runs at most once a week. Only the search text and our own counts: nothing from Google.
+CREATE TABLE IF NOT EXISTS place_searches (
+    company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    query_key TEXT NOT NULL,            -- the search, casefolded, single spaces
+    searched_at TEXT NOT NULL,
+    found INTEGER NOT NULL DEFAULT 0,   -- businesses Google listed
+    added INTEGER NOT NULL DEFAULT 0,   -- leads they gave
+    PRIMARY KEY (company_id, query_key)
+);
+
+-- Google Place IDs a company already handled. Google allows storing Place IDs indefinitely and nothing else
+-- from Places. added = 1: it became a lead and is never added again, even after that lead is deleted;
+-- added = 0: skipped (no usable website, robots.txt, excluded), checked again 30 days after checked_at.
+CREATE TABLE IF NOT EXISTS place_ids (
+    company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    place_id TEXT NOT NULL,
+    added INTEGER NOT NULL DEFAULT 0,
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (company_id, place_id)
+);
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -153,6 +190,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
         if "sent_via" not in message_columns:  # version 3: AI agent sending counts the agent's sends
             conn.execute("ALTER TABLE messages ADD COLUMN sent_via TEXT NOT NULL DEFAULT ''")
+        if "auto_hold" not in message_columns:  # version 4: auto-approve (drafts the user held stay drafts)
+            conn.execute("ALTER TABLE messages ADD COLUMN auto_hold INTEGER NOT NULL DEFAULT 0")
+        if "approved_via" not in message_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN approved_via TEXT NOT NULL DEFAULT ''")
+        if "auto_blocked" not in message_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN auto_blocked INTEGER NOT NULL DEFAULT 0")
         # After the column exists (an old database gets it just above): the agent's rolling 24-hour count.
         conn.execute("CREATE INDEX IF NOT EXISTS ix_messages_company_sent ON messages(company_id, sent_via, sent_at)")
         # Older versions left sent_at empty on an outbound message recorded straight away as 'replied' (sent, then
@@ -175,13 +218,29 @@ def db_path() -> Path:
     return get_settings().db_path
 
 
+def _use_wal(conn: sqlite3.Connection, timeout: float = 30.0) -> None:
+    """Switch the file to WAL (once: later calls see it already is). Changing the journal mode needs the file to itself
+    for a moment and SQLite doesn't wait for that: while another connection writes or reads a new file it fails at once
+    with "database is locked", so retry for as long as the busy timeout would wait."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+                conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def init_db(path: Path | None = None) -> Path:
     path = path or db_path()
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=30)  # another process may be upgrading the same file
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        _use_wal(conn)
         conn.executescript(SCHEMA)
         _migrate(conn)
     finally:
@@ -190,6 +249,7 @@ def init_db(path: Path | None = None) -> Path:
 
 
 _initialized: set[str] = set()
+_init_lock = threading.Lock()  # one thread per process creates and upgrades the file; the others wait for it
 
 
 @contextmanager
@@ -202,8 +262,10 @@ def connect() -> Iterator[sqlite3.Connection]:
     path = db_path()
     key = str(path.resolve()) if str(path) != ":memory:" else ":memory:"
     if key not in _initialized:
-        init_db(path)
-        _initialized.add(key)
+        with _init_lock:
+            if key not in _initialized:
+                init_db(path)
+                _initialized.add(key)
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")

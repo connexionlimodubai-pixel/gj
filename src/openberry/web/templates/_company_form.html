@@ -4,7 +4,7 @@
 {% set step_count = steps|length if wizard else steps|length - 1 %}
 {% set step_labels = dict(steps) %}
 {% set error_steps = error_steps|default({}) %}
-<form method="post" action="{{ form_action }}" class="company-form{{ ' is-wizard' if wizard }}"{% if wizard %} data-wizard data-first-step="{{ first_step }}"{% endif %}>
+<form method="post" action="{{ form_action }}" class="company-form{{ ' is-wizard' if wizard }}"{% if wizard %} data-wizard data-first-step="{{ first_step }}"{% else %} data-keep-scroll{% endif %}>
 {{ m.csrf() }}
 {% if public_mode %}
 <div class="hp" aria-hidden="true"><label for="hp-field">Leave this empty</label><input id="hp-field" name="{{ honeypot }}" tabindex="-1" autocomplete="off"></div>
@@ -105,6 +105,16 @@
     {% if "signals.sec_queries" in values %}
     {{ m.listarea("signals.sec_queries", "SEC EDGAR queries", help="US companies: new Form D funding filings and 8-K executive changes.") }}
     {% endif %}
+    {% if not public_mode %}
+    {% set places = places_usage() %}
+    <div class="places-field">
+      {{ m.textarea("signals.places_queries", "Google Maps searches", rows=3, help="One search per line, as you'd type it in Google Maps. Each business found becomes an account lead with the email and phone from its own website. Each search runs at most once a week.", placeholder="event management companies in Dubai\nlaw firms in DIFC\nhotels in Business Bay") }}
+      <p class="help places-usage" id="places-usage">{{ m.icon("pin", 13) }}
+        {% if places.api_key_set %}{{ places.searches_used_this_month|compact }} of {{ places.monthly_limit|compact }} Google Maps searches used this month. <a href="/keys#google-maps">API keys</a>
+        {% else %}Add your Google Maps API key on the <a href="/keys#google-maps">API keys</a> page to run these searches.{% endif %}
+      </p>
+    </div>
+    {% endif %}
     {{ m.listarea("signals.influencers", "LinkedIn influencers", help="Profile URLs. Claude checks who engages with their posts.") }}
     {{ m.listarea("signals.competitor_pages", "Competitor LinkedIn pages", help="Claude checks who engages with them.") }}
     {{ m.listarea("signals.events", "Events & webinars", help="Attendees are good leads.") }}
@@ -140,7 +150,7 @@
   {{ m.radios("outreach.mode", "Drafting mode", [
       ("review", "Review", "You draft on demand from a lead's page or by asking Claude."),
       ("auto_draft", "Auto-draft", "A first-touch draft is created for every person lead that turns hot (in a scan, through Claude, the API, an import or an edit)."),
-    ], help="Nothing is sent without your approval: you send approved messages yourself" ~ ("." if public_mode else ", or let your own AI agent send approved LinkedIn messages (below).")) }}
+    ], help="Nothing is sent until it is approved" ~ ("." if public_mode else ", by you or, if you turn it on, by auto-approve (Outreach page). You send approved messages yourself, or let your own AI agent send approved LinkedIn messages (below).")) }}
   <div class="grid-2">
     {{ m.textarea("outreach.signature", "Signature", rows=2) }}
     {{ m.listarea("outreach.banned_words", "Banned words", help="Words and phrases messages must never use.", rows=2) }}
@@ -151,10 +161,10 @@
   {% set agent_low, agent_high = AGENT_LIMIT_RANGE %}
   <div class="agent-fields">
     {{ m.check_card("outreach.agent_sending", "AI agent sending", "Let my AI agent send approved LinkedIn messages",
-        "An AI agent you run in your own browser, logged in to your LinkedIn, sends the messages you approve, exactly as approved. Email is never sent this way. Off by default.") }}
+        "An AI agent you run in your own browser, logged in to your LinkedIn, sends approved messages, exactly as approved. Email is never sent this way. Off by default.") }}
     {{ m.input("outreach.agent_daily_limit", "Agent daily limit", type="number", help="Most messages in any 24 hours (" ~ agent_low ~ "–" ~ agent_high ~ "). Keep it low.", attrs={"min": agent_low, "max": agent_high, "inputmode": "numeric"}) }}
   </div>
-  <p class="callout callout-warning">{{ m.icon("alert", 14) }}<span><strong>At your own risk.</strong> LinkedIn's rules forbid automation, and even an agent in your own browser can get your account restricted. Only messages you approve are sent. If LinkedIn complains, your agent stops and OpenBerry pauses sending for 24 hours. <a href="{{ AGENT_DOCS_URL }}" target="_blank" rel="noopener noreferrer">How it works</a></span></p>
+  <p class="callout callout-warning">{{ m.icon("alert", 14) }}<span><strong>At your own risk.</strong> LinkedIn's rules forbid automation, and even an agent in your own browser can get your account restricted. Only approved messages are sent. If LinkedIn complains, your agent stops and OpenBerry pauses sending for 24 hours. <a href="{{ AGENT_DOCS_URL }}" target="_blank" rel="noopener noreferrer">How it works</a></span></p>
   {% endif %}
   <h3 class="sub-head">Hot-lead alerts</h3>
   {% if public_mode %}

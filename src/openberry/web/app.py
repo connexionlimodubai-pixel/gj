@@ -21,7 +21,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .. import __version__, repo
 from ..config import Settings, get_settings, set_settings
-from . import api, auth, leads, pages, scans
+from . import api, auth, keys, leads, pages, scans
 from .ratelimit import Limits
 from .ui import STATIC_DIR, render
 
@@ -156,6 +156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(api.router)
     app.include_router(pages.public_router)
     app.include_router(pages.router)
+    app.include_router(keys.router)
     app.include_router(leads.router)
 
     if settings.http_mcp_enabled:

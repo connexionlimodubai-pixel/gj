@@ -11,8 +11,9 @@ import json
 import re
 import sqlite3
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -21,9 +22,12 @@ from .db import connect
 from .models import (
     AGENT_CHANNELS,
     AGENT_PAUSE_REASON_MAX,
+    APPROVED_VIA_AUTO,
+    AUTO_APPROVE_SETTINGS,
     LEAD_STATUSES,
     MESSAGE_CHANNELS,
     MESSAGE_STATUSES,
+    PROSPECT_TYPES,
     SIGNAL_TYPES,
     Company,
     CompanyIn,
@@ -34,7 +38,14 @@ from .models import (
     Signal,
     SignalIn,
 )
-from .outreach import LINKEDIN_CONNECT_LIMIT, LINKEDIN_CONNECT_LIMIT_FREE, connect_note_limit, monthly_note_limit
+from .outreach import (
+    LINKEDIN_CONNECT_LIMIT,
+    LINKEDIN_CONNECT_LIMIT_FREE,
+    account_label,
+    connect_note_limit,
+    monthly_note_limit,
+    unfilled_placeholder,
+)
 from .scoring import DISQUALIFIED_MAX_SCORE, LeadFacts, SignalPoint, icp_fit, score_lead
 
 # --------------------------------------------------------------------------------------
@@ -158,6 +169,24 @@ def normalize_profile_url(url: str) -> str:
     return base.rstrip("/") + (f"?{ident}" if ident else "")
 
 
+# Google Maps links built from a Place ID alone: the only thing OpenBerry keeps from Google's Places API.
+MAPS_PLACE_URL = "https://www.google.com/maps/place/?q=place_id:"
+PLACE_ID_RE = re.compile(r"[A-Za-z0-9_-]{10,300}")
+_MAPS_LINK = re.compile(r"^https?://(?:www\.|maps\.)?google\.com/maps/[^#]*?[?&]"
+                        r"(?:q=place_id(?::|%3A)|query_place_id=)([A-Za-z0-9_-]{10,300})(?=[&#]|$)", re.I)
+
+
+def maps_place_url(place_id: str) -> str:
+    """Google Maps link to a place, built from its Place ID."""
+    return MAPS_PLACE_URL + place_id
+
+
+def google_place_id(url: str) -> str:
+    """The Place ID in a Google Maps link (place/?q=place_id:..., or the Maps URLs query_place_id=...), else ""."""
+    m = _MAPS_LINK.match((url or "").strip())
+    return m.group(1) if m else ""
+
+
 def _norm_name(name: str) -> str:
     return " ".join(_words(_fold(name)))
 
@@ -166,8 +195,12 @@ def lead_identity_keys(data: LeadIn | Lead, kind: str) -> list[str]:
     keys: list[str] = []
     ckey = company_key(data.lead_company, data.company_domain)
     if kind == "account":
-        # Both identities, so "Acme Bank" seen first by name and later with acme.com merge.
-        return [f"acct:{k}" for k in (_name_key(data.lead_company), _domain_key(data.company_domain)) if k]
+        # Both identities, so "Acme Bank" seen first by name and later with acme.com merge; and the Google Maps
+        # Place ID, so the same business found again by another search merges too.
+        keys = [f"acct:{k}" for k in (_name_key(data.lead_company), _domain_key(data.company_domain)) if k]
+        if pid := google_place_id(data.profile_url):
+            keys.append(f"acct:gp:{pid}")
+        return keys
     if li := normalize_linkedin(data.linkedin_url):
         keys.append(f"li:{li}")
     if data.email and "@" in data.email:
@@ -263,15 +296,25 @@ def update_company(company_id: int, data: CompanyIn | dict[str, Any],
     kept as stored. report_send_problem sets it and resume_agent_sending lifts it. The stored pause is read
     under the write lock, so a save racing a problem report (e.g. a profile form read before the report)
     can't lift the pause.
+    A whole profile (a CompanyIn: the dashboard's profile form, which doesn't show them) also keeps the
+    auto-approve settings as stored, read under the same lock, so a profile save never turns auto-approve
+    back on after the user turned it off. They change through a partial dict (the Outreach page's card).
+    Activating a paused company with auto-approve on works like turning auto-approve on (auto_approve_since =
+    now): the drafts that waited while it was paused get a full review window, never approved all at once.
     """
     with _write_locked(conn) as c:
         current = get_company(company_id, conn=c)
+        kept = {"agent_paused_until": current.outreach.agent_paused_until,
+                "agent_pause_reason": current.outreach.agent_pause_reason}
         if isinstance(data, dict):
             merged = _deep_merge(current.model_dump(mode="json"), data)
             data = CompanyIn.model_validate(merged)
-        pause = {"agent_paused_until": current.outreach.agent_paused_until,
-                 "agent_pause_reason": current.outreach.agent_pause_reason}
-        data = data.model_copy(update={"outreach": data.outreach.model_copy(update=pause)})
+        else:
+            kept.update({key: getattr(current.outreach, key) for key in AUTO_APPROVE_SETTINGS})
+        if current.status != "active" and data.status == "active" and kept.get("auto_approve",
+                                                                              data.outreach.auto_approve):
+            kept["auto_approve_since"] = utcnow()
+        data = data.model_copy(update={"outreach": data.outreach.model_copy(update=kept)})
         values = _company_values(data)
         sets = ", ".join(f"{col} = ?" for col in values)
         c.execute(f"UPDATE companies SET {sets}, updated_at = ? WHERE id = ?",
@@ -372,10 +415,24 @@ def _find_existing(c: sqlite3.Connection, company_id: int, keys: list[str]) -> i
 
     Strong keys (LinkedIn, email, GitHub, X, profile URL, account name/domain) win. A name match
     alone is trusted only when the two records don't carry different identities of the same kind:
-    two John Smiths at Google with different LinkedIn profiles are two people.
+    two John Smiths at Google with different LinkedIn profiles are two people. Likewise an account
+    found on Google Maps never merges by name alone into one with another Place ID: two businesses.
     """
     strong = [k for k in keys if not k.startswith(_WEAK_KEY_PREFIXES)]
-    if (found := _lead_with_key(c, company_id, strong)) is not None:
+    if place := next((k for k in keys if k.startswith("acct:gp:")), ""):
+        names = [k for k in strong if k.startswith("acct:n:")]
+        strong = [k for k in strong if not k.startswith("acct:n:")]
+        if (found := _lead_with_key(c, company_id, strong)) is not None:  # the same Place ID or domain
+            return found
+        if names:
+            row = c.execute(
+                f"SELECT MIN(k.lead_id) AS id FROM lead_keys k WHERE k.company_id = ? "
+                f"AND k.key IN ({', '.join('?' * len(names))}) AND NOT EXISTS (SELECT 1 FROM lead_keys g "
+                "WHERE g.company_id = k.company_id AND g.lead_id = k.lead_id "
+                "AND substr(g.key, 1, 8) = 'acct:gp:' AND g.key != ?)", [company_id, *names, place]).fetchone()
+            if row["id"] is not None:
+                return row["id"]
+    elif (found := _lead_with_key(c, company_id, strong)) is not None:
         return found
     found = _lead_with_key(c, company_id, [k for k in keys if k.startswith(_WEAK_KEY_PREFIXES)])
     if found is None or not strong:
@@ -500,7 +557,8 @@ def update_lead(lead_id: int, fields: dict[str, Any], conn: sqlite3.Connection |
             if (linkedin_profile_url(merged.linkedin_url) != linkedin_profile_url(lead.linkedin_url)
                     or (merged.status in NO_AGENT_LEAD_STATUSES and lead.status not in NO_AGENT_LEAD_STATUSES)):
                 # A new recipient, or a lead that left the pipeline (replied, won, lost, disqualified...): its
-                # approvals lapse, so setting the status back later doesn't put old messages in the agent's queue.
+                # LinkedIn approvals lapse and its LinkedIn drafts are held, so setting the status back later doesn't
+                # put old messages in the agent's queue (nor let auto-approve approve them at once).
                 _unapprove_for_new_profile(c, lead_id)
             if kind != lead.kind:
                 # Keys of the old kind would keep routing its signals here (company-level ones to a person).
@@ -727,10 +785,13 @@ def add_signal(company_id: int, sig: SignalIn, lead_id: int | None = None,
 
 def list_signals(company_id: int, *, lead_id: int | None = None, type: str | None = None,
                  source: str | None = None, since: datetime | None = None, limit: int = 100,
-                 offset: int = 0, include_account: bool = False,
+                 offset: int = 0, include_account: bool = False, exclude_types: Iterable[str] = (),
                  conn: sqlite3.Connection | None = None) -> tuple[list[Signal], int]:
     where = ["s.company_id = ?"]
     params: list[Any] = [company_id]
+    if exclude := list(exclude_types):
+        where.append(f"s.type NOT IN ({', '.join('?' * len(exclude))})")
+        params.extend(exclude)
     if lead_id is not None:
         if include_account:
             where.append("(s.lead_id = ? OR s.lead_id IN (SELECT a.id FROM leads a JOIN leads p "
@@ -860,8 +921,15 @@ def get_message(message_id: int, conn: sqlite3.Connection | None = None) -> Mess
 
 def update_message(message_id: int, *, status: str | None = None, body: str | None = None,
                    subject: str | None = None, conn: sqlite3.Connection | None = None) -> Message:
-    """Edit a message. Marking it sent/replied also advances the lead's pipeline status."""
-    with _conn(conn) as c:
+    """Edit a message. Marking it sent/replied also advances the lead's pipeline status.
+
+    Approving it here is a person's approval (or Claude's, for the user), so approved_via is cleared: only
+    auto_approve_due records 'auto'. Setting an approved message back to 'draft' on purpose also holds it, so
+    auto-approve never approves it again behind the user's back; a text edit that makes it a draft doesn't.
+    The read and the write hold SQLite's write lock (BEGIN IMMEDIATE), like auto_approve_due: an edit made while
+    auto-approve approves the draft sees the approval, so the new text is a draft again, never approved unread.
+    """
+    with _write_locked(conn) as c:
         msg = get_message(message_id, conn=c)
         updates: dict[str, Any] = {}
         if body is not None:
@@ -874,6 +942,10 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
             if status not in MESSAGE_STATUSES:
                 raise ValueError(f"status must be one of {', '.join(MESSAGE_STATUSES)}")
             updates["status"] = status
+            if status in ("approved", "draft"):
+                updates["approved_via"] = ""
+            if status == "draft" and msg.status == "approved" and msg.direction == "outbound":
+                updates["auto_hold"] = 1  # "Back to drafts": the user (or Claude) wants another look first
             # 'replied' = sent, then answered: a message first recorded that way was sent too (it then counts
             # toward the connection-request limits, which count every request sent, by its sent_at).
             if (status == "sent" or (status == "replied" and msg.direction == "outbound")) and not msg.sent_at:
@@ -882,7 +954,9 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
               and (updates.get("body", msg.body), updates.get("subject", msg.subject)) != (msg.body, msg.subject)):
             # An approval covers the exact text (an AI agent may send approved LinkedIn messages as they are):
             # changed text is a draft again until someone approves it, e.g. with status="approved" in the same call.
+            # It isn't held: like any edited draft, it waits a full window before auto-approve (if on) approves it.
             updates["status"] = "draft"
+            updates["approved_via"] = ""
         if updates:
             sets = ", ".join(f"{k} = ?" for k in updates)
             c.execute(f"UPDATE messages SET {sets}, updated_at = ? WHERE id = ?", [*updates.values(), iso(), message_id])
@@ -893,6 +967,8 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
             if lead.status in ("new", "qualified") or (
                     status == "replied" and order.index(lead.status) < order.index("replied")):
                 c.execute("UPDATE leads SET status = ?, updated_at = ? WHERE id = ?", (target, iso(), lead.id))
+                if target in NO_AGENT_LEAD_STATUSES:  # the lead left the pipeline, as in update_lead
+                    _unapprove_for_new_profile(c, lead.id)
         return get_message(message_id, conn=c)
 
 
@@ -951,8 +1027,8 @@ def bulk_update_drafts(company_id: int, selected: list[tuple[int, str]], action:
                   and len(msg.body) > connect_note_limit(company)):
                 problem = BULK_NOTE_TOO_LONG
             else:
-                c.execute("UPDATE messages SET status = ?, updated_at = ? WHERE id = ? AND status = 'draft'",
-                          (BULK_ACTIONS[action], now, message_id))
+                c.execute("UPDATE messages SET status = ?, approved_via = '', updated_at = ? "
+                          "WHERE id = ? AND status = 'draft'", (BULK_ACTIONS[action], now, message_id))
                 done.append(message_id)
                 continue
             problems[problem] = problems.get(problem, 0) + 1
@@ -1053,6 +1129,129 @@ def get_scan_run(run_id: int, conn: sqlite3.Connection | None = None) -> ScanRun
 
 
 # --------------------------------------------------------------------------------------
+# Paid API usage and Google Maps search state
+# --------------------------------------------------------------------------------------
+
+_ID_BATCH = 500  # SQLite host parameters per statement, well under its limit
+
+
+@dataclass(frozen=True)
+class ApiUsage:
+    service: str
+    month: str             # 'YYYY-MM' (UTC)
+    used: int
+    limit: int
+    granted: bool = False  # reserve_api_call: this call may be made (and is counted already)
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.limit - self.used)
+
+
+def usage_month(now: datetime | None = None) -> str:
+    return (now or utcnow()).astimezone(timezone.utc).strftime("%Y-%m")
+
+
+def api_usage(service: str, limit: int, now: datetime | None = None,
+              conn: sqlite3.Connection | None = None) -> ApiUsage:
+    """This month's count, read-only (no row is created)."""
+    month = usage_month(now)
+    with _conn(conn) as c:
+        row = c.execute("SELECT used FROM api_usage WHERE service = ? AND month = ?", (service, month)).fetchone()
+    return ApiUsage(service, month, row["used"] if row else 0, limit)
+
+
+def reserve_api_call(service: str, limit: int, now: datetime | None = None,
+                     conn: sqlite3.Connection | None = None) -> ApiUsage:
+    """Count one paid call before making it, unless that would go over `limit` this month.
+
+    Atomic across threads and processes: the read and the write happen under SQLite's write lock (BEGIN IMMEDIATE).
+    A call that then fails stays counted: Google may have billed it, and over-counting is the safe side. Only a
+    refusal that is never billed is given back (release_api_call).
+    """
+    month = usage_month(now)
+    with _write_locked(conn) as c:
+        row = c.execute("SELECT used FROM api_usage WHERE service = ? AND month = ?", (service, month)).fetchone()
+        used = row["used"] if row else 0
+        if used >= limit:
+            return ApiUsage(service, month, used, limit, granted=False)
+        c.execute(
+            "INSERT INTO api_usage (service, month, used, updated_at) VALUES (?, ?, 1, ?) "
+            "ON CONFLICT(service, month) DO UPDATE SET used = used + 1, updated_at = excluded.updated_at",
+            (service, month, iso(now)))
+        return ApiUsage(service, month, used + 1, limit, granted=True)
+
+
+def release_api_call(service: str, month: str, conn: sqlite3.Connection | None = None) -> None:
+    """Give back a call counted by reserve_api_call in `month` ('YYYY-MM'): the API refused it without running it
+    (an invalid key, billing or the API turned off), so it was never billed."""
+    with _write_locked(conn) as c:
+        c.execute("UPDATE api_usage SET used = MAX(used - 1, 0), updated_at = ? WHERE service = ? AND month = ?",
+                  (iso(), service, month))
+
+
+def place_search_times(company_id: int, conn: sqlite3.Connection | None = None) -> dict[str, datetime]:
+    """query_key -> when every page of that Google Maps search was last read."""
+    with _conn(conn) as c:
+        rows = c.execute("SELECT query_key, searched_at FROM place_searches WHERE company_id = ?",
+                         (company_id,)).fetchall()
+    return {r["query_key"]: datetime.fromisoformat(r["searched_at"]) for r in rows}
+
+
+def finish_place_search(company_id: int, query_key: str, found: int, added: int, when: datetime | None = None,
+                        conn: sqlite3.Connection | None = None) -> None:
+    """Remember that every page of a Google Maps search was read (it then waits a week)."""
+    with _conn(conn) as c:
+        c.execute(
+            "INSERT INTO place_searches (company_id, query_key, searched_at, found, added) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(company_id, query_key) DO UPDATE SET searched_at = excluded.searched_at, "
+            "found = excluded.found, added = excluded.added",
+            (company_id, query_key, iso(when), int(found), int(added)))
+
+
+def prune_place_searches(company_id: int, keep: Iterable[str], conn: sqlite3.Connection | None = None) -> int:
+    """Forget searches no longer in the profile, so adding one back runs it at once. Returns the rows deleted."""
+    keep = set(keep)
+    with _conn(conn) as c:
+        gone = [r["query_key"] for r in c.execute("SELECT query_key FROM place_searches WHERE company_id = ?",
+                                                  (company_id,)).fetchall() if r["query_key"] not in keep]
+        c.executemany("DELETE FROM place_searches WHERE company_id = ? AND query_key = ?",
+                      [(company_id, k) for k in gone])
+    return len(gone)
+
+
+def handled_place_ids(company_id: int, place_ids: Iterable[str], recheck_before: datetime,
+                      conn: sqlite3.Connection | None = None) -> set[str]:
+    """The given Place IDs to skip: they became a lead (added = 1), or were skipped since `recheck_before`."""
+    ids = list(dict.fromkeys(place_ids))
+    found: set[str] = set()
+    with _conn(conn) as c:
+        for start in range(0, len(ids), _ID_BATCH):
+            batch = ids[start:start + _ID_BATCH]
+            rows = c.execute(
+                f"SELECT place_id FROM place_ids WHERE company_id = ? AND place_id IN ({', '.join('?' * len(batch))}) "
+                "AND (added = 1 OR checked_at >= ?)", [company_id, *batch, iso(recheck_before)]).fetchall()
+            found.update(r["place_id"] for r in rows)
+    return found
+
+
+def record_place_ids(company_id: int, outcomes: Mapping[str, bool], when: datetime | None = None,
+                     conn: sqlite3.Connection | None = None) -> None:
+    """Remember Place IDs this company handled: True when it became a lead (then it is never added again; written
+    by services.ingest with the lead, so a scan that stops before storing its leads loses none), False when it was
+    skipped."""
+    if not outcomes:
+        return
+    stamp = iso(when)
+    with _conn(conn) as c:
+        c.executemany(
+            "INSERT INTO place_ids (company_id, place_id, added, checked_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(company_id, place_id) DO UPDATE SET added = MAX(added, excluded.added), "
+            "checked_at = excluded.checked_at",
+            [(company_id, pid, int(bool(added)), stamp) for pid, added in outcomes.items()])
+
+
+# --------------------------------------------------------------------------------------
 # Hot-lead alerts
 # --------------------------------------------------------------------------------------
 
@@ -1079,6 +1278,9 @@ def claim_new_hot_leads(company_id: int, conn: sqlite3.Connection | None = None)
 # --------------------------------------------------------------------------------------
 
 
+_NOT_PROSPECT = f"type NOT IN ({', '.join(repr(t) for t in PROSPECT_TYPES)})"
+
+
 def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
     now = now or utcnow()
     with _conn(conn) as c:
@@ -1102,8 +1304,9 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
 
         start = (now - timedelta(days=13)).date()
         by_day = {(start + timedelta(days=i)).isoformat(): 0 for i in range(14)}
+        # Intent signals only: a business found on Google Maps (PROSPECT_TYPES) is a prospect, not intent.
         for r in c.execute("SELECT substr(occurred_at, 1, 10) d, COUNT(*) n FROM signals WHERE company_id = ? "
-                           "AND occurred_at >= ? GROUP BY d", (company_id, start.isoformat())):
+                           f"AND occurred_at >= ? AND {_NOT_PROSPECT} GROUP BY d", (company_id, start.isoformat())):
             if r["d"] in by_day:
                 by_day[r["d"]] = r["n"]
         by_type = [
@@ -1130,8 +1333,10 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
             "tiers": tiers,
             "statuses": statuses,
             "signals_total": count("SELECT COUNT(*) FROM signals WHERE company_id = ?", company_id),
-            "signals_7d": count("SELECT COUNT(*) FROM signals WHERE company_id = ? AND occurred_at >= ?",
-                                company_id, iso(now - timedelta(days=7))),
+            "signals_7d": count(f"SELECT COUNT(*) FROM signals WHERE company_id = ? AND occurred_at >= ? "
+                                f"AND {_NOT_PROSPECT}", company_id, iso(now - timedelta(days=7))),
+            "businesses_7d": count(f"SELECT COUNT(*) FROM signals WHERE company_id = ? AND occurred_at >= ? "
+                                   f"AND NOT {_NOT_PROSPECT}", company_id, iso(now - timedelta(days=7))),
             "signals_by_day": [{"date": d, "count": n} for d, n in by_day.items()],
             "signals_by_type": by_type,
             "signals_by_source": by_source,
@@ -1217,11 +1422,16 @@ def _unapprove_for_new_profile(c: sqlite3.Connection, lead_id: int) -> int:
 
     An approval covers the recipient too. Without this, changing a lead's linkedin_url (Claude, a merge, an
     import, a script) would make the agent send an approved text to a different person than the one approved.
+    They are held as well, so auto-approve doesn't approve them again on its own: the user decides. So are the
+    lead's LinkedIn drafts: they were written for the old profile too, or waited while the lead was out of the
+    pipeline, and auto-approve would otherwise approve them at once, without a new review window.
     """
     marks = ", ".join("?" * len(AGENT_CHANNELS))
-    cur = c.execute(f"UPDATE messages SET status = 'draft', updated_at = ? WHERE lead_id = ? "
-                    f"AND direction = 'outbound' AND status = 'approved' AND channel IN ({marks})",
+    cur = c.execute(f"UPDATE messages SET status = 'draft', approved_via = '', auto_hold = 1, updated_at = ? "
+                    f"WHERE lead_id = ? AND direction = 'outbound' AND status = 'approved' AND channel IN ({marks})",
                     (iso(), lead_id, *AGENT_CHANNELS))
+    c.execute(f"UPDATE messages SET auto_hold = 1 WHERE lead_id = ? AND direction = 'outbound' AND status = 'draft' "
+              f"AND channel IN ({marks})", (lead_id, *AGENT_CHANNELS))
     return cur.rowcount
 
 
@@ -1359,6 +1569,38 @@ def _followup_wait_days(company: Company, step: int) -> int:
     return days[max(0, min(step - 1, len(days) - 1))]
 
 
+LEAD_REPLIED = "the lead has replied, so answer them yourself"
+
+
+def _lead_status_problem(lead: Lead) -> str:
+    """Why nothing goes to this lead without a person: its status says a person handles the conversation, or that
+    it was ruled out ("" if not). Shared by the agent's send queue and auto-approve."""
+    if lead.status in NO_AGENT_LEAD_STATUSES:
+        return f"the lead is marked {lead.status.capitalize()}"
+    return ""
+
+
+def _excluded_problem(company: Company, lead: Lead) -> str:
+    """Why nothing goes to this lead: it is on the never-contact list or matches an excluded keyword ("" if not).
+
+    Shared by the agent's send queue and auto-approve."""
+    _, reasons, excluded = icp_fit(LeadFacts.from_obj(lead), company.icp)
+    if excluded:
+        reason = reasons[0].removeprefix("! ") if reasons else "never contact"
+        return f"the lead is excluded by your ideal customer profile ({reason[:1].lower()}{reason[1:]})"
+    return ""
+
+
+def _sent_before_problem(msg: Message, sent: set[tuple[str, int]]) -> str:
+    """Why this message would repeat one already sent to its lead ("" if not). `sent` holds the (channel, step) of the
+    lead's other outbound messages that were sent. Shared by the agent's send queue and auto-approve."""
+    if msg.channel == "linkedin_connect" and any(channel == "linkedin_connect" for channel, _ in sent):
+        return "a connection request was already sent to this lead"
+    if (msg.channel, msg.step) in sent:
+        return f"step {msg.step} was already sent to this lead on {msg.channel}"
+    return ""
+
+
 def _agent_send_problem(c: sqlite3.Connection, company: Company, msg: Message, lead: Lead, now: datetime) -> str:
     """Why the agent must not send this message, or "" if it may (status and company switches aside)."""
     if msg.direction != "outbound":
@@ -1371,15 +1613,14 @@ def _agent_send_problem(c: sqlite3.Connection, company: Company, msg: Message, l
         return "the lead belongs to another company"
     if lead.kind != "person":
         return "the lead is a company with no contact person"
-    if lead.status in NO_AGENT_LEAD_STATUSES:
-        return f"the lead's status is '{lead.status}': a person handles this conversation"
+    if problem := _lead_status_problem(lead):
+        return problem
     thread = [_message_from_row(r) for r in c.execute("SELECT * FROM messages WHERE lead_id = ? ORDER BY id",
                                                        (lead.id,))]
     if any(m.direction == "inbound" for m in thread):
-        return "the lead has replied: answer them yourself"
-    _, reasons, excluded = icp_fit(LeadFacts.from_obj(lead), company.icp)
-    if excluded:
-        return f"the lead is excluded by the ICP ({reasons[0].removeprefix('! ') if reasons else 'never contact'})"
+        return LEAD_REPLIED
+    if problem := _excluded_problem(company, lead):
+        return problem
     if not linkedin_profile_url(lead.linkedin_url):
         return "the lead has no LinkedIn profile URL (https://www.linkedin.com/in/...)"
     if msg.channel == "linkedin_connect" and len(msg.body) > connect_note_limit(company):
@@ -1387,10 +1628,8 @@ def _agent_send_problem(c: sqlite3.Connection, company: Company, msg: Message, l
     # Sent = marked sent or replied, or sent once and set back to another status later (sent_at stays).
     sent = [m for m in thread if m.id != msg.id and m.direction == "outbound"
             and (m.status in ("sent", "replied") or m.sent_at is not None)]
-    if msg.channel == "linkedin_connect" and any(m.channel == "linkedin_connect" for m in sent):
-        return "a connection request was already sent to this lead"
-    if any(m.channel == msg.channel and m.step == msg.step for m in sent):
-        return f"step {msg.step} was already sent to this lead on {msg.channel}"
+    if problem := _sent_before_problem(msg, {(m.channel, m.step) for m in sent}):
+        return problem
     sent_times = [_utc(m.sent_at) for m in sent if m.sent_at]
     if sent_times:
         due = max(sent_times) + timedelta(days=_followup_wait_days(company, max(m.step for m in sent)))
@@ -1556,7 +1795,7 @@ def update_message_as(message_id: int, via: str, *, status: str | None = None, b
     """
     if via not in ("agent", "claude"):
         raise ValueError("via must be 'agent' or 'claude'")
-    with _conn(conn) as c:
+    with _write_locked(conn) as c:
         before = get_message(message_id, conn=c)
         updated = update_message(message_id, status=status, body=body, subject=subject, conn=c)
         if ((status == "sent" and before.status != "sent")
@@ -1631,3 +1870,238 @@ def resume_agent_sending(company_id: int, conn: sqlite3.Connection | None = None
     with _write_locked(conn) as c:
         _save_agent_pause(c, company_id, None, "")
         return get_company(company_id, conn=c)
+
+
+# --------------------------------------------------------------------------------------
+# Auto-approve: drafts the user doesn't approve, hold or skip are approved once their review window has passed
+# (an edit starts the window again)
+# --------------------------------------------------------------------------------------
+#
+# Off unless the user turns it on for the company in the dashboard (outreach.auto_approve). A draft waits
+# auto_approve_hours from when it was written or last edited, and at least that long after auto-approve was
+# turned on (auto_approve_since), so turning it on never approves a backlog at once. With AI agent sending on,
+# the user's browser agent may then send the approved LinkedIn messages, so auto-approve leaves alone whatever a
+# person should look at first: drafts the user held, leads a person handles or must never contact, a connection
+# note too long for the account, banned words, unfilled placeholders, an email without a subject, a step already
+# sent, the first LinkedIn message after a connection request (did they accept?), and a second message to the same
+# lead. A draft it leaves alone is flagged (messages.auto_blocked): once the reason goes away (the earlier message
+# was sent or skipped, the lead set back, a banned word removed...), it waits a full review window from then, so
+# nothing is approved the moment the reason goes away. send_queue and confirm_agent_sent still check every one of
+# the agent's own rules afterwards.
+
+AUTO_ONE_PER_LEAD_APPROVED = ("another message to this lead is approved and not sent yet (one message per lead at a "
+                              "time)")
+AUTO_ONE_PER_LEAD_OLDER = "an earlier draft to this lead goes first (one message per lead at a time)"
+AUTO_COMPANY_PAUSED = "the company is paused"
+AUTO_AFTER_CONNECT = ("it is the first LinkedIn message after your connection request: approve it yourself once they "
+                      "accept")
+AUTO_NO_SUBJECT = "the email has no subject line"
+
+
+def _banned_words_used(company: Company, msg: Message) -> list[str]:
+    """The company's banned words in a message: the check save_outreach_message applies to Claude's drafts."""
+    from .collectors.base import find_terms  # the collectors import repo
+
+    return find_terms(f"{msg.subject}\n{msg.body}", company.outreach.banned_words)
+
+
+def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
+                       lead_id: int | None = None) -> list[dict[str, Any]]:
+    """What auto-approve does with each outbound draft of the company (or of one lead), in sequence order.
+
+    Each item: {"message", "version" (its stored updated_at), "state": "due" | "waiting" | "held" | "blocked",
+    "at" (when its window ends), "reason" (why it is blocked), "write": what auto_approve_due stores, "block" (flag
+    a newly blocked draft), "restart" (a flagged draft is clear now: its window starts again from `now`) or None}.
+    Three queries, whatever the number of drafts.
+    A lead's drafts are approved one at a time, step by step, then in the order they were written: a draft waits
+    while an earlier one (an earlier step, or the same step written before) is still a draft (waiting, held or
+    blocked) or another message to the lead is approved and unsent. By step first: a rewritten connection note
+    (a newer row) still goes before the step-2 message that follows it.
+    A draft repeating a step already sent doesn't hold up the lead's other drafts: it is stale.
+    """
+    where, params = "company_id = ? AND direction = 'outbound' AND status = 'draft'", [company.id]
+    if lead_id is not None:
+        where += " AND lead_id = ?"
+        params.append(lead_id)
+    rows = c.execute(f"SELECT * FROM messages WHERE {where} ORDER BY step, created_at, id", params).fetchall()
+    if not rows:
+        return []
+    leads = {r["id"]: _lead_from_row(r) for r in c.execute(
+        f"SELECT * FROM leads WHERE id IN (SELECT lead_id FROM messages WHERE {where})", params)}
+    approved: set[int] = set()  # leads with a message approved and not sent yet
+    replied: set[int] = set()
+    sent: dict[int, list[tuple[int, str, int]]] = {}  # lead: (id, channel, step) of each outbound message sent
+    for r in c.execute(f"SELECT id, lead_id, direction, channel, step, status, sent_at FROM messages "
+                       f"WHERE lead_id IN (SELECT lead_id FROM messages WHERE {where}) AND (direction = 'inbound' "
+                       f"OR status IN ('approved', 'sent', 'replied') OR sent_at IS NOT NULL)", params):
+        if r["direction"] == "inbound":
+            replied.add(r["lead_id"])
+        elif r["status"] in ("sent", "replied") or r["sent_at"] is not None:
+            sent.setdefault(r["lead_id"], []).append((r["id"], r["channel"], r["step"]))
+        else:
+            approved.add(r["lead_id"])
+    cfg = company.outreach
+    window = timedelta(hours=cfg.auto_approve_hours)
+    since = _utc(cfg.auto_approve_since) if cfg.auto_approve_since else None
+    note_max = connect_note_limit(company)
+    lead_problems: dict[int, str] = {}
+    older: set[int] = set()  # leads with a draft earlier in this list
+    plan: list[dict[str, Any]] = []
+    for row in rows:
+        msg = _message_from_row(row)
+        start = _utc(msg.updated_at) if since is None else max(_utc(msg.updated_at), since)
+        item: dict[str, Any] = {"message": msg, "version": row["updated_at"], "at": start + window, "reason": "",
+                                "write": None}
+        item["state"] = "due" if item["at"] <= now else "waiting"
+        lead = leads.get(msg.lead_id)
+        if lead is not None and lead.id not in lead_problems:
+            lead_problems[lead.id] = (_lead_status_problem(lead) or (LEAD_REPLIED if lead.id in replied else "")
+                                      or _excluded_problem(company, lead))
+        sent_before = {(channel, step) for mid, channel, step in sent.get(msg.lead_id, []) if mid != msg.id}
+        sent_channels = {channel for channel, _ in sent_before}
+        repeat = _sent_before_problem(msg, sent_before)
+        reason = ""
+        if msg.auto_hold:
+            item["state"] = "held"
+        elif company.status != "active":
+            reason = AUTO_COMPANY_PAUSED
+        elif lead_problems.get(msg.lead_id):
+            reason = lead_problems[msg.lead_id]
+        elif repeat:
+            reason = repeat
+        elif msg.channel == "linkedin_connect" and len(msg.body) > note_max:
+            reason = (f"the connection note has {len(msg.body)} characters, more than the {note_max} your "
+                      f"{account_label(company)} LinkedIn account allows")
+        elif banned := _banned_words_used(company, msg):
+            reason = f"it uses a banned word or phrase ({', '.join(banned)})"
+        elif placeholder := unfilled_placeholder(f"{msg.subject}\n{msg.body}"):
+            reason = f"it still contains the placeholder '{placeholder}'"
+        elif msg.channel == "email" and not msg.subject.strip():
+            reason = AUTO_NO_SUBJECT
+        elif msg.channel == "linkedin_dm" and sent_channels & set(AGENT_CHANNELS) == {"linkedin_connect"}:
+            reason = AUTO_AFTER_CONNECT  # nothing records whether they accepted: the user checks
+        elif msg.lead_id in approved:
+            reason = AUTO_ONE_PER_LEAD_APPROVED
+        elif msg.lead_id in older:
+            reason = AUTO_ONE_PER_LEAD_OLDER
+        if reason:
+            item.update(state="blocked", reason=reason, write=None if msg.auto_blocked else "block")
+        elif msg.auto_blocked and item["state"] in ("due", "waiting"):
+            # The reason it was left alone went away: it waits a full window from now, like a draft just written.
+            item.update(state="waiting", at=now + window, write="restart")
+        if not repeat:
+            older.add(msg.lead_id)
+        plan.append(item)
+    return plan
+
+
+def auto_approve_due(company_id: int, now: datetime | None = None,
+                     conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Approve the company's drafts whose review window has passed. Nothing while auto-approve is off or the
+    company isn't active.
+
+    The approvals are one write-locked transaction (BEGIN IMMEDIATE) that reads the drafts again. Each is a
+    compare-and-set on the draft as it was read (still a draft, not held, the same updated_at), so an edit, a
+    hold or a skip made at the same moment wins. It sets status 'approved' and approved_via 'auto'. The same
+    transaction flags the drafts it newly leaves alone (auto_blocked) and starts a new window for flagged drafts
+    whose reason went away. Without a caller's connection it looks first without the write lock, and takes it
+    only when there is something to write: it runs on every page view of the Outreach page and lead pages, which
+    mustn't wait for a scan's writes for nothing.
+    It also runs on every scheduler tick, after each scan and before the agent's get_send_queue.
+    Returns {"approved": [ids], "waiting": n, "held": n, "blocked": n, "next_at": when the next waiting draft
+    is approved (iso), or None}.
+    """
+    now = _utc(now or utcnow())
+    out: dict[str, Any] = {"approved": [], "waiting": 0, "held": 0, "blocked": 0, "next_at": None}
+
+    def tally(plan: list[dict[str, Any]]) -> dict[str, Any]:
+        for item in plan:
+            out[item["state"]] += 1
+        upcoming = [item["at"] for item in plan if item["state"] == "waiting"]
+        out["next_at"] = iso(min(upcoming)) if upcoming else None
+        return out
+
+    if conn is None:
+        with connect() as c:
+            company = get_company(company_id, conn=c)
+            if not company.outreach.auto_approve or company.status != "active":
+                return out
+            plan = _auto_approve_plan(c, company, now)
+        if not any(item["state"] == "due" or item["write"] for item in plan):
+            return tally(plan)
+    with _write_locked(conn) as c:
+        company = get_company(company_id, conn=c)
+        if not company.outreach.auto_approve or company.status != "active":
+            return out
+        stamp = iso(now)
+        plan = _auto_approve_plan(c, company, now)
+        for item in plan:
+            if item["write"] == "block":
+                c.execute("UPDATE messages SET auto_blocked = 1 WHERE id = ? AND updated_at = ?",
+                          (item["message"].id, item["version"]))
+            elif item["write"] == "restart":
+                c.execute("UPDATE messages SET auto_blocked = 0, updated_at = ? WHERE id = ? AND updated_at = ?",
+                          (stamp, item["message"].id, item["version"]))
+            if item["state"] != "due":
+                continue
+            cur = c.execute("UPDATE messages SET status = 'approved', approved_via = ?, updated_at = ? "
+                            "WHERE id = ? AND status = 'draft' AND auto_hold = 0 AND updated_at = ?",
+                            (APPROVED_VIA_AUTO, stamp, item["message"].id, item["version"]))
+            if cur.rowcount == 1:
+                out["approved"].append(item["message"].id)
+                item["state"] = "approved"
+            else:
+                item["state"] = "waiting"  # changed at the same moment: it waits a new window
+        return tally([item for item in plan if item["state"] != "approved"])
+
+
+def auto_approve_states(company: Company, messages: list[Message], now: datetime | None = None,
+                        conn: sqlite3.Connection | None = None) -> dict[int, dict[str, Any]]:
+    """What auto-approve does with each outbound draft in `messages`, for the dashboard and Claude.
+
+    {message_id: {"state": "waiting" | "held" | "blocked" | "off", "at": when it is approved (waiting), "reason":
+    why it won't be (blocked)}}. Other messages are left out. The same few queries for any number of messages.
+    """
+    drafts = [m for m in messages if m.direction == "outbound" and m.status == "draft"]
+    if not drafts:
+        return {}
+    if not company.outreach.auto_approve:
+        return {m.id: {"state": "off", "at": None, "reason": ""} for m in drafts}
+    lead_ids = {m.lead_id for m in drafts}
+    with _conn(conn) as c:
+        plan = _auto_approve_plan(c, company, _utc(now or utcnow()),
+                                  lead_id=next(iter(lead_ids)) if len(lead_ids) == 1 else None)
+    wanted = {m.id for m in drafts}
+    return {
+        item["message"].id: {"state": "waiting" if item["state"] == "due" else item["state"],
+                             "at": item["at"] if item["state"] in ("due", "waiting") else None,
+                             "reason": item["reason"]}
+        for item in plan if item["message"].id in wanted
+    }
+
+
+def set_auto_hold(message_id: int, hold: bool = True, now: datetime | None = None,
+                  conn: sqlite3.Connection | None = None) -> Message:
+    """Hold an outbound draft, so auto-approve never approves it (the user approves it, or not, themselves), or
+    release the hold (the dashboard only): the draft then waits a full review window again, from now.
+
+    Holding a message auto-approve approved and nobody sent yet takes that approval back (a held draft again):
+    the user clicked Hold on a page opened before the window ran out, and must not find it in the agent's queue.
+    """
+    with _write_locked(conn) as c:
+        msg = get_message(message_id, conn=c)
+        stamp = iso(_utc(now or utcnow()))
+        if (hold and msg.direction == "outbound" and msg.status == "approved" and msg.approved_via == APPROVED_VIA_AUTO
+                and msg.sent_at is None):
+            c.execute("UPDATE messages SET status = 'draft', approved_via = '', auto_hold = 1, updated_at = ? "
+                      "WHERE id = ?", (stamp, message_id))
+            return get_message(message_id, conn=c)
+        if msg.direction != "outbound" or msg.status != "draft":
+            raise ValueError(f"only drafts can be {'held' if hold else 'released'}: message {message_id} is "
+                             f"'{msg.status}'")
+        if hold:
+            c.execute("UPDATE messages SET auto_hold = 1 WHERE id = ?", (message_id,))
+        else:
+            c.execute("UPDATE messages SET auto_hold = 0, auto_blocked = 0, updated_at = ? WHERE id = ? "
+                      "AND auto_hold = 1", (stamp, message_id))
+        return get_message(message_id, conn=c)

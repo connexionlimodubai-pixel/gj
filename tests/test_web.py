@@ -1945,3 +1945,528 @@ def test_bulk_bar_script_keeps_the_clicked_action():
     assert "function initBulk()" in js and "initBulk();" in js
     # A button disabled before the browser reads the form would drop action=approve from the request.
     assert "setTimeout(() => buttons.forEach((btn) => { btn.disabled = true; }), 0)" in js
+
+
+def test_outreach_tabs_and_list_actions_keep_your_place(client, company):
+    """Tabs and list actions reload the page: they must not throw the user back to the top (app.js initKeepScroll)."""
+    base = f"/c/{company.id}"
+    draft_for(company.id, "Sara Ali")
+    approved = draft_for(company.id, "Omar Haddad")
+    repo.update_message(approved.id, status="approved")
+    for tab in ("drafts", "approved", "sent", "replies", "followups"):
+        page = client.get(f"{base}/outreach?tab={tab}").text
+        assert re.search(r'<nav class="tabs" aria-label="Outreach queue" data-scroll-anchor>', page)
+        assert page.count("data-scroll-anchor") == 1  # one anchor per page: the tabs
+    drafts = client.get(f"{base}/outreach?tab=drafts").text
+    # Approve, Mark sent and the bulk bar come back to this page: each remembers the position.
+    forms = re.findall(r'<form method="post" action="[^"]*/(?:messages/\d+|outreach/bulk)"[^>]*>', drafts)
+    assert len(forms) == 3 and all("data-keep-scroll" in f for f in forms)
+    approved_tab = client.get(f"{base}/outreach?tab=approved").text
+    forms = re.findall(r'<form method="post" action="[^"]*/messages/\d+"[^>]*>', approved_tab)
+    assert len(forms) == 1 and "data-keep-scroll" in forms[0]  # Mark sent
+    # The agent card's forms land on #agent instead, so they don't keep the position.
+    agent = re.findall(r'<form method="post" action="[^"]*/outreach/agent[^"]*"[^>]*>', drafts)
+    assert agent and not any("data-keep-scroll" in f for f in agent)
+
+
+def test_keep_scroll_script():
+    static = Path(__file__).parent.parent / "src" / "openberry" / "web" / "static"
+    js = (static / "app.js").read_text(encoding="utf-8")
+    init = js[js.index("function init() {"):]
+    assert init.index("initKeepScroll();") < init.index("initNav();")  # restore before anything else runs
+    keep = js[js.index("const KEEP_SCROLL_KEY"):js.index("function initBulk")]
+    assert 'closest(".tabs a[href], a[data-keep-scroll]")' in keep  # tab clicks are remembered...
+    assert 'form.matches("form[data-keep-scroll]")' in keep  # ...and so are marked forms (Approve, Mark sent, bulk)
+    assert "window.scrollTo(0, y)" in keep  # and the place is put back
+    # Only on the page the action was going to (its "next"), never over a #section link or a form with errors.
+    assert "state.to === location.pathname + location.search && !location.hash" in keep
+    assert '$(".form-alert")' in keep
+    # Cards taken off the list above the screen don't pull unread ones out of view.
+    assert '$$(".queue > li").filter((li) => $("[data-bulk-item]:checked", li))' in keep
+    assert 'form.getAttribute("data-keep-scroll") === "remove"' in keep
+    assert "sessionStorage" in keep and "catch (err)" in keep  # storage can be blocked
+    # early.js hides the content until app.js has restored it (no flash of the top), with the same rule, for 1 s.
+    early = (static / "early.js").read_text(encoding="utf-8")
+    assert 'keep.to === location.pathname + location.search && !location.hash' in early
+    assert 'classList.add("keep-scroll")' in early and "1000" in early
+    assert 'document.documentElement.classList.remove("keep-scroll")' in keep
+    css = (static / "app.css").read_text(encoding="utf-8")
+    assert ".keep-scroll .main { visibility: hidden; }" in css
+    assert "scroll-padding-top" in css  # phones: #section links land below the sticky top bar
+
+
+def test_other_pages_keep_your_place_too(client, company):
+    """Saving the profile, Activate on the board and the lead page's forms come back to the same page."""
+    base = f"/c/{company.id}"
+    settings = client.get(f"{base}/settings").text
+    assert re.search(r'<form method="post" action="[^"]*" class="company-form"[^>]*data-keep-scroll', settings)
+    assert "data-keep-scroll" not in client.get("/register").text  # the wizard moves between steps itself
+    repo.update_company(company.id, {"status": "paused"})
+    board = client.get("/companies").text
+    assert re.search(rf'<form method="post" action="/c/{company.id}/status" data-keep-scroll>', board)
+    msg = draft_for(company.id, "Sara Ali")
+    lead_page = client.get(f"{base}/leads/{msg.lead_id}").text
+    for action in (f"{base}/messages/{msg.id}", f"{base}/leads/{msg.lead_id}/update",
+                   f"{base}/leads/{msg.lead_id}/profile"):
+        assert re.search(rf'<form method="post" action="{re.escape(action)}"[^>]*data-keep-scroll', lead_page), action
+    outreach_page = client.get(f"{base}/outreach").text
+    # Approve and Mark sent take their card off the list.
+    assert outreach_page.count(f'action="{base}/messages/{msg.id}" data-keep-scroll="remove"') == 2
+
+
+def test_lead_page_redirects_land_on_the_message(client, company):
+    base = f"/c/{company.id}"
+    lead, _ = repo.upsert_lead(company.id, LeadIn(full_name="Omar Haddad", lead_company="Northwind"))
+    lead_page = f"{base}/leads/{lead.id}"
+    resp = post(client, f"{lead_page}/draft", {"channel": "linkedin_dm", "engine": "template"}, page=lead_page)
+    [draft] = repo.list_messages(company.id, lead_id=lead.id)
+    assert resp.headers["location"] == f"{lead_page}#msg-{draft.id}"  # the new draft, not the card's head
+    # Deleting a message: its #msg anchor is gone, so no fragment (the form keeps the place instead).
+    resp = post(client, f"{base}/messages/{draft.id}", {"action": "delete", "next": f"{lead_page}#msg-{draft.id}"},
+                page=lead_page)
+    assert resp.headers["location"] == lead_page
+    resp = post(client, f"{lead_page}/reply", {"body": "Sounds good", "channel": "linkedin_dm"}, page=lead_page)
+    [reply] = repo.list_messages(company.id, lead_id=lead.id, direction="inbound")
+    assert resp.headers["location"] == f"{lead_page}#msg-{reply.id}"
+    resp = post(client, f"{lead_page}/reply", {"body": "  "}, page=lead_page)
+    assert resp.headers["location"] == f"{lead_page}#outreach"  # nothing logged: back to the form
+
+
+# --------------------------------------------------------------------------------------
+# Auto-approve: the Outreach page's card, a line under each draft, Hold / Let it auto-approve, the pill
+# --------------------------------------------------------------------------------------
+
+def auto_card(page: str) -> str:
+    match = re.search(r'<section class="card agent-card auto-card" id="auto-approve".*?</section>', page, re.S)
+    assert match, "no auto-approve card"
+    return match.group(0)
+
+
+def auto_on(company_id: int, hours: int = 2) -> None:
+    """Auto-approve on since long ago, so each draft's own time decides when it is approved."""
+    since = repo.iso(repo.utcnow() - timedelta(days=30))
+    repo.update_company(company_id, {"outreach": {"auto_approve": True, "auto_approve_hours": hours,
+                                                  "auto_approve_since": since}})
+
+
+def aged(message_id: int, hours: float) -> None:
+    """As if the message was written `hours` ago."""
+    from openberry import db
+
+    stamp = repo.iso(repo.utcnow() - timedelta(hours=hours))
+    with db.connect() as c:
+        c.execute("UPDATE messages SET created_at = ?, updated_at = ? WHERE id = ?", (stamp, stamp, message_id))
+
+
+def queue_item(page: str, message_id: int) -> str:
+    match = re.search(rf'<li class="card queue-item" id="q-{message_id}">.*?</li>', page, re.S)
+    assert match, f"message {message_id} is not listed"
+    return match.group(0)
+
+
+def flashed(client: TestClient, resp) -> str:
+    return html_lib.unescape(client.get(resp.headers["location"]).text)
+
+
+def test_auto_approve_is_off_by_default_and_toggles_with_csrf(client, company):
+    base = f"/c/{company.id}"
+    page = client.get(f"{base}/outreach").text
+    card = auto_card(page)
+    assert "pill-agent-off" in card and "Off. Drafts wait for you to approve them." in text_of(card)
+    assert "Turn on" in card and "Turn off" not in card and "Never approved automatically: drafts you hold" in card
+    confirm = html_lib.unescape(re.search(r'data-confirm="([^"]*)"', card).group(1))
+    assert "your agent may then send them on LinkedIn without you reading them" in confirm
+    assert "Drafts you don't approve, hold or skip in time are approved without you, also after you edit them." in (
+        confirm)
+    assert page.index('id="agent"') < page.index('id="auto-approve"') < page.index('class="tabs"')
+
+    # Without the dashboard's CSRF token nothing changes.
+    assert client.post(f"{base}/outreach/auto-approve", data={"auto_approve": "on"}).status_code == 403
+    assert client.post(f"{base}/outreach/auto-approve",
+                       data={"auto_approve": "on", "csrf_token": "forged"}).status_code == 403
+    assert repo.get_company(company.id).outreach.auto_approve is False
+
+    backlog = draft_for(company.id, "Sara Ali")
+    aged(backlog.id, 24 * 7)
+    before = repo.utcnow()
+    resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "3"})
+    assert resp.status_code == 303 and resp.headers["location"] == f"{base}/outreach#auto-approve"
+    out = repo.get_company(company.id).outreach
+    assert (out.auto_approve, out.auto_approve_hours) == (True, 3) and out.auto_approve_since >= before
+    page = flashed(client, resp)
+    assert ("Auto-approve is on: drafts you don't approve, hold or skip are approved 3 hours after they're written or "
+            "last edited. Drafts you already have get 3 hours from now.") in page
+    assert repo.get_message(backlog.id).status == "draft"  # a week old, but it gets the full window from now
+    card = text_of(auto_card(page))
+    assert "pill-agent-on" in auto_card(page) and "Save" in card and "Turn off" in card
+    assert ("On: drafts you don't approve, hold or skip are approved 3 hours after they're written or last edited."
+            in card)
+    # Editing a draft never stops auto-approve: no copy may say so (it only starts the window again).
+    assert "edit, hold or skip" not in html_lib.unescape(page)
+    next_at = out.auto_approve_since + timedelta(hours=3)
+    assert f"1 draft waiting; the next one is approved at {ui.abs_dt(next_at)}" in card
+
+    # Save keeps it on, and keeps when it was turned on.
+    resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "5"})
+    saved = repo.get_company(company.id).outreach
+    assert (saved.auto_approve, saved.auto_approve_hours, saved.auto_approve_since) == (True, 5,
+                                                                                      out.auto_approve_since)
+    assert "Review window saved: drafts are approved 5 hours after they're written or last edited." in flashed(
+        client, resp)
+
+    resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "off", "auto_approve_hours": "5"})
+    assert repo.get_company(company.id).outreach.auto_approve is False
+    page = flashed(client, resp)
+    assert "Auto-approve is off. Drafts wait for you to approve them." in page and "pill-agent-off" in auto_card(page)
+
+    # On a paused company it says nothing is approved until it is active again.
+    repo.update_company(company.id, {"status": "paused"})
+    resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "2"})
+    page = flashed(client, resp)
+    assert "The company is paused: nothing is approved until you activate it." in page
+    assert "The company is paused, so nothing is approved until you activate it." in text_of(auto_card(page))
+    # With AI agent sending on, turning it on says the agent may send what it approves.
+    repo.update_company(company.id, {"status": "active", "outreach": {"agent_sending": True, "auto_approve": False}})
+    resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "2"})
+    page = flashed(client, resp)
+    assert "With AI agent sending on, your agent may then send the LinkedIn ones." in page
+    assert ("Auto-approve is on: drafts you don't approve, hold or skip in time are approved, so your agent may send"
+            in text_of(agent_card(page)))
+    assert "Editing a draft starts its window again." in text_of(agent_card(page))
+
+
+def test_the_auto_approve_window_is_validated(client, company):
+    base = f"/c/{company.id}"
+    for bad in ("0", "73", "abc", "-3", "2.5", "1000"):
+        resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": bad})
+        assert resp.status_code == 303
+        assert ("The review window must be a whole number of hours from 1 to 72. Nothing was changed."
+                in flashed(client, resp)), bad
+        out = repo.get_company(company.id).outreach
+        assert (out.auto_approve, out.auto_approve_hours, out.auto_approve_since) == (False, 2, None), bad
+    assert forms.AUTO_APPROVE_HOURS_RANGE == (1, 72)  # read from the model, which enforces it for every writer
+    assert 'name="auto_approve_hours" type="number" min="1" max="72"' in auto_card(client.get(f"{base}/outreach").text)
+
+    # A blank window keeps the stored one; the edges are allowed.
+    post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": ""})
+    assert repo.get_company(company.id).outreach.auto_approve_hours == 2
+    for edge in ("1", "72"):
+        post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": edge})
+        assert repo.get_company(company.id).outreach.auto_approve_hours == int(edge)
+    # A bad value while it is on changes nothing either; turning off always works.
+    post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "0"})
+    out = repo.get_company(company.id).outreach
+    assert (out.auto_approve, out.auto_approve_hours) == (True, 72)
+    post(client, f"{base}/outreach/auto-approve", {"auto_approve": "off", "auto_approve_hours": "999"})
+    out = repo.get_company(company.id).outreach
+    assert (out.auto_approve, out.auto_approve_hours) == (False, 72)
+
+
+def test_drafts_say_when_they_are_approved_automatically(client, company):
+    base = f"/c/{company.id}"
+    waiting = draft_for(company.id, "Sara Ali")
+    held = draft_for(company.id, "Omar Haddad")
+    repo.set_auto_hold(held.id, True)
+    repo.update_company(company.id, {"outreach": {"banned_words": ["synergy"]}})
+    blocked = draft_for(company.id, "Lina Noor", body="Real synergy here, Lina.")
+    assert "auto-line" not in client.get(f"{base}/outreach").text  # off: no lines, no buttons
+
+    auto_on(company.id)
+    aged(waiting.id, 1)
+    written = repo.get_message(waiting.id).updated_at
+    page = client.get(f"{base}/outreach").text
+    assert not bulk_page(client, f"{base}/outreach").nested  # the Hold forms aren't inside another form
+    item = queue_item(page, waiting.id)
+    at = repo.get_message(waiting.id).updated_at + timedelta(hours=2)
+    assert f"Approves automatically at {ui.abs_dt(at)} (in " in text_of(item)
+    assert f'<time datetime="{ui.iso_dt(at)}">' in item
+    line = re.search(r'<div class="auto-line auto-waiting">.*?</div>', item, re.S).group(0)
+    assert f'action="{base}/messages/{waiting.id}" data-keep-scroll' in line
+    assert f'name="next" value="{base}/outreach?tab=drafts"' in line and 'value="hold"' in line
+    item = queue_item(page, held.id)
+    assert "On hold: approve it yourself" in text_of(item) and 'value="release"' in item
+    assert "Let it auto-approve" in item
+    item = queue_item(page, blocked.id)
+    assert "Not approved automatically for now: it uses a banned word or phrase (synergy)" in text_of(item)
+    assert 'value="hold"' in item and 'value="release"' not in item  # it can be held before the reason goes away
+
+    # Hold: back on the same tab.
+    resp = post(client, f"{base}/messages/{waiting.id}", {"action": "hold", "next": f"{base}/outreach?tab=drafts"},
+                page=f"{base}/outreach")
+    assert resp.headers["location"] == f"{base}/outreach?tab=drafts" and repo.get_message(waiting.id).auto_hold
+    assert "On hold: this draft won't be approved automatically." in flashed(client, resp)
+    # Let it auto-approve: the hold is lifted and the draft waits a new window from now.
+    resp = post(client, f"{base}/messages/{waiting.id}",
+                {"action": "release", "next": f"{base}/outreach?tab=drafts"}, page=f"{base}/outreach")
+    released = repo.get_message(waiting.id)
+    assert released.auto_hold is False and released.updated_at > written
+    assert ("Hold lifted: this draft is approved automatically in 2 hours unless you approve, hold or skip it first. "
+            "Editing it starts the window again." in flashed(client, resp))
+    # A draft that can't be approved yet: holding it works, and lifting the hold says why it still waits.
+    post(client, f"{base}/messages/{blocked.id}", {"action": "hold"}, page=f"{base}/outreach")
+    assert repo.get_message(blocked.id).auto_hold
+    resp = post(client, f"{base}/messages/{blocked.id}", {"action": "release"}, page=f"{base}/outreach")
+    assert ("Hold lifted, but it isn't approved automatically for now: it uses a banned word or phrase (synergy)."
+            in flashed(client, resp))
+    # Only drafts are held; the CSRF token is required.
+    repo.update_message(blocked.id, status="approved")
+    resp = post(client, f"{base}/messages/{blocked.id}", {"action": "hold"}, page=f"{base}/outreach")
+    assert "Only drafts can be put on hold" in flashed(client, resp) and not repo.get_message(blocked.id).auto_hold
+    assert client.post(f"{base}/messages/{held.id}", data={"action": "release"}).status_code == 403
+    assert repo.get_message(held.id).auto_hold
+
+
+def test_the_lead_page_shows_each_drafts_line_and_back_to_drafts_holds(client, company):
+    base = f"/c/{company.id}"
+    auto_on(company.id)
+    msg = draft_for(company.id, "Sara Ali")
+    lead_url = f"{base}/leads/{msg.lead_id}"
+    page = client.get(lead_url).text
+    assert not bulk_page(client, lead_url).nested
+    assert ("Drafts you don't approve, hold or skip are approved automatically 2 hours after they're written or last "
+            "edited" in html_lib.unescape(page)) and f'href="{base}/outreach#auto-approve"' in page
+    bubble = re.search(rf'<article class="bubble bubble-out bubble-edit" id="msg-{msg.id}">.*?</article>', page,
+                       re.S).group(0)
+    line = re.search(r'<div class="auto-line auto-waiting">.*?</div>', bubble, re.S).group(0)
+    assert "Approves automatically at" in text_of(line) and "data-keep-scroll" not in line
+    # Hold belongs to the draft's edit form, so what the user typed there is saved with it, not lost.
+    assert "<form" not in line and f'value="hold" form="msg-{msg.id}-form"' in line
+    assert f'<form method="post" action="{base}/messages/{msg.id}" id="msg-{msg.id}-form" data-keep-scroll>' in bubble
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "hold", "body": "Hi Sara, typed but not saved yet.",
+                                                     "next": f"{lead_url}#msg-{msg.id}"}, page=lead_url)
+    assert resp.headers["location"] == f"{lead_url}#msg-{msg.id}"
+    held = repo.get_message(msg.id)
+    assert (held.status, held.auto_hold, held.body) == ("draft", True, "Hi Sara, typed but not saved yet.")
+    assert "On hold: approve it yourself" in text_of(client.get(lead_url).text)
+    # Unchanged text isn't saved again; an emptied text box is refused, as with Save, and nothing is held.
+    post(client, f"{base}/messages/{msg.id}", {"action": "release", "body": held.body}, page=lead_url)
+    released = repo.get_message(msg.id)
+    post(client, f"{base}/messages/{msg.id}", {"action": "hold", "body": held.body}, page=lead_url)
+    assert repo.get_message(msg.id).updated_at == released.updated_at and repo.get_message(msg.id).auto_hold
+    post(client, f"{base}/messages/{msg.id}", {"action": "release", "body": held.body}, page=lead_url)
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "hold", "body": "  "}, page=lead_url)
+    assert "message body is empty" in flashed(client, resp) and not repo.get_message(msg.id).auto_hold
+    msg = repo.get_message(msg.id)
+
+    # An approved message can go back to drafts, held: auto-approve won't approve it behind the user's back.
+    repo.update_message(msg.id, status="approved")
+    page = client.get(lead_url).text
+    bubble = re.search(rf'<article class="bubble bubble-out bubble-edit" id="msg-{msg.id}">.*?</article>', page,
+                       re.S).group(0)
+    assert 'value="draft"' in bubble and "Back to drafts" in bubble and "auto-line" not in bubble
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "draft", "body": msg.body,
+                                                     "next": f"{lead_url}#msg-{msg.id}"}, page=lead_url)
+    back = repo.get_message(msg.id)
+    assert (back.status, back.auto_hold) == ("draft", True)
+    assert "Moved back to drafts and put on hold: it won't be approved automatically." in flashed(client, resp)
+
+
+def test_opening_the_outreach_or_a_lead_page_approves_due_drafts(client, web_settings, company, monkeypatch):
+    assert web_settings.scheduler_enabled is False  # no scheduler: the pages themselves keep it current
+    auto_on(company.id)
+    first = draft_for(company.id, "Sara Ali")
+    aged(first.id, 3)
+    page = client.get(f"/c/{company.id}/outreach").text
+    assert repo.get_message(first.id).status == "approved" and f'id="q-{first.id}"' not in page
+    second = draft_for(company.id, "Omar Haddad")
+    aged(second.id, 3)
+    client.get(f"/c/{company.id}/leads/{second.lead_id}")
+    assert repo.get_message(second.id).status == "approved"
+    # A page view while nothing is due takes no write lock (a scan can hold it for a while).
+    third = draft_for(company.id, "Lina Noor")
+    calls, real = [], repo._write_locked
+
+    def spy(conn):
+        calls.append(conn)
+        return real(conn)
+
+    monkeypatch.setattr(repo, "_write_locked", spy)
+    client.get(f"/c/{company.id}/outreach")
+    assert calls == [] and repo.get_message(third.id).status == "draft"
+
+
+def test_auto_approved_messages_carry_a_pill(client, company):
+    base = f"/c/{company.id}"
+    auto_on(company.id)
+    auto = draft_for(company.id, "Sara Ali")
+    aged(auto.id, 3)
+    repo.auto_approve_due(company.id)
+    by_hand = draft_for(company.id, "Omar Haddad")
+    repo.update_message(by_hand.id, status="approved")
+
+    approved = client.get(f"{base}/outreach?tab=approved").text
+    assert "Auto-approved" in queue_item(approved, auto.id)
+    assert "Auto-approved" not in queue_item(approved, by_hand.id)
+    lead_page = client.get(f"{base}/leads/{auto.lead_id}").text
+    head = re.search(rf'<article class="bubble bubble-out bubble-edit" id="msg-{auto.id}">.*?</header>', lead_page,
+                     re.S).group(0)
+    assert "pill-auto-approved" in head and "Auto-approved" in head
+    # Still shown once it was sent: it went out without a person approving it.
+    repo.update_message(auto.id, status="sent")
+    assert "Auto-approved" in queue_item(client.get(f"{base}/outreach?tab=sent").text, auto.id)
+    head = re.search(rf'<article class="bubble bubble-out" id="msg-{auto.id}">.*?</header>',
+                     client.get(f"{base}/leads/{auto.lead_id}").text, re.S).group(0)
+    assert "Auto-approved" in head
+
+
+def test_saving_the_profile_keeps_the_auto_approve_settings(client, company):
+    base = f"/c/{company.id}"
+    post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "6"})
+    stored = repo.get_company(company.id).outreach
+    page = client.get(f"{base}/settings").text
+    assert 'name="outreach.auto_approve' not in page  # set on the Outreach page only
+    assert browser_submit(client, f"{base}/settings", f"{base}/settings").status_code == 303
+    out = repo.get_company(company.id).outreach
+    assert (out.auto_approve, out.auto_approve_hours, out.auto_approve_since) == (
+        True, 6, stored.auto_approve_since)
+    # Fields posted by hand are ignored too.
+    values = flat_values(repo.get_company(company.id))
+    post(client, f"{base}/settings", {**values, "outreach.auto_approve": "", "outreach.auto_approve_hours": "1"})
+    assert repo.get_company(company.id).outreach.auto_approve_hours == 6
+
+    # A whole profile read before the user turned it off can't turn it back on (nor the reverse).
+    stale = CompanyIn.model_validate(repo.get_company(company.id).model_dump())
+    post(client, f"{base}/outreach/auto-approve", {"auto_approve": "off"})
+    repo.update_company(company.id, stale)
+    assert repo.get_company(company.id).outreach.auto_approve is False
+    stale = CompanyIn.model_validate(repo.get_company(company.id).model_dump())
+    post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on"})
+    repo.update_company(company.id, stale)
+    assert repo.get_company(company.id).outreach.auto_approve is True
+
+
+def test_registrations_start_with_auto_approve_off_whatever_is_posted(client, web_settings):
+    post(client, "/register", {"name": "Eager Co", "outreach.auto_approve": "true",
+                               "outreach.auto_approve_hours": "1"}, page="/register")
+    eager = next(c for c in repo.list_companies() if c.name == "Eager Co")
+    assert (eager.outreach.auto_approve, eager.outreach.auto_approve_hours) == (False, 2)
+
+    web_settings.password = "pw"
+    web_settings.public_registration = True
+    post(client, "/register", {"name": "Visitor Co", "outreach.auto_approve": "true"}, page="/register")
+    visitor = next(c for c in repo.list_companies() if c.name == "Visitor Co")
+    assert (visitor.status, visitor.outreach.auto_approve, visitor.outreach.auto_approve_since) == (
+        "paused", False, None)
+
+
+def test_the_json_api_cannot_turn_auto_approve_on_or_shorten_it(client, web_settings, company):
+    web_settings.api_token = "tok"
+    auth = {"Authorization": "Bearer tok"}
+    url = f"/api/companies/{company.id}"
+    for patch, words in (({"auto_approve": True}, "turn auto-approve on"),
+                         ({"auto_approve_since": "2030-01-01T00:00:00+00:00"}, "change when auto-approve")):
+        resp = client.patch(url, json={"outreach": patch}, headers=auth)
+        assert resp.status_code == 403 and words in resp.json()["detail"], patch
+        assert "only the user can" in resp.json()["detail"]
+    assert client.patch(url, json={"outreach": {"auto_approve_hours": 99}}, headers=auth).status_code == 422
+    for outreach in ({"auto_approve": True}, {"auto_approve_hours": 1}):
+        created = client.post("/api/companies", json={"name": "Script Co", "outreach": outreach}, headers=auth)
+        assert created.status_code == 403 and not any(c.name == "Script Co" for c in repo.list_companies())
+    created = client.post("/api/companies", json={"name": "Script Co", "outreach": {"auto_approve_hours": 10}},
+                          headers=auth)
+    assert created.status_code == 201 and created.json()["outreach"]["auto_approve"] is False
+
+    # On (from the dashboard): the API may turn it off or make the window longer, never shorter.
+    auto_on(company.id, hours=6)
+    resp = client.patch(url, json={"outreach": {"auto_approve_hours": 5}}, headers=auth)
+    assert resp.status_code == 403 and "shorten the auto-approve window" in resp.json()["detail"]
+    full = client.get(url, headers=auth).json()
+    assert client.patch(url, json={"outreach": full["outreach"]}, headers=auth).status_code == 200
+    assert client.patch(url, json={"outreach": {"auto_approve_hours": 12}}, headers=auth).status_code == 200
+    assert client.patch(url, json={"outreach": {"auto_approve": False}}, headers=auth).status_code == 200
+    out = repo.get_company(company.id).outreach
+    assert (out.auto_approve, out.auto_approve_hours) == (False, 12)
+    messages = client.get(f"/api/leads/{draft_for(company.id, 'Sara Ali').lead_id}", headers=auth).json()["messages"]
+    assert messages[0]["auto_hold"] is False and messages[0]["approved_via"] == ""
+
+
+def test_hold_clicked_just_after_auto_approve_takes_the_approval_back(client, company):
+    base = f"/c/{company.id}"
+    repo.update_company(company.id, {"outreach": {"agent_sending": True}})
+    auto_on(company.id)
+    msg = draft_for(company.id, "Sara Ali")
+    aged(msg.id, 3)
+    # The page was opened while it was waiting; the scheduler approved it before the user clicked Hold.
+    assert repo.auto_approve_due(company.id)["approved"] == [msg.id]
+    assert [i["message_id"] for i in repo.send_queue(company.id)["items"]] == [msg.id]
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "hold", "next": f"{base}/outreach?tab=drafts"},
+                page=f"{base}/outreach")
+    back = repo.get_message(msg.id)
+    assert (back.status, back.auto_hold, back.approved_via) == ("draft", True, "")
+    assert repo.send_queue(company.id)["items"] == []  # the agent won't send it
+    assert ("It had just been approved automatically. It's back in drafts and on hold: approve it yourself when it's "
+            "ready.") in flashed(client, resp)
+    # A message a person approved, or one already sent, is never changed by Hold.
+    repo.update_message(msg.id, status="approved")
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "hold"}, page=f"{base}/outreach")
+    assert "Only drafts can be put on hold" in flashed(client, resp) and repo.get_message(msg.id).status == "approved"
+
+
+def test_editing_an_approved_message_says_when_auto_approve_approves_it_again(client, company):
+    base = f"/c/{company.id}"
+    msg = draft_for(company.id, "Sara Ali")
+    repo.update_message(msg.id, status="approved")
+    lead_url = f"{base}/leads/{msg.lead_id}"
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "save", "body": "Hi Sara, new text."}, page=lead_url)
+    assert "Saved as a draft: you changed the approved text. Approve it again when it's ready." in flashed(client, resp)
+
+    auto_on(company.id)
+    repo.update_message(msg.id, status="approved")
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "save", "body": "Hi Sara, newer text."},
+                page=lead_url)
+    assert repo.get_message(msg.id).status == "draft"
+    assert ("Saved as a draft: you changed the approved text. Auto-approve approves it in 2 hours unless you approve, "
+            "hold or skip it first.") in flashed(client, resp)
+
+
+def test_a_shorter_window_gives_waiting_drafts_the_new_window_from_now(client, company):
+    base = f"/c/{company.id}"
+    auto_on(company.id, hours=24)
+    msg = draft_for(company.id, "Sara Ali")
+    aged(msg.id, 6)
+    before = repo.utcnow()
+    resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "1"},
+                page=f"{base}/outreach")
+    out = repo.get_company(company.id).outreach
+    assert out.auto_approve_hours == 1 and out.auto_approve_since >= before
+    page = flashed(client, resp)
+    assert ("Review window saved: drafts are approved 1 hour after they're written or last edited. Drafts you already "
+            "have get 1 hour from now.") in page
+    assert repo.get_message(msg.id).status == "draft"  # 6 hours old, but not approved the moment it was saved
+    assert repo.auto_approve_due(company.id, now=out.auto_approve_since + timedelta(hours=1))["approved"] == [msg.id]
+    # A longer window keeps when it was turned on.
+    post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "5"},
+         page=f"{base}/outreach")
+    assert repo.get_company(company.id).outreach.auto_approve_since == out.auto_approve_since
+
+
+def test_turning_auto_approve_off_works_whatever_the_hours_field_holds(client, company):
+    base = f"/c/{company.id}"
+    auto_on(company.id)
+    resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "²"},
+                page=f"{base}/outreach")
+    assert resp.status_code == 303 and "must be a whole number of hours" in flashed(client, resp)
+    resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "off", "auto_approve_hours": "²"},
+                page=f"{base}/outreach")
+    assert resp.status_code == 303 and repo.get_company(company.id).outreach.auto_approve is False
+    # Other digits are whole numbers too.
+    post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "٣"},
+         page=f"{base}/outreach")
+    assert repo.get_company(company.id).outreach.auto_approve_hours == 3
+    # The agent's daily limit is read the same way.
+    repo.update_company(company.id, {"outreach": {"agent_sending": True}})
+    resp = post(client, f"{base}/outreach/agent", {"agent_sending": "off", "agent_daily_limit": "²"},
+                page=f"{base}/outreach")
+    assert resp.status_code == 303 and repo.get_company(company.id).outreach.agent_sending is False
+
+
+def test_digits_int_cannot_read_are_refused_not_a_crash(client, company):
+    """str.isdigit() accepts "²", which int() rejects: such input is ignored or refused, never a 500."""
+    dm = draft_for(company.id, "Sara Ali")
+    resp = bulk(client, company.id, "approve", [f"²:{repo.message_version(dm)}"])
+    assert resp.status_code == 303
+    assert "Tick the drafts you want first" in text_of(client.get(resp.headers["location"]).text)
+    assert repo.get_message(dm.id).status == "draft"
+    values = {**forms.company_to_values(repo.get_company(company.id)), "outreach.followup_days": "3, ²"}
+    built, errors = forms.build_company(values)
+    assert built is None and "outreach.followup_days" in errors

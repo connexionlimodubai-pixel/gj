@@ -20,12 +20,12 @@ from starlette.responses import RedirectResponse, Response
 
 from .. import repo, services
 from ..config import get_settings
-from ..models import SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
+from ..models import PROSPECT_TYPES, SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
 from . import charts, forms, scans
 from .auth import LoginRequired, checked_form, public_registration_open, require_login
 from .ratelimit import client_key, limits, retry_header
 from .session import COMPANY_KEY, flash, is_logged_in, remember_company, safe_next
-from .ui import LEAD_SOURCES, as_utc, choice, int_param, page_info, render
+from .ui import LEAD_SOURCES, as_utc, choice, int_param, page_info, plural, render
 
 router = APIRouter(dependencies=[Depends(require_login)], include_in_schema=False)
 public_router = APIRouter(include_in_schema=False)
@@ -145,11 +145,39 @@ def run_summary(run: ScanRun) -> dict[str, Any]:
     duration = None
     if run.finished_at:
         duration = max(0, int((run.finished_at - run.started_at).total_seconds()))
+    places = collectors.get("google_places")
     return {
         "run": run, "signals_new": stats.get("signals_new"), "leads_new": stats.get("leads_new"),
         "errors": errors, "warnings": warnings, "duration": duration, "note": stats.get("note", ""),
         "collectors": sorted(collectors),
+        "places": places_summary(places.get("counts") or {}) if isinstance(places, dict) else "",
     }
+
+
+# Google Maps collector counts -> how the scan history names the businesses it skipped.
+PLACES_SKIPS = (("no_website", "without a website"), ("robots", "blocked by robots.txt"),
+                ("unreachable", "unreachable"), ("excluded", "excluded (yours, a competitor or never contact)"),
+                ("already_handled", "found before"), ("not_checked", "not checked in time"))
+
+
+def places_summary(counts: dict[str, Any]) -> str:
+    """One plain line about what Google Maps did in a scan (the collector's counts), "" when it did nothing."""
+    def n(key: str) -> int:
+        value = counts.get(key)
+        return value if isinstance(value, int) else 0
+
+    sentences = []
+    if n("searches"):
+        sentences.append(f"{plural(n('searches'), 'search', 'searches')}, "
+                         f"{plural(n('businesses'), 'business', 'businesses')} found, {n('added'):,} added.")
+    if skipped := [f"{n(key):,} {label}" for key, label in PLACES_SKIPS if n(key)]:
+        sentences.append("Skipped: " + ", ".join(skipped) + ".")
+    if n("searches_not_due"):
+        sentences.append(f"{plural(n('searches_not_due'), 'search', 'searches')} not due yet: each search runs at "
+                         "most once a week.")
+    if n("searches_waiting"):
+        sentences.append(f"{plural(n('searches_waiting'), 'search', 'searches')} waiting for the next scan.")
+    return "Google Maps: " + " ".join(sentences) if sentences else ""
 
 
 def _new_people(stats: dict[str, Any]) -> str:
@@ -187,6 +215,7 @@ def kpi_tiles(company_id: int, stats: dict[str, Any]) -> list[dict[str, Any]]:
 FIELD_LABELS = {
     "job_boards": "job boards of target accounts", "rss_feeds": "RSS / Atom feeds", "sec_queries": "SEC EDGAR queries",
     "news_queries": "news queries", "hiring_keywords": "hiring keywords", "github_repos": "GitHub repositories",
+    "places_queries": "Google Maps searches",
 }
 _FIELD_KEY = re.compile(r"\b(" + "|".join(FIELD_LABELS) + r")\b")
 
@@ -198,6 +227,8 @@ def sources_panel(company: Company) -> list[dict[str, Any]]:
         row["requires"] = _FIELD_KEY.sub(lambda m: FIELD_LABELS[m.group(1)], row["requires"])
         if row["name"] == "reddit" and not (settings.reddit_client_id and settings.reddit_client_secret):
             row["setup_url"] = "/help#server-sources"  # needs the server admin's API app, not a profile field
+        if row["name"] == "google_places" and company.signals.places_queries and not settings.google_places_key:
+            row["setup_url"] = "/keys#google-maps"  # the searches are set; the key is missing
     s = company.signals
     claude_inputs = bool(s.influencers or s.competitor_pages or s.events)
     rows.append({
@@ -346,6 +377,7 @@ def help_page(request: Request) -> Response:
         "desktop_config": json.dumps(desktop, indent=2, ensure_ascii=False),
         "page_url": page_url, "base_url_differs": page_url != settings.base_url.rstrip("/"),
         "reddit_ready": bool(settings.reddit_client_id and settings.reddit_client_secret),
+        "google_maps_ready": bool(settings.google_places_key),
         "packaged": packaged, "install_warning": unstable_location(launch["command"]) if packaged else "",
     })
 
@@ -382,16 +414,19 @@ def as_pending_review(data: CompanyIn) -> CompanyIn:
     """An anonymous registration waits, paused, until the operator reviews and activates it.
 
     The scheduler skips paused companies, and the outbound URLs a visitor could choose (RSS feeds,
-    alert webhooks) are dropped: the operator adds them while reviewing the profile. The public
-    form doesn't show those fields.
+    alert webhooks) are dropped: the operator adds them while reviewing the profile. Google Maps searches
+    are dropped too: a visitor must not spend the operator's Google quota. The public form doesn't show
+    those fields.
     """
     return data.model_copy(update={
         "status": "paused",
-        "signals": data.signals.model_copy(update={"rss_feeds": []}),
+        "signals": data.signals.model_copy(update={"rss_feeds": [], "places_queries": []}),
         "notify": data.notify.model_copy(update={"slack_webhook_url": "", "discord_webhook_url": ""}),
-        # Only the operator turns on AI agent sending (the public form doesn't show it).
+        # Only the operator turns on AI agent sending and auto-approve (the public form shows neither).
         "outreach": data.outreach.model_copy(update={
-            "agent_sending": False, "agent_daily_limit": OutreachConfig.model_fields["agent_daily_limit"].default}),
+            "agent_sending": False, "agent_daily_limit": OutreachConfig.model_fields["agent_daily_limit"].default,
+            "auto_approve": False, "auto_approve_hours": OutreachConfig.model_fields["auto_approve_hours"].default,
+            "auto_approve_since": None}),
     })
 
 
@@ -441,7 +476,7 @@ def dashboard(request: Request, company_id: int) -> Response:
     remember_company(request, company_id)
     stats = repo.company_stats(company_id)
     top_leads, _ = repo.list_leads(company_id, kind="person", sort="score", limit=8)
-    recent, _ = repo.list_signals(company_id, limit=10)
+    recent, _ = repo.list_signals(company_id, limit=10, exclude_types=PROSPECT_TYPES)  # intent, not prospects
     runs = repo.list_scan_runs(company_id, limit=6)
     return render(request, "dashboard.html", {
         "company": company, "active": "dashboard", "title": company.name,
@@ -489,10 +524,22 @@ def signals_page(request: Request, company_id: int, type: str = "", source: str 
 # Outreach queue
 # --------------------------------------------------------------------------------------
 
+def auto_approve_status(company: Company, due: dict[str, Any]) -> dict[str, Any]:
+    """Auto-approve for the Outreach page's card, from repo.auto_approve_due's result (run as the page opened)."""
+    out = company.outreach
+    return {
+        "enabled": out.auto_approve, "hours": out.auto_approve_hours, "paused": company.status != "active",
+        "waiting": due["waiting"], "held": due["held"], "blocked": due["blocked"],
+        "next_at": _as_datetime(due["next_at"]),
+    }
+
+
 @router.get("/c/{company_id}/outreach")
 def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Response:
     company = repo.get_company(company_id)
     remember_company(request, company_id)
+    # Approve what is due first, so the page is current even with the scheduler off (OPENBERRY_SCHEDULER=false).
+    due = repo.auto_approve_due(company_id)
     tab = choice(tab, dict(OUTREACH_TABS)) or "drafts"
     counts = repo.company_stats(company_id)["messages"]
     replies = repo.list_messages(company_id, direction="inbound", limit=200)
@@ -515,14 +562,73 @@ def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Res
         "agent_queued_ids": {item["message_id"] for item in agent["items"]},
         "agent_leads": leads_by_id(s["lead_id"] for s in agent["skipped"][:AGENT_SKIPPED_SHOWN]),
         "agent_skipped_shown": AGENT_SKIPPED_SHOWN,
+        "auto": auto_approve_status(company, due),
+        "auto_states": repo.auto_approve_states(company, messages) if company.outreach.auto_approve else {},
     })
+
+
+def _auto_hours(raw: Any) -> int | None:
+    """The submitted review window, or None when it isn't a whole number of hours in the allowed range."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    low, high = forms.AUTO_APPROVE_HOURS_RANGE
+    return int(text) if text.isdecimal() and low <= int(text) <= high else None
+
+
+def hours_text(hours: int) -> str:
+    return f"{hours} hour{'' if hours == 1 else 's'}"
+
+
+@router.post("/c/{company_id}/outreach/auto-approve")
+def auto_approve_settings(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Turn auto-approve on or off and set its review window. Turning it off always works.
+
+    Turning it on, or making the window shorter, starts every draft's window again from now (auto_approve_since):
+    drafts already waiting are never approved at once.
+    """
+    company = repo.get_company(company_id)
+    back = f"/c/{company_id}/outreach#auto-approve"
+    turn_on = str(form.get("auto_approve") or "").strip().lower() in forms.TRUTHY
+    raw_hours = form.get("auto_approve_hours")
+    hours = _auto_hours(raw_hours)
+    if not turn_on:
+        patch: dict[str, Any] = {"auto_approve": False}
+        if hours is not None:
+            patch["auto_approve_hours"] = hours
+        repo.update_company(company_id, {"outreach": patch})
+        flash(request, "Auto-approve is off. Drafts wait for you to approve them.", "info")
+        return redirect(back)
+    if hours is None and isinstance(raw_hours, str) and raw_hours.strip():
+        low, high = forms.AUTO_APPROVE_HOURS_RANGE
+        flash(request, f"The review window must be a whole number of hours from {low} to {high}. Nothing was "
+                       "changed.", "error")
+        return redirect(back)
+    hours = hours or company.outreach.auto_approve_hours
+    was_on = company.outreach.auto_approve
+    shorter = was_on and hours < company.outreach.auto_approve_hours
+    patch = {"auto_approve": True, "auto_approve_hours": hours}
+    if not was_on or shorter:
+        patch["auto_approve_since"] = repo.iso()
+    repo.update_company(company_id, {"outreach": patch})
+    paused = "" if company.status == "active" else " The company is paused: nothing is approved until you activate it."
+    if was_on:
+        already = f" Drafts you already have get {hours_text(hours)} from now." if shorter else ""
+        flash(request, f"Review window saved: drafts are approved {hours_text(hours)} after they're written or "
+                       f"last edited.{already}{paused}")
+    else:
+        agent = " With AI agent sending on, your agent may then send the LinkedIn ones." if (
+            company.outreach.agent_sending) else ""
+        flash(request, f"Auto-approve is on: drafts you don't approve, hold or skip are approved {hours_text(hours)} "
+                       f"after they're written or last edited. Drafts you already have get {hours_text(hours)} from "
+                       f"now.{agent}"
+                       f"{paused}")
+    return redirect(back)
 
 
 def _agent_limit(raw: Any) -> int | None:
     """The submitted daily limit, or None when it isn't a whole number in the allowed range."""
     text = raw.strip() if isinstance(raw, str) else ""
     low, high = forms.AGENT_LIMIT_RANGE
-    return int(text) if text.isdigit() and low <= int(text) <= high else None
+    return int(text) if text.isdecimal() and low <= int(text) <= high else None
 
 
 @router.post("/c/{company_id}/outreach/agent")

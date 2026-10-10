@@ -1,4 +1,4 @@
-"""Orchestration: run collectors, turn raw signals into scored leads, alert on new hot leads."""
+"""Orchestration: run collectors, turn raw signals into scored leads, alert on new hot leads, auto-approve drafts."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from . import repo
+from . import config, repo
 from .collectors import CollectContext, RawSignal, get_collectors
 from .config import get_settings
 from .db import connect
@@ -57,6 +57,9 @@ def ingest(company_id: int, raw_signals: list[RawSignal]) -> IngestStats:
                     else:
                         stats.leads_updated += 1
                 _, sig_created = repo.add_signal(company_id, raw.signal, lead_id=lead_id, conn=c, rescore=False)
+                if raw.signal.source == "google_places" and raw.signal.external_id.startswith("gp:"):
+                    # Stored with its lead, in the same transaction: a business is "added" only once it is.
+                    repo.record_place_ids(company_id, {raw.signal.external_id[3:]: True}, conn=c)
                 if sig_created:
                     stats.signals_new += 1
                 else:
@@ -88,6 +91,7 @@ async def run_scan(company_id: int, *, trigger: str = "manual", sources: list[st
     Returns a stats dict (also stored on the scan run) with per-collector counts and errors.
     Raises ScanInProgress while another scan of the company runs (in any process).
     """
+    config.refresh_saved_settings()  # a key saved in the dashboard by another process counts at once
     company = repo.get_company(company_id)
     collectors = [c for c in get_collectors(sources) if c.enabled_for(company)]
     run_id = repo.start_scan_run(company_id, trigger)
@@ -114,14 +118,17 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
     try:
         async def run_one(collector) -> None:
             ctx = CollectContext(client=client, since=since, settings=settings)
+            timeout = getattr(collector, "timeout_seconds", None) or COLLECTOR_TIMEOUT_SECONDS
             try:
-                raw = await asyncio.wait_for(collector.collect(company, ctx), COLLECTOR_TIMEOUT_SECONDS)
+                raw = await asyncio.wait_for(collector.collect(company, ctx), timeout)
                 all_raw.extend(raw)
-                per_collector[collector.name] = {"found": len(raw), "warnings": ctx.warnings}
+                per_collector[collector.name] = {"found": len(raw), "warnings": ctx.warnings,
+                                                 **({"counts": dict(ctx.counts)} if ctx.counts else {})}
             except Exception as exc:
                 log.warning("collector %s failed: %s", collector.name, exc)
                 per_collector[collector.name] = {"found": 0, "error": f"{type(exc).__name__}: {exc}",
-                                                 "warnings": ctx.warnings}
+                                                 "warnings": ctx.warnings,
+                                                 **({"counts": dict(ctx.counts)} if ctx.counts else {})}
 
         await asyncio.gather(*(run_one(c) for c in collectors))
     finally:
@@ -132,6 +139,7 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
     repo.set_last_scan(company_id)
     # Every person who is hot and not alerted yet, including leads that turned hot outside a scan.
     alerts = await alert_new_hot_leads(company_id, company)
+    auto_approved = await auto_approve_company(company_id)
 
     stats = {
         "collectors": per_collector,
@@ -141,6 +149,7 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
         "leads_new": ingest_stats.leads_new,
         "leads_updated": ingest_stats.leads_updated,
         **alerts,
+        "auto_approved": auto_approved,
         "errors": ingest_stats.errors[:20],
     }
     status, problem = scan_status(collectors, per_collector)
@@ -153,7 +162,7 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
 
 
 NOTHING_CONFIGURED = ("No signal source is configured for this company: add keywords, subreddits, GitHub repos, "
-                      "job boards, news queries or RSS feeds to its profile.")
+                      "job boards, news queries, RSS feeds or Google Maps searches to its profile.")
 NOTHING_WORKED = ("No source returned anything and every one failed or reported problems (see the warnings): "
                   "check the network, proxy or API limits.")
 
@@ -230,6 +239,29 @@ async def alert_active_companies() -> dict[int, dict[str, Any]]:
     return results
 
 
+async def auto_approve_company(company_id: int) -> list[int]:
+    """repo.auto_approve_due for one company: the drafts it approved. A failure is logged, never raised, so it
+    can't fail the scan or the tick that runs it."""
+    try:
+        return (await asyncio.to_thread(repo.auto_approve_due, company_id))["approved"]
+    except Exception:
+        log.exception("auto-approve failed for company %s", company_id)
+        return []
+
+
+async def auto_approve_active_companies() -> dict[int, list[int]]:
+    """Auto-approve due drafts for every active company that turned it on; returns {company_id: approved ids}
+    for the companies where something was approved. One company's error never stops the others."""
+    results = {}
+    for company in repo.list_companies():
+        if company.status != "active" or not company.outreach.auto_approve:
+            continue
+        approved = await auto_approve_company(company.id)
+        if approved:
+            results[company.id] = approved
+    return results
+
+
 async def scan_due_companies(trigger: str = "schedule") -> list[dict[str, Any]]:
     results = []
     for company in repo.companies_due_for_scan():
@@ -244,9 +276,11 @@ async def scan_due_companies(trigger: str = "schedule") -> list[dict[str, Any]]:
 
 
 def collector_overview(company: Company) -> list[dict[str, Any]]:
-    """Which sources will run for this company and what each one still needs."""
-    return [
-        {
+    """Which sources will run for this company and what each one still needs (and paid-API usage, if any)."""
+    config.refresh_saved_settings()
+    rows = []
+    for c in get_collectors():
+        row: dict[str, Any] = {
             "name": c.name,
             "label": c.label,
             "signal_types": list(c.signal_types),
@@ -254,5 +288,7 @@ def collector_overview(company: Company) -> list[dict[str, Any]]:
             "configured": c.is_configured(company),
             "enabled": c.enabled_for(company),
         }
-        for c in get_collectors()
-    ]
+        if (usage := c.usage() if hasattr(c, "usage") else None) is not None:
+            row["usage"] = usage
+        rows.append(row)
+    return rows

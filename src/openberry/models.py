@@ -24,12 +24,17 @@ SIGNAL_TYPES: dict[str, tuple[str, int]] = {
     "profile_visit": ("Visited your profile or website", 35),
     "event": ("Attending a relevant event", 15),
     "company_news": ("Company in the news", 15),
+    # Not intent: the business matched a search the user set up (a prospect list). Scored mostly on ICP fit.
+    "business_search": ("Matches a business search you set up", 10),
     "custom": ("Other signal", 15),
 }
+# Signal types that only say where a lead was found. They are not offered under "Signal types to track"
+# (the searches themselves are the opt-in) and never count toward signal stacking.
+PROSPECT_TYPES = ("business_search",)
 
 SIGNAL_SOURCES = (
     "hackernews", "reddit", "github", "greenhouse", "lever", "ashby",
-    "google_news", "rss", "sec_edgar", "linkedin", "web", "manual", "claude", "csv", "demo",
+    "google_news", "rss", "sec_edgar", "google_places", "linkedin", "web", "manual", "claude", "csv", "demo",
 )
 
 SENIORITIES: dict[str, str] = {
@@ -66,6 +71,15 @@ AGENT_CHANNELS = ("linkedin_connect", "linkedin_dm")
 # "claude" = Claude marked it sent with update_message (counts toward the agent's daily limit too).
 SENT_VIA = ("", "agent", "claude")
 AGENT_PAUSE_REASON_MAX = 500
+# OutreachConfig fields of auto-approve: changed on the dashboard's Outreach page only (repo.update_company keeps them
+# on a profile save; Claude and the JSON API may only turn it off or make the window longer).
+AUTO_APPROVE_SETTINGS = ("auto_approve", "auto_approve_hours", "auto_approve_since")
+# Message.approved_via: "auto" = auto-approve approved it (repo.auto_approve_due), "" = a person did.
+APPROVED_VIA_AUTO = "auto"
+
+# Google Maps searches (SignalConfig.places_queries) a profile may hold, and their length.
+MAX_PLACES_QUERIES = 30
+MAX_PLACES_QUERY_CHARS = 200
 
 
 # --------------------------------------------------------------------------------------
@@ -95,6 +109,34 @@ def split_list(value: Any) -> list[str]:
 
 
 StrList = Annotated[list[str], BeforeValidator(split_list)]
+
+
+def split_lines(value: Any) -> list[str]:
+    """Like split_list, but only line breaks separate items: a search may contain commas ("law firms in DIFC, Dubai").
+
+    Whitespace inside an item collapses to single spaces; duplicates (case-insensitive) and blanks are dropped.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts: list[Any] = re.split(r"\r\n|\r|\n", value)
+    elif isinstance(value, (list, tuple)):
+        parts = []
+        for item in value:
+            parts.extend(split_lines(item) if isinstance(item, str) else [item])
+    else:
+        parts = [value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = " ".join(str(part).split())
+        if text and text.casefold() not in seen:
+            seen.add(text.casefold())
+            out.append(text)
+    return out
+
+
+LineList = Annotated[list[str], BeforeValidator(split_lines)]
 
 
 def _blank_to_none(value: Any) -> Any:
@@ -157,7 +199,8 @@ def parse_job_boards(value: Any) -> list[dict[str, str]] | Any:
 class SignalConfig(_Model):
     """What to watch. Each list feeds one or more collectors."""
 
-    enabled_types: StrList = Field(default_factory=lambda: list(SIGNAL_TYPES), description="Signal types to track")
+    enabled_types: StrList = Field(default_factory=lambda: [t for t in SIGNAL_TYPES if t not in PROSPECT_TYPES],
+                                   description="Signal types to track")
     keywords: StrList = Field(default_factory=list, description="Topics to monitor on HN/Reddit/news, e.g. 'corporate chauffeur'")
     subreddits: StrList = Field(default_factory=list, description="Subreddits to watch (without r/)")
     github_repos: StrList = Field(default_factory=list, description="owner/repo of competitor or related repos: issue authors and forkers become leads (stargazers only for repos you admin, with GITHUB_TOKEN)")
@@ -166,6 +209,11 @@ class SignalConfig(_Model):
     news_queries: StrList = Field(default_factory=list, description="Google News queries, e.g. 'raises Series A fintech'")
     rss_feeds: StrList = Field(default_factory=list, description="Any RSS/Atom feed URLs to scan for keywords")
     sec_queries: StrList = Field(default_factory=list, description="SEC EDGAR full-text queries (US companies). Form D funding filings match names, places, people and industry labels (e.g. 'Other Technology', 'Texas'); 8-K executive changes match topical phrases (e.g. 'logistics software')")
+    places_queries: LineList = Field(default_factory=list, description=(
+        "Google Maps searches, one per line, as typed in Google Maps, e.g. 'event management companies in Dubai'. "
+        "Each business found becomes an account lead with the email and phone its own website lists. Needs a "
+        f"Google Maps API key, which the user adds in the dashboard. At most {MAX_PLACES_QUERIES}, each under "
+        f"{MAX_PLACES_QUERY_CHARS} characters"))
     influencers: StrList = Field(default_factory=list, description="LinkedIn profile URLs whose post engagers Claude should check")
     competitor_pages: StrList = Field(default_factory=list, description="Competitor LinkedIn/company pages whose engagers Claude should check")
     events: StrList = Field(default_factory=list, description="Events/webinars whose attendees are good leads")
@@ -187,6 +235,15 @@ class SignalConfig(_Model):
                 out.append(repo)
         return out
 
+    @field_validator("places_queries")
+    @classmethod
+    def _check_places_queries(cls, v: list[str]) -> list[str]:
+        if len(v) > MAX_PLACES_QUERIES:
+            raise ValueError(f"At most {MAX_PLACES_QUERIES} Google Maps searches")
+        if any(len(q) > MAX_PLACES_QUERY_CHARS for q in v):
+            raise ValueError(f"Keep each Google Maps search under {MAX_PLACES_QUERY_CHARS} characters")
+        return v
+
     @field_validator("weights")
     @classmethod
     def _clamp_weights(cls, v: dict[str, int]) -> dict[str, int]:
@@ -206,7 +263,10 @@ class OutreachConfig(_Model):
     followup_days: Annotated[list[int], BeforeValidator(lambda v: [int(x) for x in split_list(v)] if isinstance(v, str) else v)] = Field(
         default_factory=lambda: [3, 7], description="Days to wait after each sent message before the next follow-up is due")
     mode: Literal["review", "auto_draft"] = Field(
-        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot lead, however it turned hot (scan, Claude, import or edit). Nothing is ever sent automatically.")
+        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot "
+                                      "lead, however it turned hot (scan, Claude, import or edit). Drafts are never "
+                                      "sent: a person approves them (or auto_approve does, if the user turned it on) "
+                                      "and sends them, or lets their own AI agent send approved LinkedIn messages.")
     banned_words: StrList = Field(default_factory=list, description="Words/phrases messages must never use")
     extra_instructions: str = Field(default="", description="Anything Claude must respect when writing messages")
     # LinkedIn's own limits on connection-request notes depend on the account (LinkedIn help a563153, a6239760):
@@ -218,21 +278,31 @@ class OutreachConfig(_Model):
     # AI agent sending: an MCP-capable browser agent in the user's own browser sends the LinkedIn messages the
     # user approved, through the send queue (repo.send_queue). These four are changed in the dashboard only.
     agent_sending: bool = Field(
-        default=False, description="Let an AI agent in your own browser send the LinkedIn messages you approved")
+        default=False, description="Let an AI agent in your own browser send approved LinkedIn messages")
     agent_daily_limit: int = Field(
         default=15, ge=1, le=50, description="Most LinkedIn messages the agent may send in any 24 hours")
     agent_paused_until: datetime | None = Field(
         default=None, description="Agent sending is paused until then (the agent reported a problem)")
     agent_pause_reason: str = Field(default="", description="The problem the agent reported")
+    # Auto-approve (repo.auto_approve_due): a draft the user doesn't approve, hold or skip is approved once its
+    # review window has passed (an edit starts the window again). Off by default, and like agent sending only the
+    # dashboard turns it on.
+    auto_approve: bool = Field(
+        default=False, description="Approve drafts automatically once they have waited auto_approve_hours for you")
+    auto_approve_hours: int = Field(
+        default=2, ge=1, le=72, description="Hours a draft waits for you after it was written or last edited")
+    auto_approve_since: datetime | None = Field(
+        default=None, description="When auto-approve was turned on: drafts written before get the full window from "
+                                  "then")
 
     @field_validator("linkedin_account", mode="before")
     @classmethod
     def _account_word(cls, v: Any) -> Any:
         return v.strip().lower() if isinstance(v, str) else v
 
-    @field_validator("agent_paused_until")
+    @field_validator("agent_paused_until", "auto_approve_since")
     @classmethod
-    def _utc_pause(cls, v: datetime | None) -> datetime | None:
+    def _utc_times(cls, v: datetime | None) -> datetime | None:
         return v.replace(tzinfo=timezone.utc) if v is not None and v.tzinfo is None else v
 
     @field_validator("agent_pause_reason")
@@ -419,6 +489,11 @@ class Message(_Model):
     sent_at: datetime | None = None
     sent_via: str = Field(default="", description="'' = marked sent by the user, 'agent' = the AI agent sent it, "
                                                    "'claude' = Claude marked it sent")
+    auto_hold: bool = Field(default=False, description="The user held this draft: auto-approve never approves it")
+    approved_via: str = Field(default="", description="'auto' = auto-approve approved it after its review window, "
+                                                       "'' = a person did (or it isn't approved)")
+    auto_blocked: bool = Field(default=False, description="Auto-approve found a reason not to approve this draft: once "
+                                                          "the reason goes away, it waits a full review window again")
 
 
 class ScanRun(_Model):

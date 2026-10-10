@@ -1,0 +1,18 @@
+{
+  "error": {
+    "code": 403,
+    "message": "This API method requires billing to be enabled. Please enable billing on project #123456789012 by visiting https://console.developers.google.com/billing/enable?project=123456789012 then retry. If you enabled billing for this project recently, wait a few minutes for the action to propagate to our systems and retry.",
+    "status": "PERMISSION_DENIED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "BILLING_DISABLED",
+        "domain": "googleapis.com",
+        "metadata": {
+          "consumer": "projects/123456789012",
+          "service": "places.googleapis.com"
+        }
+      }
+    ]
+  }
+}

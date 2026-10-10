@@ -93,4 +93,4 @@ Enable JSON output in the SearXNG settings. Keep volumes modest, because upstrea
 
 OpenBerry's design choice is different: **no LinkedIn automation built in, no paid dependencies.** Claude is the agent,
 public data sources supply the signals, and a human presses "send". The one exception is opt-in: with
-[AI agent sending](AI_AGENT_SENDING.md), your own agent in your own browser sends the LinkedIn messages you approved.
+[AI agent sending](AI_AGENT_SENDING.md), your own agent in your own browser sends the approved LinkedIn messages.

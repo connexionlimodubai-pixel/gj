@@ -2452,3 +2452,15 @@ def test_turning_auto_approve_off_works_whatever_the_hours_field_holds(client, c
     resp = post(client, f"{base}/outreach/agent", {"agent_sending": "off", "agent_daily_limit": "²"},
                 page=f"{base}/outreach")
     assert resp.status_code == 303 and repo.get_company(company.id).outreach.agent_sending is False
+
+
+def test_digits_int_cannot_read_are_refused_not_a_crash(client, company):
+    """str.isdigit() accepts "²", which int() rejects: such input is ignored or refused, never a 500."""
+    dm = draft_for(company.id, "Sara Ali")
+    resp = bulk(client, company.id, "approve", [f"²:{repo.message_version(dm)}"])
+    assert resp.status_code == 303
+    assert "Tick the drafts you want first" in text_of(client.get(resp.headers["location"]).text)
+    assert repo.get_message(dm.id).status == "draft"
+    values = {**forms.company_to_values(repo.get_company(company.id)), "outreach.followup_days": "3, ²"}
+    built, errors = forms.build_company(values)
+    assert built is None and "outreach.followup_days" in errors

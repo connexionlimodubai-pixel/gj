@@ -294,7 +294,7 @@ def _bulk_selection(form: FormData) -> list[tuple[int, str]]:
     selected: list[tuple[int, str]] = []
     for value in form.getlist("message"):
         raw_id, _, version = value.partition(":") if isinstance(value, str) else ("", "", "")
-        if raw_id.isdigit() and version and (int(raw_id), version) not in selected:
+        if raw_id.isdecimal() and version and (int(raw_id), version) not in selected:
             selected.append((int(raw_id), version))
     return selected
 

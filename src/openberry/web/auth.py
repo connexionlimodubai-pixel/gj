@@ -279,7 +279,7 @@ class BodySizeLimitMiddleware:
             await self.app(scope, receive, send)
             return
         length = Headers(scope=scope).get("content-length", "")
-        if length.isdigit() and int(length) > MAX_BODY_BYTES:
+        if length.isascii() and length.isdigit() and int(length) > MAX_BODY_BYTES:
             await PlainTextResponse("Request body too large.", status_code=413)(scope, receive, send)
             return
         received = 0

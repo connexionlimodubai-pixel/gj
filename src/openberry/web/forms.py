@@ -161,7 +161,7 @@ def _precheck(values: dict[str, Any]) -> dict[str, str]:
             errors["signals.github_repos"] = f"'{repo_name}' is not owner/repo (e.g. vercel/next.js)."
             break
     days = split_list(values.get("outreach.followup_days", ""))
-    if any(not d.isdigit() for d in days):
+    if any(not d.isdecimal() for d in days):  # isdigit() also takes "²", which int() rejects
         errors["outreach.followup_days"] = "Use whole numbers of days, e.g. 3, 7."
     email = str(values.get("contact_email", "")).strip()
     if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):

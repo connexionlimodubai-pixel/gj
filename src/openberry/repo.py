@@ -926,6 +926,8 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
             if lead.status in ("new", "qualified") or (
                     status == "replied" and order.index(lead.status) < order.index("replied")):
                 c.execute("UPDATE leads SET status = ?, updated_at = ? WHERE id = ?", (target, iso(), lead.id))
+                if target in NO_AGENT_LEAD_STATUSES:  # the lead left the pipeline, as in update_lead
+                    _unapprove_for_new_profile(c, lead.id)
         return get_message(message_id, conn=c)
 
 
@@ -1701,7 +1703,8 @@ def resume_agent_sending(company_id: int, conn: sqlite3.Connection | None = None
 
 
 # --------------------------------------------------------------------------------------
-# Auto-approve: drafts the user doesn't edit, hold or skip are approved once their review window has passed
+# Auto-approve: drafts the user doesn't approve, hold or skip are approved once their review window has passed
+# (an edit starts the window again)
 # --------------------------------------------------------------------------------------
 #
 # Off unless the user turns it on for the company in the dashboard (outreach.auto_approve). A draft waits
@@ -1718,7 +1721,7 @@ def resume_agent_sending(company_id: int, conn: sqlite3.Connection | None = None
 
 AUTO_ONE_PER_LEAD_APPROVED = ("another message to this lead is approved and not sent yet (one message per lead at a "
                               "time)")
-AUTO_ONE_PER_LEAD_OLDER = "an older draft to this lead goes first (one message per lead at a time)"
+AUTO_ONE_PER_LEAD_OLDER = "an earlier draft to this lead goes first (one message per lead at a time)"
 AUTO_COMPANY_PAUSED = "the company is paused"
 AUTO_AFTER_CONNECT = ("it is the first LinkedIn message after your connection request: approve it yourself once they "
                       "accept")
@@ -1734,21 +1737,23 @@ def _banned_words_used(company: Company, msg: Message) -> list[str]:
 
 def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
                        lead_id: int | None = None) -> list[dict[str, Any]]:
-    """What auto-approve does with each outbound draft of the company (or of one lead), oldest first.
+    """What auto-approve does with each outbound draft of the company (or of one lead), in sequence order.
 
     Each item: {"message", "version" (its stored updated_at), "state": "due" | "waiting" | "held" | "blocked",
     "at" (when its window ends), "reason" (why it is blocked), "write": what auto_approve_due stores, "block" (flag
     a newly blocked draft), "restart" (a flagged draft is clear now: its window starts again from `now`) or None}.
     Three queries, whatever the number of drafts.
-    A lead's drafts are approved one at a time, in the order they were written: a newer draft waits while an
-    older one is still a draft (waiting, held or blocked) or another message to the lead is approved and unsent.
+    A lead's drafts are approved one at a time, step by step, then in the order they were written: a draft waits
+    while an earlier one (an earlier step, or the same step written before) is still a draft (waiting, held or
+    blocked) or another message to the lead is approved and unsent. By step first: a rewritten connection note
+    (a newer row) still goes before the step-2 message that follows it.
     A draft repeating a step already sent doesn't hold up the lead's other drafts: it is stale.
     """
     where, params = "company_id = ? AND direction = 'outbound' AND status = 'draft'", [company.id]
     if lead_id is not None:
         where += " AND lead_id = ?"
         params.append(lead_id)
-    rows = c.execute(f"SELECT * FROM messages WHERE {where} ORDER BY created_at, id", params).fetchall()
+    rows = c.execute(f"SELECT * FROM messages WHERE {where} ORDER BY step, created_at, id", params).fetchall()
     if not rows:
         return []
     leads = {r["id"]: _lead_from_row(r) for r in c.execute(
@@ -1770,7 +1775,7 @@ def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
     since = _utc(cfg.auto_approve_since) if cfg.auto_approve_since else None
     note_max = connect_note_limit(company)
     lead_problems: dict[int, str] = {}
-    older: set[int] = set()  # leads with an older draft earlier in this list
+    older: set[int] = set()  # leads with a draft earlier in this list
     plan: list[dict[str, Any]] = []
     for row in rows:
         msg = _message_from_row(row)

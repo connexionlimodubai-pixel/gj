@@ -30,8 +30,9 @@ The app isn't code-signed, which is why Windows and macOS ask you to confirm onc
    **Nothing is sent before it is approved.** You review, copy, send and mark as sent, or, if you choose, let your own
    AI agent send the approved LinkedIn messages ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)).
    Approve drafts one at a time, or tick several on the Outreach page and approve them together. If you can't keep up,
-   turn on **auto-approve** (off by default): drafts you don't edit, hold or skip are approved after a review window you
-   choose (2 hours by default), and never for leads who replied or are on your never-contact list.
+   turn on **auto-approve** (off by default): drafts you don't approve, hold or skip are approved after a review window
+   you choose (2 hours by default, counted from the last edit), and never for leads who replied or are on your
+   never-contact list.
 5. **Alert you** on Slack or Discord when a person lead turns hot, whether a scan, Claude, the API, a CSV import or an edit
    made it hot. Alerts go out after each scan and, while `openberry serve` runs, within a few minutes.
    Export to CSV or use the JSON API with n8n or Activepieces.

@@ -232,8 +232,9 @@ class OutreachConfig(_Model):
     agent_paused_until: datetime | None = Field(
         default=None, description="Agent sending is paused until then (the agent reported a problem)")
     agent_pause_reason: str = Field(default="", description="The problem the agent reported")
-    # Auto-approve (repo.auto_approve_due): a draft the user doesn't edit, hold or skip is approved once its review
-    # window has passed. Off by default, and like agent sending only the dashboard turns it on.
+    # Auto-approve (repo.auto_approve_due): a draft the user doesn't approve, hold or skip is approved once its
+    # review window has passed (an edit starts the window again). Off by default, and like agent sending only the
+    # dashboard turns it on.
     auto_approve: bool = Field(
         default=False, description="Approve drafts automatically once they have waited auto_approve_hours for you")
     auto_approve_hours: int = Field(

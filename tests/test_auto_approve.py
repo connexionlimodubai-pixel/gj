@@ -1,4 +1,4 @@
-"""Auto-approve: drafts nobody edits, holds or skips are approved after a review window, and everything it leaves
+"""Auto-approve: drafts nobody approves, holds or skips are approved after a review window, and everything it leaves
 alone. The dashboard's card and buttons are tested in test_web.py."""
 
 from __future__ import annotations
@@ -832,7 +832,7 @@ async def test_a_new_version_of_a_held_draft_is_held_too(company):
                          channel="linkedin_connect", step=1)
     assert saved["superseded_draft_ids"] == [first.id] and status(first.id) == "skipped"
     assert saved["auto_approve"] == "held" and "auto_approves_at" not in saved
-    assert "on hold, like the draft it replaces" in saved["reminder"]
+    assert "on hold, like the earlier draft for this step" in saved["reminder"]
     assert repo.get_message(saved["message_id"]).auto_hold
     assert repo.auto_approve_due(company.id, now=repo.utcnow() + 100 * HOUR)["approved"] == [plain["message_id"]]
     assert status(saved["message_id"]) == "draft"
@@ -848,3 +848,117 @@ async def test_claude_hears_when_an_edited_approved_message_is_approved_again_au
     assert edited["auto_approves_at"] == (repo.get_message(msg.id).updated_at + 2 * HOUR).isoformat()
     assert "Auto-approve is on: it is approved automatically at auto_approves_at" in edited["note"]
     assert "the user approves it before it is sent" not in edited["note"]
+
+
+async def test_a_block_claude_was_shown_waits_a_full_window_once_it_goes_away(company):
+    """Claude alone (stdio, no scheduler, no dashboard): what list_outreach, get_lead or save_outreach_message
+    report as not approved for now is remembered, so the draft is never approved the moment the reason goes away."""
+    turn_on(company, banned_words=["guarantee"], agent_sending=True)
+    banned = draft(person(company), body="Hi, we guarantee on-time pickups. Happy to connect!", hours_ago=24)
+    # Another lead: the user approved the first message; Claude wrote the next one 3 hours ago.
+    lead_id = person(company)
+    first = repo.create_message(lead_id, "Hi, a quick question about transfers.", channel="linkedin_dm",
+                                status="approved")
+    second = draft(lead_id, body="One more idea for your transfers.", channel="linkedin_dm", step=2, hours_ago=3)
+    async with mcp_client() as c:
+        rows = {r["id"]: r for r in (await ok(c, "list_outreach", company_id=company.id))["messages"]}
+        assert rows[banned.id]["auto_approve"] == "it uses a banned word or phrase (guarantee)"
+        shown = {m["id"]: m for m in (await ok(c, "get_lead", lead_id=lead_id))["messages"]}
+        assert shown[second.id]["auto_approve"] == repo.AUTO_ONE_PER_LEAD_APPROVED
+        assert repo.get_message(banned.id).auto_blocked and repo.get_message(second.id).auto_blocked
+        # The user has Claude drop the banned word, sends the first message by hand and Claude records it.
+        await ok(c, "update_company", company_id=company.id, changes={"outreach": {"banned_words": []}})
+        await ok(c, "update_message", message_id=first.id, status="sent")
+        cleared = repo.utcnow()
+        queue = await ok(c, "get_send_queue", company_id=company.id)
+    assert queue["auto_approved_now"] == [] and queue["items"] == []
+    for msg_id in (banned.id, second.id):
+        after = repo.get_message(msg_id)
+        assert after.status == "draft" and after.updated_at >= cleared  # a full window from now
+    assert sorted(repo.auto_approve_due(company.id, now=repo.utcnow() + 2 * HOUR)["approved"]) == sorted(
+        [banned.id, second.id])
+
+    # A draft Claude saves that can't be approved yet is flagged as it is saved.
+    other = person(company)
+    note = draft(other, hours_ago=1)
+    async with mcp_client() as c:
+        saved = await ok(c, "save_outreach_message", lead_id=other, body="Thanks for connecting!",
+                         channel="linkedin_dm", step=2)
+    assert saved["auto_approve"] == repo.AUTO_ONE_PER_LEAD_OLDER
+    assert repo.get_message(saved["message_id"]).auto_blocked
+    repo.update_message(note.id, status="skipped")
+    assert repo.auto_approve_due(company.id, now=repo.utcnow() + HOUR)["approved"] == []
+
+
+async def test_a_rewritten_connection_note_still_goes_before_the_message_after_it(company):
+    """A lead's drafts go step by step: a rewrite of the step-1 note is a newer row than the step-2 message, but
+    the 'thanks for connecting' message never goes before the connection request."""
+    turn_on(company, agent_sending=True)
+    lead_id = person(company)
+    note = draft(lead_id, hours_ago=1)
+    thanks = draft(lead_id, body="Thanks for connecting, Jane!", channel="linkedin_dm", step=2, hours_ago=1)
+    assert repo.auto_approve_due(company.id)["blocked"] == 1
+    async with mcp_client() as c:
+        saved = await ok(c, "save_outreach_message", lead_id=lead_id, channel="linkedin_connect", step=1,
+                         body="Hi Jane, rewritten. Happy to connect!")
+    assert saved["superseded_draft_ids"] == [note.id] and "auto_approves_at" in saved
+    rewritten = saved["message_id"]
+    assert state(company, thanks.id)["reason"] == repo.AUTO_ONE_PER_LEAD_OLDER
+    for hours in (2, 4, 48):
+        repo.auto_approve_due(company.id, now=repo.utcnow() + hours * HOUR)
+        assert (status(rewritten), status(thanks.id)) == ("approved", "draft")
+    assert [i["message_id"] for i in repo.send_queue(company.id)["items"]] == [rewritten]
+    repo.update_message(rewritten, status="sent")
+    repo.auto_approve_due(company.id, now=repo.utcnow() + 48 * HOUR)
+    assert status(thanks.id) == "draft" and state(company, thanks.id)["reason"] == repo.AUTO_AFTER_CONNECT
+
+
+async def test_a_held_draft_stays_held_whatever_claude_does_first(company):
+    """Only the user releases a hold: skipping the held draft before writing a new version doesn't lift it."""
+    turn_on(company, agent_sending=True)
+    lead_id = person(company)
+    held = draft(lead_id, hours_ago=1)
+    repo.set_auto_hold(held.id, True)
+    async with mcp_client() as c:
+        await ok(c, "update_message", message_id=held.id, status="skipped")
+        saved = await ok(c, "save_outreach_message", lead_id=lead_id, channel="linkedin_connect", step=1, body=NOTE)
+    assert saved["superseded_draft_ids"] == [] and saved["auto_approve"] == "held"
+    assert repo.get_message(saved["message_id"]).auto_hold
+    assert repo.auto_approve_due(company.id, now=repo.utcnow() + 100 * HOUR)["approved"] == []
+    assert repo.send_queue(company.id)["items"] == []
+    # A hold on one step holds nothing else.
+    async with mcp_client() as c:
+        dm = await ok(c, "save_outreach_message", lead_id=lead_id, channel="linkedin_dm", step=2,
+                      body="One more idea for your transfers.")
+    assert not repo.get_message(dm["message_id"]).auto_hold
+
+
+async def test_with_auto_approve_off_a_rewritten_held_draft_is_held_silently(company):
+    lead_id = person(company)
+    msg = repo.create_message(lead_id, NOTE, channel="linkedin_connect", status="approved")
+    repo.update_message(msg.id, status="draft")  # Back to drafts: held, should auto-approve be turned on later
+    async with mcp_client() as c:
+        saved = await ok(c, "save_outreach_message", lead_id=lead_id, channel="linkedin_connect", step=1,
+                         body="Hi, rewritten. Happy to connect!")
+    assert saved["superseded_draft_ids"] == [msg.id] and repo.get_message(saved["message_id"]).auto_hold
+    assert "hold" not in saved["reminder"] and "auto-approve" not in saved["reminder"]
+    assert "auto_approve" not in saved and "auto_approves_at" not in saved
+
+
+def test_a_lead_marked_replied_through_a_message_lets_its_approvals_lapse(company):
+    """update_message(status='replied') moves the lead to replied: its LinkedIn approvals lapse and its drafts are
+    held, as with update_lead, so setting the lead back later neither sends nor auto-approves old messages."""
+    turn_on(company, agent_sending=True)
+    lead_id = person(company)
+    note = repo.create_message(lead_id, NOTE, channel="linkedin_connect", status="sent")
+    approved = repo.create_message(lead_id, "Thanks for connecting!", channel="linkedin_dm", step=2,
+                                   status="approved")
+    waiting = draft(lead_id, body="One more idea for your transfers.", channel="linkedin_dm", step=3, hours_ago=1)
+    repo.update_message(note.id, status="replied")
+    assert repo.get_lead(lead_id).status == "replied"
+    for msg_id in (approved.id, waiting.id):
+        msg = repo.get_message(msg_id)
+        assert (msg.status, msg.auto_hold) == ("draft", True)
+    repo.update_lead(lead_id, {"status": "contacted"})
+    assert repo.send_queue(company.id)["items"] == []
+    assert repo.auto_approve_due(company.id, now=repo.utcnow() + 100 * HOUR)["approved"] == []

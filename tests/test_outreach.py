@@ -206,6 +206,25 @@ def test_signal_hook_quotes_only_the_leads_own_words(lead: Lead, type: str, titl
     assert outreach.signal_hook(signal(type, title, source), lead) == hook
 
 
+@pytest.mark.parametrize("slot", [
+    "{first_name}", "{{ first_name }}", "{{lead.first_name}}", "{{company.name}}", "%FIRST_NAME%", "%COMPANY%",
+    "[First Name]", "[Name]", "[Your Name]", "[Your Title]", "[Your Company]", "[Company Name]", "[Recipient]",
+    "[Link]", "[Calendar link]", "[calendly link]", "[insert case study]", "[phone number]", "<subject>",
+    "<your message>",
+])
+def test_unfilled_placeholders_are_found(slot: str):
+    """Claude's drafts are refused with one, and auto-approve never approves one: a slot nobody filled in."""
+    assert outreach.unfilled_placeholder(f"Hi Sara, grab a slot here: {slot}. Best, Sam") == slot
+
+
+@pytest.mark.parametrize("text", [
+    "See [1] and the [Dubai] office.", "We grew 20% and then 30% this year.", "100% on time, 5%-10% cheaper.",
+    "Our [company page](https://acme.example) has more.", "I read your post: name your price.", "Show HN [video]",
+])
+def test_ordinary_text_is_not_a_placeholder(text: str):
+    assert outreach.unfilled_placeholder(text) == ""
+
+
 def test_template_never_uses_the_signal_summary(company: Company, lead: Lead):
     s = signal("keyword_mention", "Need a chauffeur", summary="We need someone reliable for the CEO next week")
     for channel in ("linkedin_connect", "linkedin_dm", "email"):

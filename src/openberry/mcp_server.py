@@ -6,7 +6,8 @@ message: drafts are stored for a human to review and send from their own LinkedI
 AI agent sending turned on for a company, a browser agent the user runs in their own browser may
 send the LinkedIn messages they approved, through the send queue tools, whose guardrails live in
 repo.send_queue / repo.confirm_agent_sent / repo.report_send_problem. With auto-approve turned on
-(repo.auto_approve_due), drafts the user doesn't edit, hold or skip are approved after a review window.
+(repo.auto_approve_due), drafts the user doesn't approve, hold or skip are approved after a review window
+(an edit starts it again).
 
 Transports:
   * stdio: `openberry mcp`, what Claude Desktop and Claude Code launch.
@@ -114,10 +115,11 @@ How to work:
    in the dashboard and sends them from their own LinkedIn or email, then marks them sent
    (update_message status="sent"). Never say or imply that a message was sent unless it is marked
    sent. Set status "approved" only when the user approves that exact text. If the user turned on
-   auto-approve for the company (outreach.auto_approve, in the dashboard only), a draft nobody edits,
-   holds or skips is approved automatically after the review window (auto_approves_at in
-   list_outreach and get_lead): write every draft so it could go out as it is, tell the user when you
-   save one, and hold it (update_message auto_hold=true) when they want to approve it themselves.
+   auto-approve for the company (outreach.auto_approve, in the dashboard only), a draft nobody approves,
+   holds or skips is approved automatically after the review window, counted from its last edit
+   (auto_approves_at in list_outreach and get_lead): write every draft so it could go out as it is,
+   tell the user when you save one, and hold it (update_message auto_hold=true) when they want to
+   approve it themselves.
 6. Replies and follow-ups: log_reply when the user pastes a reply; followups_due lists leads whose
    next sequence step is due, with the channel to use.
 7. Reporting: pipeline_report(company_id) gives numbers and suggested next actions;
@@ -1032,11 +1034,14 @@ def get_lead(lead_id: int) -> dict[str, Any]:
     funding inherited from their employer), all outreach messages and replies, other people we know
     at the same company, and a dashboard link. Messages say whether auto-approve approved them
     (auto_approved) and, while the company has auto-approve on, when each draft is approved
-    automatically (auto_approves_at) or why not (auto_approve: "held" or the reason).
-    Read this before assessing or writing to a lead.
+    automatically (auto_approves_at) or why not (auto_approve: "held" or the reason); drafts whose window
+    has passed are approved first, as the scheduler would. Read this before assessing or writing to a lead.
     """
     lead = _get_lead(lead_id)
     signals, signals_total = repo.list_signals(lead.company_id, lead_id=lead.id, include_account=True, limit=20)
+    # As the lead page does: approve what is due and flag the drafts left alone, so a draft reported here as
+    # not approved for now waits a full window once the reason goes away (never approved at once).
+    repo.auto_approve_due(lead.company_id)
     messages = repo.list_messages(lead.company_id, lead_id=lead.id, limit=50)
     contacts = repo.contacts_at_account(lead)
     states = repo.auto_approve_states(repo.get_company(lead.company_id), messages)
@@ -1317,12 +1322,12 @@ def save_outreach_message(
     Write it after get_outreach_context. Checks: LinkedIn connection notes must fit the company's
     LinkedIn account (200 characters free, 300 Premium: limits.max_chars), emails need a subject, the
     company's banned words are not allowed, and no unfilled placeholders. An older unsent draft for the
-    same lead, channel and step is superseded (if the user held it, the new draft is held too).
+    same lead, channel and step is superseded (if a draft for that step was held, the new one is held too).
     Nothing is sent: a human reviews the draft in the dashboard, sends it from their own LinkedIn or
     email, then marks it sent. Never tell the user the message was sent. If the user turned on
     auto-approve for the company, the draft is approved automatically once its review window has passed
-    (auto_approves_at) unless they edit, hold or skip it first, and with AI agent sending on their agent
-    may then send it: write it so it could go out exactly as it is.
+    (auto_approves_at) unless they approve, hold or skip it first (an edit starts the window again), and
+    with AI agent sending on their agent may then send it: write it so it could go out exactly as it is.
     Returns the message id and dashboard links.
     """
     lead = _get_lead(lead_id)
@@ -1343,10 +1348,13 @@ def save_outreach_message(
             repo.update_message(message_id, status="skipped")
         message = repo.create_message(lead.id, body, channel=channel, subject=subject, step=step,
                                       generated_by="claude", status="draft")
-        # Only the user releases a hold: a new version of a held draft is held too.
-        held = any(m.auto_hold for m in existing if m.id in superseded)
+        # Only the user releases a hold: a new version of a draft held for this step is held too, also when the
+        # held one was skipped first (by Claude or anyone) rather than superseded here.
+        held = any(m.auto_hold for m in existing
+                   if m.channel == channel and m.step == step and m.status in ("draft", "skipped"))
         if held:
             message = repo.set_auto_hold(message.id, True)
+        repo.auto_approve_due(company.id)  # flags the new draft if it can't be approved yet (see list_outreach)
     out: dict[str, Any] = {
         "message_id": message.id,
         "status": message.status,
@@ -1360,13 +1368,14 @@ def save_outreach_message(
     }
     auto = _auto_approve_fields(repo.auto_approve_states(company, [message]), message)
     out.update(auto)
-    if held:
-        out["reminder"] += (" It is on hold, like the draft it replaces: auto-approve never approves it, the user "
-                            "approves it themselves.")
+    if held and company.outreach.auto_approve:  # the hold is kept silently while auto-approve is off
+        out["reminder"] += (" It is on hold, like the earlier draft for this step: auto-approve never approves it, "
+                            "the user approves it themselves.")
     elif "auto_approves_at" in auto:
-        out["reminder"] = ("Saved as a draft. Auto-approve is on for this company: unless the user edits, holds or "
-                           "skips it, it is approved automatically at auto_approves_at, and with AI agent sending on "
-                           "their agent may then send it. Tell the user, so they can review it first.")
+        out["reminder"] = ("Saved as a draft. Auto-approve is on for this company: unless the user approves, holds "
+                           "or skips it first, it is approved automatically at auto_approves_at (an edit starts the "
+                           "window again), and with AI agent sending on their agent may then send it. Tell the user, "
+                           "so they can review it first.")
     return out
 
 
@@ -1380,10 +1389,12 @@ def list_outreach(
     Filter by status, e.g. 'draft' for messages awaiting the user's review. Each row has the
     message (channel, step, status, subject, body, who wrote it, auto_approved when auto-approve
     approved it) plus the lead's name, company and dashboard link. While the company has auto-approve
-    on, each draft also has auto_approves_at (when it is approved automatically unless the user edits,
-    holds or skips it first) or auto_approve: "held" or why it won't be approved automatically.
+    on, each draft also has auto_approves_at (when it is approved automatically unless the user approves,
+    holds or skips it first; an edit starts the window again) or auto_approve: "held" or why it won't be
+    approved automatically. Drafts whose window has passed are approved first, as the scheduler would.
     """
     company = _get_company(company_id)
+    repo.auto_approve_due(company_id)  # as the Outreach page does: current statuses, and the blocks shown are flagged
     messages = repo.list_messages(company_id, status=status, limit=_clamp(limit, 1, 200))
     states = repo.auto_approve_states(company, messages)
     leads: dict[int, Lead | None] = {}
@@ -1455,12 +1466,13 @@ def update_message(
     out: dict[str, Any] = {"message": _message_row(updated), "lead_status": lead.status,
                            "link": outreach_url(updated.company_id)}
     if back_to_draft:
+        repo.auto_approve_due(updated.company_id)
         auto = _auto_approve_fields(repo.auto_approve_states(_get_company(updated.company_id), [updated]), updated)
         out.update(auto)
         if "auto_approves_at" in auto:
             out["note"] = ("The approved text changed, so the message is a draft again. Auto-approve is on: it is "
-                           "approved automatically at auto_approves_at unless the user edits, holds or skips it, and "
-                           "with AI agent sending on their agent may then send it. Tell the user.")
+                           "approved automatically at auto_approves_at unless the user approves, holds or skips it "
+                           "first, and with AI agent sending on their agent may then send it. Tell the user.")
         else:
             out["note"] = ("The approved text changed, so the message is a draft again: the user approves it before "
                            "it is sent.")

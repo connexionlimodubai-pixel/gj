@@ -85,9 +85,9 @@
 
   // Keep your place across a reload. Tabs (.tabs a) and links or forms marked data-keep-scroll load the
   // same page again; without this the browser starts at the top. Just before leaving, remember where the
-  // page's [data-scroll-anchor] (else the page itself) was on screen; if the next page is the one the action
-  // was going to, put it back there. early.js hides the content until then (same rule as keepScrollApplies),
-  // so the top of the page doesn't flash first.
+  // list card acted on (else the page's [data-scroll-anchor], else the page itself) was on screen; if the next
+  // page is the one the action was going to, put it back there. early.js hides the content until then (same
+  // rule as keepScrollApplies), so the top of the page doesn't flash first.
   const KEEP_SCROLL_KEY = "openberry-keep-scroll";
   const KEEP_SCROLL_MS = 15000;
 
@@ -108,7 +108,7 @@
     try { return !!el && el !== document.body && el.matches(":focus-visible"); } catch (err) { return false; }
   }
 
-  function rememberScroll(to, focus, leaving) {
+  function rememberScroll(to, focus, leaving, card) {
     const anchor = $("[data-scroll-anchor]");
     // List items the action takes away (the one acted on, the ticked drafts) leave a gap after the reload. The part
     // of it above the screen would pull items not read yet out of view, so the page comes back that much higher.
@@ -119,9 +119,14 @@
       const end = next ? next.getBoundingClientRect().top : li.getBoundingClientRect().bottom;
       removed += Math.max(0, Math.min(end, top) - li.getBoundingClientRect().top);
     });
+    // The card acted on keeps its place on screen (the next one takes it when it leaves), even if cards above it
+    // changed meanwhile: auto-approve approves due drafts as the page loads.
+    let pin = card || null;
+    while (pin && (leaving || []).includes(pin)) pin = pin.nextElementSibling;
     const state = {
       to: to, at: Date.now(), focus: focus || null, y: window.scrollY - removed,
       top: anchor ? anchor.getBoundingClientRect().top + removed : null,
+      pin: pin && pin.id ? pin.id : null, pinTop: card ? card.getBoundingClientRect().top + removed : null,
     };
     try { sessionStorage.setItem(KEEP_SCROLL_KEY, JSON.stringify(state)); } catch (err) { /* storage blocked */ }
   }
@@ -137,15 +142,19 @@
     // and so does a form shown again with errors: they are listed at its top.
     if (!keepScrollApplies(state) || $(".form-alert")) return;
     const anchor = $("[data-scroll-anchor]");
-    let y = anchor && typeof state.top === "number"
-      ? anchor.getBoundingClientRect().top + window.scrollY - state.top
-      : state.y;
+    const pin = state.pin && typeof state.pinTop === "number" ? document.getElementById(state.pin) : null;
+    let y = state.y;
+    if (pin) y = pin.getBoundingClientRect().top + window.scrollY - state.pinTop;
+    else if (anchor && typeof state.top === "number") {
+      y = anchor.getBoundingClientRect().top + window.scrollY - state.top;
+    }
     if (typeof y !== "number" || !isFinite(y)) return;
     y = Math.max(0, y);
     // A short page (an empty tab) would stop above y and move the tabs: give it room below instead.
     const main = $(".main");
     const short = y - (document.documentElement.scrollHeight - window.innerHeight);
-    if (short > 0 && main) {
+    // Only to keep on screen what was on screen: tabs scrolled out of view would leave an empty screen.
+    if (short > 0 && main && (pin || typeof state.top !== "number" || state.top >= 0)) {
       main.style.paddingBottom = (parseFloat(getComputedStyle(main).paddingBottom) || 0) + Math.ceil(short) + "px";
     }
     window.scrollTo(0, y);
@@ -155,10 +164,13 @@
     if (state.focus === "tab") {
       target = $('.tabs a[aria-current="page"]');
     } else {
-      const form = $$("form[data-keep-scroll]").find((f) => f.getAttribute("action") === state.focus.action);
-      target = form && $$("button[type=submit], button:not([type])", form).find((b) => b.value === state.focus.value);
+      // Hold and "Let it auto-approve" replace each other: the one now in its place takes the focus.
+      const swap = { hold: "release", release: "hold" }[state.focus.value];
+      const buttons = $$("form[data-keep-scroll]").filter((f) => f.getAttribute("action") === state.focus.action)
+        .flatMap((f) => Array.from(f.elements).filter((b) => b.type === "submit"));
+      target = buttons.find((b) => b.value === state.focus.value) || buttons.find((b) => swap && b.value === swap);
       if (!target) {
-        const li = $$(".queue > li").find((el) => el.getBoundingClientRect().bottom > screenTop());
+        const li = pin || $$(".queue > li").find((el) => el.getBoundingClientRect().bottom > screenTop());
         target = li && $("input:not([type=hidden]), a[href], button:not([disabled])", li);
       }
     }
@@ -202,7 +214,7 @@
       else if (card && form.getAttribute("data-keep-scroll") === "remove") leaving = [card];
       const submitter = e.submitter || form.querySelector("button[type=submit], button:not([type])");
       const focus = byKeyboard() ? { action: form.getAttribute("action"), value: submitter ? submitter.value : "" } : null;
-      rememberScroll(to, focus, leaving);
+      rememberScroll(to, focus, leaving, card);
     });
   }
 

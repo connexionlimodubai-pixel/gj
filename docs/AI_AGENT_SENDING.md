@@ -117,21 +117,22 @@ drafts**, set the **Review window** (1 to 72 hours, default 2) and click **Turn 
   **Skip** takes it out of the queue. **Back to drafts** on an approved message holds it too. When a lead's LinkedIn
   profile changes or the lead leaves the pipeline, its LinkedIn drafts are held, and its approved LinkedIn messages go
   back to draft, held. If you click **Hold** just after a draft was approved automatically, it goes back to drafts, on
-  hold. When Claude writes a new version of a draft you held, the new one is held too.
+  hold. When Claude writes a new version of a draft you held (even one skipped since), the new one is held too.
 - **What it never approves** (the draft says why): a lead who replied, booked a meeting, or was marked won, lost or
   disqualified; a lead on your never-contact list or matching your excluded keywords; a connection note longer than
   your LinkedIn account allows; a draft with one of your banned words or an unfilled placeholder such as
   `[Your Name]`; an email without a subject; a step already sent to that person; and the first LinkedIn message after
   a connection request, because OpenBerry can't see whether they accepted it (approve it yourself once they do).
-- **One message per person at a time,** in the order they were written: a draft waits while an earlier one to the same
-  person is still a draft, or approved and not sent yet. Nothing is approved while the company is paused.
+- **One message per person at a time,** step by step, then in the order they were written: a draft waits while an
+  earlier one to the same person (an earlier step, even if rewritten since) is still a draft, or approved and not sent
+  yet. Nothing is approved while the company is paused.
 - **No surprises when a reason goes away.** A draft that can't be approved yet says *"Not approved automatically for
   now"* and why. You can hold it. Once the reason goes away (the earlier message was sent or skipped, you removed a
   banned word...), it waits a full review window again before it is approved. Activating a paused company, and making
   the window shorter, also give every draft the full window from that moment.
 - **When it runs.** Every few minutes while OpenBerry runs, after each scan, when you open the Outreach page or a
-  lead's page, and when your agent asks for its send queue, so it also works while the dashboard is closed. Messages
-  it approved carry an **Auto-approved** tag.
+  lead's page, when Claude lists or reads your drafts, and when your agent asks for its send queue, so it also works
+  while the dashboard is closed. Messages it approved carry an **Auto-approved** tag.
 
 **The risk.** With AI agent sending on, your agent may send an auto-approved LinkedIn message that nobody read. All of
 your agent's own rules still apply (the daily limit, LinkedIn's limits, never twice, never leads who replied), but the

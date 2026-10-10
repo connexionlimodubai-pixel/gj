@@ -72,8 +72,13 @@ CHANNEL_GUIDANCE = {
 FOLLOWUP_GUIDANCE = ("This is follow-up #{n}. Do not repeat the first message; add one new angle "
                      "(a relevant result, a question, or a resource) and keep it shorter than the previous one.")
 
-# Unfilled template slots, including the ones in get_outreach_context's save_with example.
-PLACEHOLDER = re.compile(r"\{\{?\s*[\w ]+\s*\}?\}|\[(?:first ?name|name|company|your name)\]"
+# Unfilled template slots, including the ones in get_outreach_context's save_with example: {first_name},
+# {{lead.first_name}}, %FIRST_NAME%, <subject>, and square brackets around a slot's usual words ("[Your Title]",
+# "[Calendar link]", "[insert case study]"), but not a markdown link's "[text](url)", "[1]" or "[Dubai]".
+PLACEHOLDER = re.compile(r"\{\{?\s*[\w .]+\s*\}?\}"
+                         r"|\[[^\[\]\n]{0,40}?\b(?:(?:first ?)?name|company|title|link|calendar|insert|your|recipient"
+                         r"|phone)\b[^\[\]\n]{0,40}\](?!\()"
+                         r"|(?-i:%[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*%)"
                          r"|<(?:subject|your message|first ?name|name|company)>", re.I)
 
 

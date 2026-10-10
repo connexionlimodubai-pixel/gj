@@ -132,6 +132,6 @@ connection request recorded as sent, yours included. Past those, connection requ
 still go out, and the agent never sends a connection request without its approved note. Changing an approved
 text, or the lead's LinkedIn profile, makes the message a draft again. Claude can turn agent
 sending off or lower its limit when you ask, but can't turn it on, raise the limit or lift a pause. With
-[auto-approve](AI_AGENT_SENDING.md#auto-approve-optional) also on (off by default), drafts you don't edit, hold or skip
-are approved after the review window, so your agent may send them without anyone reading them. Setup, risks and
-limits: [AI_AGENT_SENDING.md](AI_AGENT_SENDING.md).
+[auto-approve](AI_AGENT_SENDING.md#auto-approve-optional) also on (off by default), drafts you don't approve, hold or
+skip are approved after the review window (an edit starts it again), so your agent may send them without anyone reading
+them. Setup, risks and limits: [AI_AGENT_SENDING.md](AI_AGENT_SENDING.md).

@@ -90,15 +90,17 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   matching excluded keywords (the agent queue's own checks), a step already sent to the lead (the agent's check too), a
   connection note too long for the LinkedIn account, a draft with a banned word or an unfilled placeholder
   (`outreach.unfilled_placeholder`), an email without a subject, the first `linkedin_dm` after a connection request (no one
-  knows whether it was accepted), or a second message to the same lead (one at a time, in the order written). A draft it
-  leaves alone is flagged (`auto_blocked`); when the reason goes away, its `updated_at` is set to now, so it waits a full
-  window again rather than being approved at once. The approvals are one `BEGIN IMMEDIATE` transaction of compare-and-set
-  UPDATEs (still a draft, not held, same `updated_at`), and `repo.update_message` takes the same lock, so an edit at the
-  same moment wins: it either lands first, or sees the approval and makes the message a draft again. It runs on every
-  scheduler tick (`services.auto_approve_active_companies`, one company's error never stops the others), at the end of
-  `run_scan`, at the start of the MCP `get_send_queue`, and when the Outreach page or a lead page opens (without the write
-  lock unless there is something to write). `repo.auto_approve_states(company, messages)` describes each draft (waiting
-  with its time, held, blocked with the reason, or off) in three queries for the dashboard and Claude.
+  knows whether it was accepted), or a second message to the same lead (one at a time, step by step, then in the order
+  written). A draft it leaves alone is flagged (`auto_blocked`); when the reason goes away, its `updated_at` is set to
+  now, so it waits a full window again rather than being approved at once. The approvals are one `BEGIN IMMEDIATE`
+  transaction of compare-and-set UPDATEs (still a draft, not held, same `updated_at`), and `repo.update_message` takes the
+  same lock, so an edit at the same moment wins: it either lands first, or sees the approval and makes the message a draft
+  again. It runs on every scheduler tick (`services.auto_approve_active_companies`, one company's error never stops the
+  others), at the end of `run_scan`, at the start of the MCP `get_send_queue`, when the Outreach page or a lead page
+  opens, and when Claude lists or reads drafts (MCP `list_outreach`, `get_lead`, `save_outreach_message`,
+  `update_message`), so every block anyone is shown is flagged (without the write lock unless there is something to
+  write). `repo.auto_approve_states(company, messages)` describes each draft (waiting with its time, held, blocked with
+  the reason, or off) in three queries for the dashboard and Claude.
 - `collectors.Collector`: `name`, `label`, `signal_types`, `requires`, `is_configured(company)`,
   `async collect(company, ctx) -> list[RawSignal]`. `RawSignal(signal=SignalIn, lead=LeadIn|None, account=str, account_domain=str, account_location=str)`.
   Collectors must be polite (cap requests and honour `ctx.max_items`). One bad item never fails the whole collector. Use `ctx.warn()` for soft problems,
@@ -154,6 +156,6 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   Claude (`update_company`, `register_company`) and the JSON API can only turn it off or make the review window longer:
   they can't turn it on, shorten the window or set `auto_approve_since`, and anonymous public registrations are saved with
   it off. Claude can hold a draft (`update_message` with `auto_hold=true`) but never release a hold: a new version of a
-  held draft (`save_outreach_message`) is held too. Activating a paused company (from anywhere) restarts every window,
-  like turning auto-approve on. With agent sending also on, the agent may send what auto-approve approved, so every agent
-  rule above still applies to it.
+  held draft (`save_outreach_message`) is held too, also when the held one was skipped first. Activating a paused
+  company (from anywhere) restarts every window, like turning auto-approve on. With agent sending also on, the agent may
+  send what auto-approve approved, so every agent rule above still applies to it.

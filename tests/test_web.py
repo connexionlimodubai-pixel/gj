@@ -2076,6 +2076,8 @@ def test_auto_approve_is_off_by_default_and_toggles_with_csrf(client, company):
     assert "Turn on" in card and "Turn off" not in card and "Never approved automatically: drafts you hold" in card
     confirm = html_lib.unescape(re.search(r'data-confirm="([^"]*)"', card).group(1))
     assert "your agent may then send them on LinkedIn without you reading them" in confirm
+    assert "Drafts you don't approve, hold or skip in time are approved without you, also after you edit them." in (
+        confirm)
     assert page.index('id="agent"') < page.index('id="auto-approve"') < page.index('class="tabs"')
 
     # Without the dashboard's CSRF token nothing changes.
@@ -2092,12 +2094,15 @@ def test_auto_approve_is_off_by_default_and_toggles_with_csrf(client, company):
     out = repo.get_company(company.id).outreach
     assert (out.auto_approve, out.auto_approve_hours) == (True, 3) and out.auto_approve_since >= before
     page = flashed(client, resp)
-    assert ("Auto-approve is on: drafts you don't edit, hold or skip are approved 3 hours after they're written. "
-            "Drafts you already have get 3 hours from now.") in page
+    assert ("Auto-approve is on: drafts you don't approve, hold or skip are approved 3 hours after they're written or "
+            "last edited. Drafts you already have get 3 hours from now.") in page
     assert repo.get_message(backlog.id).status == "draft"  # a week old, but it gets the full window from now
     card = text_of(auto_card(page))
     assert "pill-agent-on" in auto_card(page) and "Save" in card and "Turn off" in card
-    assert "On: drafts you don't edit, hold or skip are approved 3 hours after they're written." in card
+    assert ("On: drafts you don't approve, hold or skip are approved 3 hours after they're written or last edited."
+            in card)
+    # Editing a draft never stops auto-approve: no copy may say so (it only starts the window again).
+    assert "edit, hold or skip" not in html_lib.unescape(page)
     next_at = out.auto_approve_since + timedelta(hours=3)
     assert f"1 draft waiting; the next one is approved at {ui.abs_dt(next_at)}" in card
 
@@ -2125,8 +2130,9 @@ def test_auto_approve_is_off_by_default_and_toggles_with_csrf(client, company):
     resp = post(client, f"{base}/outreach/auto-approve", {"auto_approve": "on", "auto_approve_hours": "2"})
     page = flashed(client, resp)
     assert "With AI agent sending on, your agent may then send the LinkedIn ones." in page
-    assert "Auto-approve is on: drafts you don't edit, hold or skip in time are approved, so your agent may send" in (
-        text_of(agent_card(page)))
+    assert ("Auto-approve is on: drafts you don't approve, hold or skip in time are approved, so your agent may send"
+            in text_of(agent_card(page)))
+    assert "Editing a draft starts its window again." in text_of(agent_card(page))
 
 
 def test_the_auto_approve_window_is_validated(client, company):
@@ -2194,8 +2200,8 @@ def test_drafts_say_when_they_are_approved_automatically(client, company):
                 {"action": "release", "next": f"{base}/outreach?tab=drafts"}, page=f"{base}/outreach")
     released = repo.get_message(waiting.id)
     assert released.auto_hold is False and released.updated_at > written
-    assert ("Hold lifted: this draft is approved automatically in 2 hours unless you edit, hold or skip it."
-            in flashed(client, resp))
+    assert ("Hold lifted: this draft is approved automatically in 2 hours unless you approve, hold or skip it first. "
+            "Editing it starts the window again." in flashed(client, resp))
     # A draft that can't be approved yet: holding it works, and lifting the hold says why it still waits.
     post(client, f"{base}/messages/{blocked.id}", {"action": "hold"}, page=f"{base}/outreach")
     assert repo.get_message(blocked.id).auto_hold
@@ -2217,8 +2223,8 @@ def test_the_lead_page_shows_each_drafts_line_and_back_to_drafts_holds(client, c
     lead_url = f"{base}/leads/{msg.lead_id}"
     page = client.get(lead_url).text
     assert not bulk_page(client, lead_url).nested
-    assert "Drafts you don't edit, hold or skip are approved automatically 2 hours after they're written" in (
-        html_lib.unescape(page)) and f'href="{base}/outreach#auto-approve"' in page
+    assert ("Drafts you don't approve, hold or skip are approved automatically 2 hours after they're written or last "
+            "edited" in html_lib.unescape(page)) and f'href="{base}/outreach#auto-approve"' in page
     bubble = re.search(rf'<article class="bubble bubble-out bubble-edit" id="msg-{msg.id}">.*?</article>', page,
                        re.S).group(0)
     line = re.search(r'<div class="auto-line auto-waiting">.*?</div>', bubble, re.S).group(0)

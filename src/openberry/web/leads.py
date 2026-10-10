@@ -429,7 +429,8 @@ def _hold_action(request: Request, company_id: int, message: Message, hold: bool
               "info")
     elif state.get("state") == "waiting":
         flash(request, f"Hold lifted: this draft is approved automatically in "
-                       f"{hours_text(company.outreach.auto_approve_hours)} unless you edit, hold or skip it.")
+                       f"{hours_text(company.outreach.auto_approve_hours)} unless you approve, hold or skip it first. "
+                       "Editing it starts the window again.")
     elif state.get("state") == "blocked":
         flash(request, f"Hold lifted, but it isn't approved automatically for now: {state['reason']}.")
     else:

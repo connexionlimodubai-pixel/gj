@@ -617,8 +617,9 @@ def auto_approve_settings(request: Request, company_id: int, form: FormData = De
     else:
         agent = " With AI agent sending on, your agent may then send the LinkedIn ones." if (
             company.outreach.agent_sending) else ""
-        flash(request, f"Auto-approve is on: drafts you don't edit, hold or skip are approved {hours_text(hours)} "
-                       f"after they're written. Drafts you already have get {hours_text(hours)} from now.{agent}"
+        flash(request, f"Auto-approve is on: drafts you don't approve, hold or skip are approved {hours_text(hours)} "
+                       f"after they're written or last edited. Drafts you already have get {hours_text(hours)} from "
+                       f"now.{agent}"
                        f"{paused}")
     return redirect(back)
 

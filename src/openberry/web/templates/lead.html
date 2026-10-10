@@ -107,7 +107,7 @@
     </section>
 
     <section class="card" id="outreach" aria-labelledby="outreach-title">
-      <header class="card-head"><div><h2 id="outreach-title">Outreach</h2><p class="card-sub">Drafts are never sent. Approve, copy, send it yourself, then mark it sent{% if company.outreach.agent_sending %}, or let your AI agent send approved LinkedIn messages (<a href="{{ base }}/outreach#agent">agent sending</a>){% endif %}.</p></div></header>
+      <header class="card-head"><div><h2 id="outreach-title">Outreach</h2><p class="card-sub">Drafts are never sent. Approve, copy, send it yourself, then mark it sent{% if company.outreach.agent_sending %}, or let your AI agent send approved LinkedIn messages (<a href="{{ base }}/outreach#agent">agent sending</a>){% endif %}.{% if company.outreach.auto_approve %} Drafts you don't edit, hold or skip are approved automatically {{ company.outreach.auto_approve_hours|plural("hour") }} after they're written (<a href="{{ base }}/outreach#auto-approve">auto-approve</a>).{% endif %}</p></div></header>
       {% if messages %}
       {% set note_max = connect_note_limit(company) %}
       <div class="chat">
@@ -120,10 +120,10 @@
         </article>
         {% elif msg.status in ("draft", "approved") %}
         <article class="bubble bubble-out bubble-edit" id="msg-{{ msg.id }}">
-          <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll>
+          <form method="post" action="{{ base }}/messages/{{ msg.id }}" id="msg-{{ msg.id }}-form" data-keep-scroll>
             {{ m.csrf() }}
             <input type="hidden" name="next" value="{{ lead_url }}#msg-{{ msg.id }}">
-            <header class="bubble-head">{{ m.msg_pill(msg.status) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ msg.generated_by }} · {{ m.when(msg.created_at) }}</span></header>
+            <header class="bubble-head">{{ m.msg_pill(msg.status) }}{{ m.approved_via(msg) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ msg.generated_by }} · {{ m.when(msg.created_at) }}</span></header>
             {% if msg.channel == "email" %}
             <label class="sr-only" for="msg-{{ msg.id }}-subject">Subject</label>
             <input class="input" id="msg-{{ msg.id }}-subject" name="subject" value="{{ msg.subject }}" placeholder="Subject">
@@ -138,14 +138,16 @@
               <button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button>
               {{ m.copy_button("#msg-" ~ msg.id ~ "-body") }}
               <span class="spacer"></span>
+              {% if msg.status == "approved" %}<button class="btn btn-sm btn-ghost" type="submit" name="action" value="draft" title="Take the approval back: it stays a draft until you approve it">Back to drafts</button>{% endif %}
               <button class="btn btn-sm btn-ghost" type="submit" name="action" value="skip">Skip</button>
               <button class="btn btn-sm btn-ghost btn-danger-text" type="submit" name="action" value="delete" data-confirm="Delete this draft?">{{ m.icon("trash", 14) }}<span class="sr-only">Delete</span></button>
             </div>
           </form>
+          {{ m.auto_line(msg, auto_states.get(msg.id), lead_url ~ "#msg-" ~ msg.id, form_id="msg-" ~ msg.id ~ "-form") }}
         </article>
         {% else %}
         <article class="bubble bubble-out" id="msg-{{ msg.id }}">
-          <header class="bubble-head">{{ m.msg_pill(msg.status) }}{{ m.sent_via(msg) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ m.when(msg.sent_at or msg.updated_at) }}</span></header>
+          <header class="bubble-head">{{ m.msg_pill(msg.status) }}{{ m.approved_via(msg) }}{{ m.sent_via(msg) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ m.when(msg.sent_at or msg.updated_at) }}</span></header>
           {% if msg.subject %}<p class="bubble-subject">{{ msg.subject }}</p>{% endif %}
           <div class="bubble-body" id="msg-{{ msg.id }}-text">{{ msg.body }}</div>
           <div class="btn-row">

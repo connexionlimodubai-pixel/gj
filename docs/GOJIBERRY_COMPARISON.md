@@ -22,9 +22,9 @@ This table shows how each piece is replicated for free in OpenBerry. "Claude" me
 | Account-level intent | ✅ | Hiring, funding and news create *account* leads. People at that company inherit their intent. |
 | AI-personalised messages | ✅ | Claude (`get_outreach_context` → `save_outreach_message`), local Ollama, or a template |
 | Sequences / follow-ups | ✅ | Follow-up schedule (e.g. day 3, day 7). The "Follow-ups due" queue stops when a reply is logged. |
-| Review / Copilot mode | ✅ | Always on. `auto_draft` mode drafts a first message for every person lead that turns hot (in a scan, through Claude, the API, an import or an edit), but **nothing is sent without your approval**. |
+| Review / Copilot mode | ✅ | Always on. `auto_draft` mode drafts a first message for every person lead that turns hot (in a scan, through Claude, the API, an import or an edit), but **nothing is sent before it is approved**: by you, or, if you turn on auto-approve, after a review window in which you can edit, hold or skip it. |
 | Unified inbox | ⚠️ | Log replies on the lead page or with `log_reply`. Claude drafts the answer from the full thread. |
-| Automated LinkedIn sending | ⚠️ (opt-in, your own agent, at your own risk) | OpenBerry itself never sends. By default you copy each approved draft and send it yourself. If you turn on [AI agent sending](AI_AGENT_SENDING.md) for a company, an AI agent in your own logged-in browser (Claude in Chrome, or Playwright MCP's extension mode) sends the LinkedIn notes and messages you approved, exactly as approved. OpenBerry enforces the limits: 15 a day by default, never leads who replied or are excluded, and a 24-hour pause on any LinkedIn warning. It runs only while your agent runs, never sends email, and has no tricks to hide automation. LinkedIn's User Agreement forbids automation, so your account can be restricted. |
+| Automated LinkedIn sending | ⚠️ (opt-in, your own agent, at your own risk) | OpenBerry itself never sends. By default you copy each approved draft and send it yourself. If you turn on [AI agent sending](AI_AGENT_SENDING.md) for a company, an AI agent in your own logged-in browser (Claude in Chrome, or Playwright MCP's extension mode) sends the approved LinkedIn notes and messages, exactly as approved. OpenBerry enforces the limits: 15 a day by default, never leads who replied or are excluded, and a 24-hour pause on any LinkedIn warning. It runs only while your agent runs, never sends email, and has no tricks to hide automation. LinkedIn's User Agreement forbids automation, so your account can be restricted. |
 | Email waterfall enrichment (15+ providers) | ⚠️ | Not built in. Claude + fetch can find public emails, and [Reacher](https://github.com/reacherhq/check-if-email-exists) verifies them for free. |
 | CRM sync (HubSpot, Pipedrive) | ✅ / ⚠️ | CSV export, the JSON API (`/api`) for n8n/Activepieces, and Twenty CRM's MCP server next to OpenBerry |
 | Slack alerts | ✅ | Slack and Discord webhooks when a person lead turns hot (70+, or a higher threshold set per company), however it got there. Sent after each scan and, while `openberry serve` runs, within minutes. |
@@ -38,7 +38,7 @@ This table shows how each piece is replicated for free in OpenBerry. "Claude" me
 
 - **LinkedIn coverage.** Gojiberry's core data is LinkedIn activity. OpenBerry only reaches it through Claude and an optional LinkedIn MCP server, at your own risk.
 - **Sending.** Gojiberry runs your LinkedIn campaigns for you. OpenBerry's optional agent sending works only while your own agent runs in your browser,
-  sends only what you approved, and stops at the first LinkedIn warning.
+  sends only approved messages, and stops at the first LinkedIn warning.
 - **Contact data.** There is no paid people database or email waterfall. Account-level signals tell you *which company* to contact.
   Claude then finds *who* using public sources.
 - **Claude costs.** The software is free, but Claude usage comes with your Claude plan. The scheduler, collectors, scoring and

@@ -27,9 +27,11 @@ The app isn't code-signed, which is why Windows and macOS ask you to confirm onc
 3. **Score every lead** transparently: ICP fit + time-decayed intent + signal stacking, plus Claude's own judgement.
    Every point is explained ("Title matches 'Travel Manager'", "Hiring for a relevant role, 3d ago").
 4. **Draft outreach** with Claude (or a free local Ollama model, or templates): LinkedIn notes, DMs, emails and follow-ups.
-   **Nothing is sent without your approval.** You review, copy, send and mark as sent, or, if you choose, let your own
-   AI agent send the LinkedIn messages you approved ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)).
-   Approve drafts one at a time, or tick several on the Outreach page and approve them together.
+   **Nothing is sent before it is approved.** You review, copy, send and mark as sent, or, if you choose, let your own
+   AI agent send the approved LinkedIn messages ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)).
+   Approve drafts one at a time, or tick several on the Outreach page and approve them together. If you can't keep up,
+   turn on **auto-approve** (off by default): drafts you don't edit, hold or skip are approved after a review window you
+   choose (2 hours by default), and never for leads who replied or are on your never-contact list.
 5. **Alert you** on Slack or Discord when a person lead turns hot, whether a scan, Claude, the API, a CSV import or an edit
    made it hot. Alerts go out after each scan and, while `openberry serve` runs, within a few minutes.
    Export to CSV or use the JSON API with n8n or Activepieces.
@@ -103,14 +105,19 @@ To let Claude browse LinkedIn and the web too, add free open-source MCP servers 
 ## AI agent sending (optional, at your own risk)
 
 OpenBerry never opens LinkedIn or sends anything itself. If you turn on **AI agent sending** for a company (Outreach page,
-off by default), an AI agent running in your own browser, logged in to your LinkedIn, can send the LinkedIn messages you
-approved. Claude in Chrome and Playwright MCP's extension mode both work. OpenBerry enforces the rules itself:
+off by default), an AI agent running in your own browser, logged in to your LinkedIn, can send the approved LinkedIn
+messages. Claude in Chrome and Playwright MCP's extension mode both work. OpenBerry enforces the rules itself:
 - approved messages only, exactly as approved, and LinkedIn only (never email)
 - a daily limit (default 15 in any 24 hours), and LinkedIn's connection limits: notes of at most 200 characters on a
   free LinkedIn account (300 on Premium), a note on at most 5 connection requests a month on a free account, and at
   most 80 connection requests in any 7 days
 - never leads who replied or are on your never-contact list
 - a 24-hour pause, with a Resume button, as soon as the agent reports a LinkedIn warning, check or limit
+
+If you also turn on **auto-approve**, your agent may send drafts you didn't read in time: they are approved once their
+review window has passed. Hold the ones you want to check first. Auto-approve never approves the first LinkedIn message
+after a connection request (did they accept?), a step already sent, or a draft with a banned word or an unfilled
+placeholder. Claude and the JSON API can turn agent sending and auto-approve off, never on.
 
 There are no tricks to hide automation. LinkedIn's User Agreement forbids automated messaging, so your account can be
 restricted. Read [docs/AI_AGENT_SENDING.md](docs/AI_AGENT_SENDING.md) before you turn it on.
@@ -173,7 +180,7 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ```bash
 uv sync --extra dev
-uv run pytest            # ~890 tests, no network needed
+uv run pytest            # ~920 tests, no network needed
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

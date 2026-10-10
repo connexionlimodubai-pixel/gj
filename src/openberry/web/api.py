@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, Response
 
 from .. import repo, website
-from ..models import CompanyIn, LeadIn, OutreachConfig
+from ..models import AUTO_APPROVE_SETTINGS, CompanyIn, LeadIn, OutreachConfig
 from . import scans
 from .auth import is_anonymous, require_api_auth
 from .ratelimit import client_key, limits, retry_header
@@ -60,6 +60,24 @@ def _check_agent_settings(changes: Any, current: OutreachConfig) -> None:
                                  "Outreach page. The API may turn agent sending off or lower its daily limit.")
 
 
+def _check_auto_approve_settings(changes: Any, current: OutreachConfig) -> None:
+    """Auto-approve likewise: a script may turn it off or make the review window longer, never the reverse."""
+    if not isinstance(changes, dict) or not any(key in changes for key in AUTO_APPROVE_SETTINGS):
+        return
+    wanted = OutreachConfig.model_validate(
+        {**current.model_dump(mode="json"), **{k: v for k, v in changes.items() if k in AUTO_APPROVE_SETTINGS}})
+    refused = []
+    if wanted.auto_approve and not current.auto_approve:
+        refused.append("turn auto-approve on")
+    if wanted.auto_approve_hours < current.auto_approve_hours:
+        refused.append("shorten the auto-approve window")
+    if wanted.auto_approve_since != current.auto_approve_since:
+        refused.append("change when auto-approve was turned on")
+    if refused:
+        raise HTTPException(403, f"Not changed: only the user can {' or '.join(refused)}, on the dashboard's "
+                                 "Outreach page. The API may turn auto-approve off or make its window longer.")
+
+
 @router.get("/companies")
 def api_list_companies() -> dict[str, Any]:
     return {"items": [_dump(c) for c in repo.list_companies()]}
@@ -68,6 +86,8 @@ def api_list_companies() -> dict[str, Any]:
 @router.post("/companies", status_code=201)
 def api_create_company(data: CompanyIn) -> dict[str, Any]:
     _check_agent_settings(data.outreach.model_dump(mode="json", include=set(AGENT_SETTINGS)), OutreachConfig())
+    _check_auto_approve_settings(data.outreach.model_dump(mode="json", include=set(AUTO_APPROVE_SETTINGS)),
+                                 OutreachConfig())
     return _dump(repo.create_company(data))
 
 
@@ -79,7 +99,9 @@ def api_get_company(company_id: int) -> dict[str, Any]:
 @router.patch("/companies/{company_id}")
 def api_patch_company(company_id: int, patch: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Deep-merge a partial profile, e.g. {"icp": {"locations": ["UAE"]}} or {"status": "paused"}."""
-    _check_agent_settings(patch.get("outreach"), repo.get_company(company_id).outreach)
+    current = repo.get_company(company_id).outreach
+    _check_agent_settings(patch.get("outreach"), current)
+    _check_auto_approve_settings(patch.get("outreach"), current)
     return _dump(repo.update_company(company_id, patch))
 
 

@@ -163,3 +163,23 @@
 {% macro sent_via(msg) -%}
 {% set label = msg|sent_via %}{% if label %}<span class="pill pill-sent-via">{{ icon("bot" if msg.sent_via == "agent" else "sparkles", 12) }}{{ label }}</span>{% endif %}
 {%- endmacro %}
+
+{% macro approved_via(msg) -%}
+{% if msg.approved_via == "auto" and msg.status in ("approved", "sent", "replied") %}<span class="pill pill-auto-approved" title="Approved automatically after its review window: nobody approved it by hand">{{ icon("clock", 12) }}Auto-approved</span>{% endif %}
+{%- endmacro %}
+
+{# A draft's auto-approve line (repo.auto_approve_states), with Hold or "Let it auto-approve". On the Outreach page
+   the forms keep the user's place across the reload (data-keep-scroll). On the lead page the button belongs to the
+   draft's edit form (form_id), so text typed there is saved with it, not lost. A draft that can't be approved yet
+   can be held too: once the reason goes away, it would wait a new review window and be approved. #}
+{% macro auto_line(msg, auto, next_url, keep_scroll=false, form_id="") -%}
+{% if auto and auto.state != "off" %}
+<div class="auto-line auto-{{ auto.state }}">
+{% if auto.state == "waiting" %}{{ icon("clock", 14) }}<span>Approves automatically at <time datetime="{{ auto.at|iso_dt }}">{{ auto.at|abs_dt }}</time> ({{ auto.at|ago }})</span>
+{% elif auto.state == "held" %}{{ icon("pause", 14) }}<span>On hold: approve it yourself</span>
+{% else %}{{ icon("ban", 14) }}<span>Not approved automatically for now: {{ auto.reason }}</span>{% endif %}
+{% set button %}{% if auto.state == "held" %}<button class="btn btn-sm btn-ghost" type="submit" name="action" value="release"{% if form_id %} form="{{ form_id }}"{% endif %}>{{ icon("play", 14) }}Let it auto-approve</button>{% else %}<button class="btn btn-sm btn-ghost" type="submit" name="action" value="hold"{% if form_id %} form="{{ form_id }}"{% endif %}>{{ icon("pause", 14) }}Hold</button>{% endif %}{% endset %}
+{% if form_id %}{{ button }}{% else %}<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}"{% if keep_scroll %} data-keep-scroll{% endif %}>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}">{{ button }}</form>{% endif %}
+</div>
+{% endif %}
+{%- endmacro %}

@@ -62,7 +62,8 @@ FIELDS: tuple[Field, ...] = (
     Field("outreach.banned_words", "list", "outreach"),
     Field("outreach.max_followups", "int", "outreach"),
     # AI agent sending. The pause (agent_paused_until, agent_pause_reason) is not a form field:
-    # build_company(keep=...) carries it over, so saving the profile never lifts a pause.
+    # build_company(keep=...) carries it over, so saving the profile never lifts a pause. Auto-approve
+    # (outreach.auto_approve*) isn't either: it is set on the Outreach page, and repo.update_company keeps it.
     Field("outreach.agent_sending", "bool", "outreach"),
     Field("outreach.agent_daily_limit", "int", "outreach"),
     *(Field(f"notify.{n}", "text", "outreach") for n in ("slack_webhook_url", "discord_webhook_url")),
@@ -83,6 +84,7 @@ def int_bounds(model: Any, name: str, default: tuple[int, int]) -> tuple[int, in
 
 
 AGENT_LIMIT_RANGE = int_bounds(OutreachConfig, "agent_daily_limit", (1, 50))
+AUTO_APPROVE_HOURS_RANGE = int_bounds(OutreachConfig, "auto_approve_hours", (1, 72))
 
 
 # --------------------------------------------------------------------------------------

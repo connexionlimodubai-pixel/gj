@@ -262,3 +262,23 @@ def test_business_search_adds_little_and_never_stacks():
     assert both - hiring <= 2
     stacked, reasons = intent([SignalPoint("hiring", 50, now), SignalPoint("funding", 50, now)], now=now)
     assert any("stacking" in r for r in reasons)
+
+
+def test_first_connections_wait_for_the_database_to_be_set_up(tmp_path):
+    """Changing the journal mode of a new file fails at once (no busy wait) while another connection writes to it:
+    init_db retries, and one thread per process runs it (the quota test's 200 threads hit this on a slow CI runner)."""
+    import sqlite3
+    import threading
+
+    from openberry import db
+
+    path = tmp_path / "new.db"
+    writer = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    writer.execute("CREATE TABLE t (x)")
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("INSERT INTO t VALUES (1)")
+    threading.Timer(0.5, lambda: writer.execute("COMMIT")).start()
+    assert db.init_db(path) == path  # waited for the writer instead of failing with "database is locked"
+    writer.close()
+    with sqlite3.connect(path) as check:
+        assert check.execute("PRAGMA journal_mode").fetchone()[0] == "wal"

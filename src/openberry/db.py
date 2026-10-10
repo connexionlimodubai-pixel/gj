@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -216,13 +218,29 @@ def db_path() -> Path:
     return get_settings().db_path
 
 
+def _use_wal(conn: sqlite3.Connection, timeout: float = 30.0) -> None:
+    """Switch the file to WAL (once: later calls see it already is). Changing the journal mode needs the file to itself
+    for a moment and SQLite doesn't wait for that: while another connection writes or reads a new file it fails at once
+    with "database is locked", so retry for as long as the busy timeout would wait."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+                conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def init_db(path: Path | None = None) -> Path:
     path = path or db_path()
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=30)  # another process may be upgrading the same file
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        _use_wal(conn)
         conn.executescript(SCHEMA)
         _migrate(conn)
     finally:
@@ -231,6 +249,7 @@ def init_db(path: Path | None = None) -> Path:
 
 
 _initialized: set[str] = set()
+_init_lock = threading.Lock()  # one thread per process creates and upgrades the file; the others wait for it
 
 
 @contextmanager
@@ -243,8 +262,10 @@ def connect() -> Iterator[sqlite3.Connection]:
     path = db_path()
     key = str(path.resolve()) if str(path) != ":memory:" else ":memory:"
     if key not in _initialized:
-        init_db(path)
-        _initialized.add(key)
+        with _init_lock:
+            if key not in _initialized:
+                init_db(path)
+                _initialized.add(key)
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")

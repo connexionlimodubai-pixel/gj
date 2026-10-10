@@ -17,7 +17,7 @@
   <header class="keys-head">
     <span class="keys-icon" aria-hidden="true">{{ m.icon("pin", 20) }}</span>
     <div class="min0 grow">
-      <h2 id="google-maps-title" class="title-row">Google Maps <span class="pill {{ 'pill-on' if google.is_set else 'pill-off' }}">{{ "Key saved" if google.is_set else "No key" }}</span></h2>
+      <h2 id="google-maps-title" class="title-row">Google Maps {% if google.is_set and google_refused %}<span class="pill pill-key-refused">Key refused</span>{% else %}<span class="pill {{ 'pill-on' if google.is_set else 'pill-off' }}">{{ "Key saved" if google.is_set else "No key" }}</span>{% endif %}</h2>
       <p class="keys-intro">Finds businesses on Google Maps, like hotels, event planners and law firms, and reads their contact details from their own websites. Add your searches to a company profile, under Signals.</p>
     </div>
   </header>
@@ -27,10 +27,19 @@
       <p class="key-status" id="google-key-status">
         {% if google.source == "environment" %}The key is set in the server's environment (<code>{{ google.name }}</code>). Change it there.
         {% elif google.source == "file" %}The key is set in <code class="break">{{ google.where }}</code>, which OpenBerry reads first. Change it there.
-        {% elif google.is_set and google.hint %}{{ m.icon("check", 14) }} Key saved, {{ google.hint }}.
-        {% elif google.is_set %}{{ m.icon("check", 14) }} Key saved.
+        {% elif google.is_set and google.hint %}{% if not google_refused %}{{ m.icon("check", 14) }} {% endif %}Key saved, {{ google.hint }}.
+        {% elif google.is_set %}{% if not google_refused %}{{ m.icon("check", 14) }} {% endif %}Key saved.
         {% else %}No key yet.{% endif %}
       </p>
+      {% if google.is_set and google_refused %}
+      <div class="key-refused" role="status">
+        <p>{{ m.icon("alert", 14) }} Google refused this key: {{ google_refused }}</p>
+        <form method="post" action="/keys/google-maps">{{ m.csrf() }}
+          <input type="hidden" name="action" value="check_key">
+          <button class="btn btn-sm" type="submit">{{ m.icon("refresh", 14) }}Check again</button>
+        </form>
+      </div>
+      {% endif %}
       {% if editable %}
       <form method="post" action="/keys/google-maps" class="keys-form">{{ m.csrf() }}
         <input type="hidden" name="action" value="save_key">

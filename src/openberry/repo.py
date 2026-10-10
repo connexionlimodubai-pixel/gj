@@ -25,6 +25,7 @@ from .models import (
     LEAD_STATUSES,
     MESSAGE_CHANNELS,
     MESSAGE_STATUSES,
+    PROSPECT_TYPES,
     SIGNAL_TYPES,
     Company,
     CompanyIn,
@@ -395,10 +396,24 @@ def _find_existing(c: sqlite3.Connection, company_id: int, keys: list[str]) -> i
 
     Strong keys (LinkedIn, email, GitHub, X, profile URL, account name/domain) win. A name match
     alone is trusted only when the two records don't carry different identities of the same kind:
-    two John Smiths at Google with different LinkedIn profiles are two people.
+    two John Smiths at Google with different LinkedIn profiles are two people. Likewise an account
+    found on Google Maps never merges by name alone into one with another Place ID: two businesses.
     """
     strong = [k for k in keys if not k.startswith(_WEAK_KEY_PREFIXES)]
-    if (found := _lead_with_key(c, company_id, strong)) is not None:
+    if place := next((k for k in keys if k.startswith("acct:gp:")), ""):
+        names = [k for k in strong if k.startswith("acct:n:")]
+        strong = [k for k in strong if not k.startswith("acct:n:")]
+        if (found := _lead_with_key(c, company_id, strong)) is not None:  # the same Place ID or domain
+            return found
+        if names:
+            row = c.execute(
+                f"SELECT MIN(k.lead_id) AS id FROM lead_keys k WHERE k.company_id = ? "
+                f"AND k.key IN ({', '.join('?' * len(names))}) AND NOT EXISTS (SELECT 1 FROM lead_keys g "
+                "WHERE g.company_id = k.company_id AND g.lead_id = k.lead_id "
+                "AND substr(g.key, 1, 8) = 'acct:gp:' AND g.key != ?)", [company_id, *names, place]).fetchone()
+            if row["id"] is not None:
+                return row["id"]
+    elif (found := _lead_with_key(c, company_id, strong)) is not None:
         return found
     found = _lead_with_key(c, company_id, [k for k in keys if k.startswith(_WEAK_KEY_PREFIXES)])
     if found is None or not strong:
@@ -750,10 +765,13 @@ def add_signal(company_id: int, sig: SignalIn, lead_id: int | None = None,
 
 def list_signals(company_id: int, *, lead_id: int | None = None, type: str | None = None,
                  source: str | None = None, since: datetime | None = None, limit: int = 100,
-                 offset: int = 0, include_account: bool = False,
+                 offset: int = 0, include_account: bool = False, exclude_types: Iterable[str] = (),
                  conn: sqlite3.Connection | None = None) -> tuple[list[Signal], int]:
     where = ["s.company_id = ?"]
     params: list[Any] = [company_id]
+    if exclude := list(exclude_types):
+        where.append(f"s.type NOT IN ({', '.join('?' * len(exclude))})")
+        params.extend(exclude)
     if lead_id is not None:
         if include_account:
             where.append("(s.lead_id = ? OR s.lead_id IN (SELECT a.id FROM leads a JOIN leads p "
@@ -1113,7 +1131,8 @@ def reserve_api_call(service: str, limit: int, now: datetime | None = None,
     """Count one paid call before making it, unless that would go over `limit` this month.
 
     Atomic across threads and processes: the read and the write happen under SQLite's write lock (BEGIN IMMEDIATE).
-    A call that then fails stays counted: Google may have billed it, and over-counting is the safe side.
+    A call that then fails stays counted: Google may have billed it, and over-counting is the safe side. Only a
+    refusal that is never billed is given back (release_api_call).
     """
     month = usage_month(now)
     with _write_locked(conn) as c:
@@ -1126,6 +1145,14 @@ def reserve_api_call(service: str, limit: int, now: datetime | None = None,
             "ON CONFLICT(service, month) DO UPDATE SET used = used + 1, updated_at = excluded.updated_at",
             (service, month, iso(now)))
         return ApiUsage(service, month, used + 1, limit, granted=True)
+
+
+def release_api_call(service: str, month: str, conn: sqlite3.Connection | None = None) -> None:
+    """Give back a call counted by reserve_api_call in `month` ('YYYY-MM'): the API refused it without running it
+    (an invalid key, billing or the API turned off), so it was never billed."""
+    with _write_locked(conn) as c:
+        c.execute("UPDATE api_usage SET used = MAX(used - 1, 0), updated_at = ? WHERE service = ? AND month = ?",
+                  (iso(), service, month))
 
 
 def place_search_times(company_id: int, conn: sqlite3.Connection | None = None) -> dict[str, datetime]:
@@ -1175,7 +1202,9 @@ def handled_place_ids(company_id: int, place_ids: Iterable[str], recheck_before:
 
 def record_place_ids(company_id: int, outcomes: Mapping[str, bool], when: datetime | None = None,
                      conn: sqlite3.Connection | None = None) -> None:
-    """Remember Place IDs this company handled: True when it became a lead (then it is never added again)."""
+    """Remember Place IDs this company handled: True when it became a lead (then it is never added again; written
+    by services.ingest with the lead, so a scan that stops before storing its leads loses none), False when it was
+    skipped."""
     if not outcomes:
         return
     stamp = iso(when)
@@ -1214,6 +1243,9 @@ def claim_new_hot_leads(company_id: int, conn: sqlite3.Connection | None = None)
 # --------------------------------------------------------------------------------------
 
 
+_NOT_PROSPECT = f"type NOT IN ({', '.join(repr(t) for t in PROSPECT_TYPES)})"
+
+
 def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
     now = now or utcnow()
     with _conn(conn) as c:
@@ -1237,8 +1269,9 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
 
         start = (now - timedelta(days=13)).date()
         by_day = {(start + timedelta(days=i)).isoformat(): 0 for i in range(14)}
+        # Intent signals only: a business found on Google Maps (PROSPECT_TYPES) is a prospect, not intent.
         for r in c.execute("SELECT substr(occurred_at, 1, 10) d, COUNT(*) n FROM signals WHERE company_id = ? "
-                           "AND occurred_at >= ? GROUP BY d", (company_id, start.isoformat())):
+                           f"AND occurred_at >= ? AND {_NOT_PROSPECT} GROUP BY d", (company_id, start.isoformat())):
             if r["d"] in by_day:
                 by_day[r["d"]] = r["n"]
         by_type = [
@@ -1265,8 +1298,10 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
             "tiers": tiers,
             "statuses": statuses,
             "signals_total": count("SELECT COUNT(*) FROM signals WHERE company_id = ?", company_id),
-            "signals_7d": count("SELECT COUNT(*) FROM signals WHERE company_id = ? AND occurred_at >= ?",
-                                company_id, iso(now - timedelta(days=7))),
+            "signals_7d": count(f"SELECT COUNT(*) FROM signals WHERE company_id = ? AND occurred_at >= ? "
+                                f"AND {_NOT_PROSPECT}", company_id, iso(now - timedelta(days=7))),
+            "businesses_7d": count(f"SELECT COUNT(*) FROM signals WHERE company_id = ? AND occurred_at >= ? "
+                                   f"AND NOT {_NOT_PROSPECT}", company_id, iso(now - timedelta(days=7))),
             "signals_by_day": [{"date": d, "count": n} for d, n in by_day.items()],
             "signals_by_type": by_type,
             "signals_by_source": by_source,

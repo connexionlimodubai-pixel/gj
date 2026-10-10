@@ -12,7 +12,7 @@ from starlette.responses import Response
 
 from .. import leads_csv, outreach, repo
 from ..config import get_settings
-from ..models import AGENT_CHANNELS, LEAD_STATUSES, MESSAGE_CHANNELS, TIERS, Company, Lead, Message
+from ..models import AGENT_CHANNELS, LEAD_STATUSES, MESSAGE_CHANNELS, PROSPECT_TYPES, TIERS, Company, Lead, Message
 from ..repo import AGENT_QUEUE_MAX
 from . import forms
 from .auth import checked_form, require_login
@@ -163,6 +163,9 @@ def lead_page(request: Request, company_id: int, lead_id: int) -> Response:
     return render(request, "lead.html", {
         "company": company, "lead": lead, "active": "leads", "title": lead.display_name,
         "signals": signals, "signal_total": signal_total, "messages": messages, "contacts": contacts,
+        # A business found on Google Maps is a prospect: only its other signals show intent.
+        "has_intent": any(s.type not in PROSPECT_TYPES for s in signals),
+        "found_on_maps": lead.source == "google_places" or any(s.type in PROSPECT_TYPES for s in signals),
         "default_channel": channel, "next_step": step,
         "claude_prompt": f"Use openberry: get the outreach context for lead {lead.id} and write a "
                          f"{channel} message{f' for step {step}' if step > 1 else ''}, then save it.",

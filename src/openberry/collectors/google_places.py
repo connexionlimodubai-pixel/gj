@@ -26,8 +26,9 @@ What it emits
                      other emails/phones in the notes. Title "Found on Google Maps: “<search>”", url = the Maps
                      link, external_id "gp:<place id>". The lead's identity keys include acct:gp:<place id>, so the
                      same business found by two searches is one lead; it also merges by name and domain with
-                     accounts found by other sources. A page deep inside a bigger site (a hotel on its chain's
-                     site) gets no domain, so a chain's hotels don't merge into one lead.
+                     accounts found by other sources, but never by name alone with a lead that has another Place
+                     ID. A page inside a bigger site (a hotel on its chain's site, a firm's Dubai office page)
+                     gets no domain and its own name, so a chain's hotels don't merge into one lead.
     Skipped (counted in the scan stats, never stored): no website, or a social/marketplace page as website
     ("no_website"); robots.txt keeps us out or can't be reached ("robots"); the site doesn't answer, isn't HTML or
     isn't public ("unreachable"); your own website, a competitor or a never-contact company ("excluded").
@@ -40,10 +41,13 @@ Time
     occurred_at is when the business was found. Each search is read in full at most once every
     RESEARCH_AFTER_DAYS days (table place_searches); a search interrupted before its last page runs again on the
     next scan. A Place ID that became a lead is never visited again, even after the lead is deleted; one that was
-    skipped is checked again after RECHECK_SKIPPED_DAYS (table place_ids).
+    skipped is checked again after RECHECK_SKIPPED_DAYS (table place_ids). Skips are recorded here, leads by
+    services.ingest when it stores them, so a scan that is stopped or times out before that loses no business.
 
 Limits and politeness
-    Every request is counted before it is sent, failed ones too: a global monthly cap (api_usage, BEGIN IMMEDIATE,
+    Every request is counted before it is sent, failed ones too (Google may bill them), except the ones Google
+    refuses for the key, billing or the API being off, which are never billed and are given back (otherwise a
+    first-run setup problem would use up the month scan after scan): a global monthly cap (api_usage, BEGIN IMMEDIATE,
     so processes never go over it together; OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT, default 900 of Google's free
     1,000: Google's month starts at midnight Pacific time, 7-8 hours after ours) and at most MAX_REQUESTS_PER_SCAN
     per scan. A search starts only when all its pages fit in the scan. PAGE_INTERVAL seconds before a next page.
@@ -461,6 +465,8 @@ class GooglePlacesCollector(Collector):
                         result = await search_page(ctx.client, key, query, token)
                     except PlacesError as exc:
                         ctx.warn(exc.message)
+                        if exc.kind in ("key", "denied"):  # refused before the search ran: never billed
+                            await asyncio.to_thread(repo.release_api_call, SERVICE, usage.month)
                         if exc.kind in ("key", "denied", "quota"):
                             return self._finish(out, ctx)
                         if exc.kind == "failed":
@@ -503,7 +509,8 @@ class GooglePlacesCollector(Collector):
     async def _visit(self, company: Company, query: str, location: str, places: list[tuple[str, str]],
                      reader: SiteReader, deadline: float, ctx: CollectContext,
                      now: datetime) -> tuple[list[RawSignal], dict[str, bool]]:
-        """Read each business's website, SITE_CONCURRENCY at once. Returns (signals in Google's order, outcomes)."""
+        """Read each business's website, SITE_CONCURRENCY at once. Returns (signals in Google's order, the Place IDs
+        skipped: {place_id: False}). Added ones are recorded by services.ingest with their lead."""
         gate = asyncio.Semaphore(SITE_CONCURRENCY)
         outcomes: dict[str, bool] = {}
         results: list[RawSignal | None] = [None] * len(places)
@@ -532,8 +539,7 @@ class GooglePlacesCollector(Collector):
                 outcomes[place_id] = False
                 return
             results[index] = build_signal(place_id, query, location, site, now)
-            ctx.count("added")
-            outcomes[place_id] = True
+            ctx.count("added")  # recorded as added by services.ingest, once the lead is stored
 
         await asyncio.gather(*(visit(i, pid, uri) for i, (pid, uri) in enumerate(places)))
         return [r for r in results if r is not None], outcomes

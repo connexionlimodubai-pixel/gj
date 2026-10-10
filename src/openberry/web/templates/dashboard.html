@@ -173,6 +173,7 @@
     {% else %}
       {% call m.empty("zap", "No signals yet") %}<p>They show up here as soon as a scan finds something.</p>{% endcall %}
     {% endif %}
+    {% if stats.businesses_7d %}<p class="small muted">Also {{ stats.businesses_7d|plural("business", "businesses") }} found on Google Maps in the last 7 days. <a href="{{ base }}/leads?source=google_places">See them</a></p>{% endif %}
   </section>
 
   <div class="dash-col">
@@ -227,7 +228,7 @@
         <thead><tr><th scope="col">Started</th><th scope="col">Trigger</th><th scope="col">Status</th><th scope="col" class="num">New signals</th><th scope="col" class="num">New leads</th><th scope="col" class="hide-sm">Duration</th><th scope="col">Issues</th></tr></thead>
         <tbody>
           {% for r in runs %}
-          <tr>
+          <tr{% if r.places %} class="has-detail"{% endif %}>
             <td class="nowrap">{{ m.when(r.run.started_at) }}</td>
             <td>{{ r.run.trigger|capitalize }}</td>
             <td><span class="pill pill-run-{{ r.run.status if r.run.status in SCAN_STATUS_LABELS else 'other' }}">{{ r.run.status|scan_status }}</span></td>
@@ -243,6 +244,7 @@
               {% else %}<span class="muted">None</span>{% endif %}
             </td>
           </tr>
+          {% if r.places %}<tr class="run-detail"><td colspan="7"><p class="small muted">{{ r.places }}</p></td></tr>{% endif %}
           {% endfor %}
         </tbody>
       </table>

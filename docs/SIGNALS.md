@@ -50,17 +50,27 @@ How a search runs:
   OpenBerry stops at 900 (`OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT`, or the API keys page). The page shows how many were
   used this month.
 - For each business, OpenBerry opens its own website: the homepage, plus up to 2 contact or about pages when the
-  homepage lacks an email or a phone number. It respects each site's robots.txt, only visits public addresses, and caps
-  the size and time of every page (1.5 MB, 10 seconds, 20 seconds per business).
-- Emails: `mailto:` links and the site's schema.org data for any domain except junk (noreply, example addresses, image
-  file names, error trackers); addresses in the text, including `info [at] acme [dot] ae`, only on the site's own domain.
+  homepage lacks a phone number or an email on the site's own domain. For a page inside a bigger site (a hotel's page
+  on its chain's website, a law firm's Dubai office page), only pages under that page's own address are read, such as
+  the hotel's own contact page. It respects each site's robots.txt, only visits public addresses, and caps the size and
+  time of every page (1.5 MB, 10 seconds, 20 seconds per business).
+- Emails: `mailto:` links and the site's schema.org data for any domain except junk (noreply, example addresses,
+  site-builder placeholders such as `filler@godaddy.com`, image file names, error trackers); addresses in the text,
+  including `info [at] acme [dot] ae`, only on the site's own domain.
   Addresses hidden by an email-protection service (Cloudflare) are not decoded: the site chose to hide them. Role
   addresses such as `info@` come first. Phone numbers come from `tel:` links and the schema.org data.
 - Each business becomes an account lead with the name, website, email, phone and description its website publishes,
-  the place from your search ("Dubai") and a "Google Maps" link. Businesses without a website, or with only a social
-  page, are skipped and counted in the scan's stats, as are sites that are unreachable or keep robots out.
+  the place from your search ("Dubai") and a "Google Maps" link. A page inside a bigger site gets no domain and is
+  named by its own title plus the site's name ("Dubai – Beta Legal"), so a chain's hotels or two firms' Dubai offices
+  stay separate leads. Businesses without a website, or with only a social page, are skipped, as are sites that are
+  unreachable or keep robots out. The dashboard's scan history says how many were found, added and skipped, and which
+  searches aren't due yet.
 - A business found again (by another search, or a week later) is not visited again. It merges with leads found by other
-  sources by name, domain or Place ID. A lead you delete doesn't come back: use **Disqualified** to keep one but ignore it.
+  sources by name, domain or Place ID, but two different Place IDs never merge by name alone. A lead you delete doesn't
+  come back: use **Disqualified** to keep one but ignore it. A scan that stops before it stores its leads (the app was
+  closed) loses nothing: those businesses are found again.
+- Google Maps businesses are not counted as new signals on the dashboard: they are a prospect list, shown as one line
+  ("Also 15 businesses found on Google Maps") under Recent signals.
 
 Google's terms forbid storing Google Maps content ("Customer will not ... pre-fetch, index, store, reshare, or rehost
 Google Maps Content outside the services"), except Place IDs, which "you can ... store ... indefinitely"

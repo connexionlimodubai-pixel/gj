@@ -3,6 +3,7 @@ httpx.MockTransports (tests/places_fakes.py) and real DNS lookups fail. Google i
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -183,10 +184,54 @@ async def test_one_scan_finds_the_businesses_with_their_own_contact_details(maps
     assert cf.summary.endswith("Its website lists +97145550188.")
     # No website, or only a social page: never fetched.
     assert not sites.hits("www.facebook.com")
-    # Handled Place IDs are remembered, the search is marked read.
+    # Skipped Place IDs are remembered, the search is marked read. Added ones are recorded only when the scan
+    # stores their leads (services.ingest).
     assert repo.handled_place_ids(maps_company.id, [ACME, NO_SITE, FACEBOOK, DOWN, PRIVATE_CLUB],
-                                  NOW - timedelta(days=30)) == {ACME, NO_SITE, FACEBOOK, DOWN, PRIVATE_CLUB}
+                                  NOW - timedelta(days=30)) == {NO_SITE, FACEBOOK, DOWN, PRIVATE_CLUB}
     assert repo.place_search_times(maps_company.id) == {QUERY.casefold(): NOW}
+    services.ingest(maps_company.id, signals)
+    assert repo.handled_place_ids(maps_company.id, ADDED, NOW - timedelta(days=400)) == set(ADDED)
+
+
+async def test_a_scan_stopped_before_storing_its_leads_loses_no_business(maps_company, monkeypatch):
+    async def never(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(30)
+        return search_page([])
+
+    # Page 1 is read (Acme Events and Desert DMC become signals), then the collector times out on page 2: the
+    # signals it held are never stored, like a desktop app closed during a scan.
+    monkeypatch.setattr(GooglePlacesCollector, "timeout_seconds", 0.5)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(FakeGoogle({(QUERY, TOKEN2): never}))) as client:
+        stats = await services.run_scan(maps_company.id, sources=["google_places"], client=client)
+    assert stats["leads_new"] == 0 and "TimeoutError" in stats["collectors"]["google_places"]["error"]
+    monkeypatch.setattr(GooglePlacesCollector, "timeout_seconds", google_places.TIMEOUT_SECONDS)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(FakeGoogle())) as client:
+        stats = await services.run_scan(maps_company.id, sources=["google_places"], client=client)
+    assert stats["leads_new"] == 6
+    names = {lead.lead_company for lead in repo.list_leads(maps_company.id, limit=50)[0]}
+    assert {"Acme Events", "Desert DMC"} <= names
+
+
+async def test_a_lead_that_could_not_be_stored_comes_back(maps_company, monkeypatch):
+    real = repo.upsert_lead
+
+    def broken(company_id, data, **kwargs):
+        if data.lead_company == "Acme Events":
+            raise ValueError("disk full")
+        return real(company_id, data, **kwargs)
+
+    monkeypatch.setattr(repo, "upsert_lead", broken)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(FakeGoogle())) as client:
+        stats = await services.run_scan(maps_company.id, sources=["google_places"], client=client)
+    assert stats["leads_new"] == 5 and stats["errors"] == ["google_places: disk full"]
+    assert repo.handled_place_ids(maps_company.id, [ACME, DESERT], NOW - timedelta(days=30)) == {DESERT}
+    monkeypatch.setattr(repo, "upsert_lead", real)
+    repo.finish_place_search(maps_company.id, QUERY.casefold(), 0, 0, when=NOW - timedelta(days=8))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(FakeGoogle())) as client:
+        stats = await services.run_scan(maps_company.id, sources=["google_places"], client=client)
+    assert stats["leads_new"] == 1
+    assert any(lead.lead_company == "Acme Events" for lead in repo.list_leads(maps_company.id, limit=50)[0])
 
 
 async def test_nothing_from_google_but_the_place_id_is_kept(maps_company, settings):
@@ -279,29 +324,42 @@ async def test_failed_requests_are_counted_too(maps_company):
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("answer", "warning"), [
+@pytest.mark.parametrize(("answer", "warning", "counted"), [
     (lambda r: google_error("error_api_key_invalid.json"),
-     "Google Maps: Google says the API key is not valid. Check it on the API keys page."),
+     "Google Maps: Google says the API key is not valid. Check it on the API keys page.", 0),
     (lambda r: google_error("error_service_disabled.json"),
-     "Google Maps: Places API (New) is off for this key's Google Cloud project. Turn it on, then scan again."),
+     "Google Maps: Places API (New) is off for this key's Google Cloud project. Turn it on, then scan again.", 0),
     (lambda r: google_error("error_billing_disabled.json"),
-     "Google Maps: billing is off for this key's Google Cloud project. Google needs billing even for free searches."),
+     "Google Maps: billing is off for this key's Google Cloud project. Google needs billing even for free searches.",
+     0),
     (lambda r: httpx.Response(403, text="<html>Forbidden</html>"),
-     "Google Maps: Google refused the key (HTTP 403). Allow Places API (New) in the key's restrictions."),
+     "Google Maps: Google refused the key (HTTP 403). Allow Places API (New) in the key's restrictions.", 0),
     (lambda r: google_json({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "blocked", "details": [
         {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_SERVICE_BLOCKED"}]}}, 403),
      "Google Maps: Google refused the key (API_KEY_SERVICE_BLOCKED). Allow Places API (New) in the key's "
-     "restrictions."),
+     "restrictions.", 0),
     (lambda r: google_error("error_resource_exhausted.json"),
-     "Google Maps: Google's limit for this key was reached (HTTP 429). Searches stopped for this scan."),
+     "Google Maps: Google's limit for this key was reached (HTTP 429). Searches stopped for this scan.", 1),
 ])
-async def test_errors_that_stop_the_collector(maps_company, answer, warning: str):
+async def test_errors_that_stop_the_collector(maps_company, answer, warning: str, counted: int):
     company = repo.update_company(maps_company.id, {"signals": {"places_queries": [QUERY, "dmcs in Dubai"]}})
     google = FakeGoogle({(QUERY, ""): answer})
     signals, ctx = await run(company, google)
     assert len(google.requests) == 1 and signals == []
     assert ctx.warnings == [warning]
     assert repo.place_search_times(company.id) == {}
+    # Refused before the search ran (key, billing, API off): never billed, so not counted against the month.
+    assert used_this_month() == counted
+
+
+async def test_a_refused_key_never_uses_up_the_month(maps_company, settings, monkeypatch):
+    monkeypatch.setattr(settings, "google_places_monthly_limit", 5)
+    refused = FakeGoogle({(QUERY, ""): lambda r: google_error("error_billing_disabled.json")})
+    for _ in range(6):
+        await run(maps_company, refused)
+    assert used_this_month() == 0
+    signals, ctx = await run(maps_company)  # billing turned on
+    assert len(signals) == 6 and ctx.warnings == [] and used_this_month() == 3
 
 
 async def test_a_rejected_page_stops_only_that_search(maps_company):

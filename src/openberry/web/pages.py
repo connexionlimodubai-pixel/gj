@@ -20,12 +20,12 @@ from starlette.responses import RedirectResponse, Response
 
 from .. import repo, services
 from ..config import get_settings
-from ..models import SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
+from ..models import PROSPECT_TYPES, SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
 from . import charts, forms, scans
 from .auth import LoginRequired, checked_form, public_registration_open, require_login
 from .ratelimit import client_key, limits, retry_header
 from .session import COMPANY_KEY, flash, is_logged_in, remember_company, safe_next
-from .ui import LEAD_SOURCES, as_utc, choice, int_param, page_info, render
+from .ui import LEAD_SOURCES, as_utc, choice, int_param, page_info, plural, render
 
 router = APIRouter(dependencies=[Depends(require_login)], include_in_schema=False)
 public_router = APIRouter(include_in_schema=False)
@@ -145,11 +145,39 @@ def run_summary(run: ScanRun) -> dict[str, Any]:
     duration = None
     if run.finished_at:
         duration = max(0, int((run.finished_at - run.started_at).total_seconds()))
+    places = collectors.get("google_places")
     return {
         "run": run, "signals_new": stats.get("signals_new"), "leads_new": stats.get("leads_new"),
         "errors": errors, "warnings": warnings, "duration": duration, "note": stats.get("note", ""),
         "collectors": sorted(collectors),
+        "places": places_summary(places.get("counts") or {}) if isinstance(places, dict) else "",
     }
+
+
+# Google Maps collector counts -> how the scan history names the businesses it skipped.
+PLACES_SKIPS = (("no_website", "without a website"), ("robots", "blocked by robots.txt"),
+                ("unreachable", "unreachable"), ("excluded", "excluded (yours, a competitor or never contact)"),
+                ("already_handled", "found before"), ("not_checked", "not checked in time"))
+
+
+def places_summary(counts: dict[str, Any]) -> str:
+    """One plain line about what Google Maps did in a scan (the collector's counts), "" when it did nothing."""
+    def n(key: str) -> int:
+        value = counts.get(key)
+        return value if isinstance(value, int) else 0
+
+    sentences = []
+    if n("searches"):
+        sentences.append(f"{plural(n('searches'), 'search', 'searches')}, "
+                         f"{plural(n('businesses'), 'business', 'businesses')} found, {n('added'):,} added.")
+    if skipped := [f"{n(key):,} {label}" for key, label in PLACES_SKIPS if n(key)]:
+        sentences.append("Skipped: " + ", ".join(skipped) + ".")
+    if n("searches_not_due"):
+        sentences.append(f"{plural(n('searches_not_due'), 'search', 'searches')} not due yet: each search runs at "
+                         "most once a week.")
+    if n("searches_waiting"):
+        sentences.append(f"{plural(n('searches_waiting'), 'search', 'searches')} waiting for the next scan.")
+    return "Google Maps: " + " ".join(sentences) if sentences else ""
 
 
 def _new_people(stats: dict[str, Any]) -> str:
@@ -446,7 +474,7 @@ def dashboard(request: Request, company_id: int) -> Response:
     remember_company(request, company_id)
     stats = repo.company_stats(company_id)
     top_leads, _ = repo.list_leads(company_id, kind="person", sort="score", limit=8)
-    recent, _ = repo.list_signals(company_id, limit=10)
+    recent, _ = repo.list_signals(company_id, limit=10, exclude_types=PROSPECT_TYPES)  # intent, not prospects
     runs = repo.list_scan_runs(company_id, limit=6)
     return render(request, "dashboard.html", {
         "company": company, "active": "dashboard", "title": company.name,

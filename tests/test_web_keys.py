@@ -141,6 +141,39 @@ def test_save_when_google_refuses_or_cannot_be_reached(client, check_calls, answ
     assert env_file().exists()  # saved either way: the user may fix the key's settings at Google later
 
 
+def test_a_refused_key_stays_marked_until_google_accepts_it(client, check_calls):
+    check_calls[0] = (False, "Billing is off for this key's Google Cloud project. Check it on the API keys page.")
+    save_key(client)
+    page = client.get("/keys").text
+    assert "Google Maps key saved, but Google refused it: Billing is off for this key&#39;s Google Cloud project." \
+        in flashes(page) and "Check it on the API keys page" not in page
+    # The flash is gone on the next visit; the page still says it, with an amber pill and no green tick.
+    page = client.get("/keys").text
+    assert "Key refused</span>" in page and "Google refused this key: Billing is off" in page
+    assert ">Key saved</span>" not in page and "Check again" in page
+    saved = env_file().read_text(encoding="utf-8")
+    assert "OPENBERRY_GOOGLE_PLACES_KEY_STATUS=" in saved and saved.count(GOOGLE_KEY[-8:]) == 1  # only the key line
+    # Fixed at Google: Check again clears it.
+    check_calls[0] = (True, "")
+    post(client, "/keys/google-maps", {"action": "check_key"})
+    page = client.get("/keys").text
+    assert "Google Maps key checked. Google accepted it." in flashes(page)
+    assert "Google refused this key" not in page and ">Key saved</span>" in page
+    assert check_calls[1:] == [GOOGLE_KEY, GOOGLE_KEY]
+    # Google can't be reached: the last answer stands.
+    check_calls[0] = (False, "Google says the API key is not valid.")
+    post(client, "/keys/google-maps", {"action": "check_key"})
+    check_calls[0] = (None, "ConnectError")
+    post(client, "/keys/google-maps", {"action": "check_key"})
+    assert "Google refused this key: Google says the API key is not valid." in client.get("/keys").text
+    # A refusal is about one key: another key, or no key, is not marked.
+    check_calls[0] = (None, "ConnectError")
+    save_key(client, GOOGLE_KEY[:-4] + "zzzz")
+    assert "Google refused this key" not in client.get("/keys").text
+    post(client, "/keys/google-maps", {"action": "remove_key"})
+    assert "STATUS" not in env_file().read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("bad", ["", "short", "AIza with spaces in it 0123456789", "AIza;DROP TABLE x;--0123456789",
                                  "x" * 201])
 def test_malformed_keys_are_refused(client, check_calls, bad: str):
@@ -273,6 +306,56 @@ def test_lead_page_links_to_google_maps(client, company):
     assert '<option value="google_places" selected>Google Maps</option>' in listing
     signals = client.get(f"/c/{company.id}/signals?source=google_places").text
     assert "Found on Google Maps" in signals
+
+
+def test_the_lead_sentence_follows_its_signals(client, company):
+    manual, _ = repo.upsert_lead(company.id, LeadIn(lead_company="Acme Events LLC"))
+    assert "the company is showing intent" not in client.get(f"/c/{company.id}/leads/{manual.id}").text
+    maps = repo.maps_place_url(ACME)
+    found, _ = repo.upsert_lead(company.id, LeadIn(
+        lead_company="Acme Events", profile_url=maps, source="google_places",
+        signals=[SignalIn(type="business_search", title="Found on Google Maps", url=maps, source="google_places",
+                          external_id=f"gp:{ACME}", strength=10)]))
+    assert found.id == manual.id  # merged by name into the lead added by hand
+    page = client.get(f"/c/{company.id}/leads/{manual.id}").text
+    assert "a business that matches your Google Maps search" in page and "showing intent" not in page
+    repo.add_signal(company.id, SignalIn(type="hiring", title="Hiring an events coordinator", source="jobs",
+                                         strength=60), lead_id=manual.id)
+    assert "the company is showing intent" in client.get(f"/c/{company.id}/leads/{manual.id}").text
+
+
+def test_dashboard_keeps_google_maps_businesses_apart_from_intent(client, company):
+    for n in range(3):
+        place = f"ChIJBusiness{n:08d}"
+        repo.upsert_lead(company.id, LeadIn(
+            lead_company=f"Business {n}", profile_url=repo.maps_place_url(place), source="google_places",
+            signals=[SignalIn(type="business_search", title=f"Found on Google Maps {n}", source="google_places",
+                              external_id=f"gp:{place}", strength=10)]))
+    repo.upsert_lead(company.id, LeadIn(lead_company="Hiring Co", signals=[
+        SignalIn(type="hiring", title="Hiring a travel manager", source="jobs", strength=60)]))
+    stats = repo.company_stats(company.id)
+    assert (stats["signals_7d"], stats["businesses_7d"]) == (1, 3)
+    assert sum(day["count"] for day in stats["signals_by_day"]) == 1
+    html = client.get(f"/c/{company.id}").text
+    recent = html[html.index('id="recent-title"'):html.index('id="followups-title"')]
+    assert "Hiring a travel manager" in recent and "Found on Google Maps" not in recent
+    assert "Also 3 businesses found on Google Maps in the last 7 days." in recent
+    assert f'href="/c/{company.id}/leads?source=google_places"' in recent
+
+
+def test_scan_history_says_what_google_maps_did(client, company):
+    counts = {"searches": 3, "businesses": 20, "added": 15, "no_website": 2, "robots": 1, "unreachable": 1,
+              "already_handled": 1, "searches_not_due": 4, "searches_waiting": 1}
+    run = repo.start_scan_run(company.id, "manual")
+    repo.finish_scan_run(run, "ok", {"collectors": {"google_places": {"found": 15, "warnings": [], "counts": counts}},
+                                     "signals_new": 15, "leads_new": 15})
+    html = client.get(f"/c/{company.id}").text
+    assert ("Google Maps: 3 searches, 20 businesses found, 15 added. Skipped: 2 without a website, 1 blocked by "
+            "robots.txt, 1 unreachable, 1 found before. 4 searches not due yet: each search runs at most once a "
+            "week. 1 search waiting for the next scan.") in html
+    assert pages.places_summary({"searches_not_due": 1}) == ("Google Maps: 1 search not due yet: each search runs at "
+                                                             "most once a week.")
+    assert pages.places_summary({}) == ""
 
 
 def test_help_page_mentions_the_google_maps_key(client, web_settings):

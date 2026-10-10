@@ -6,6 +6,7 @@ these settings, and a saved key is never shown again: the page says "ending in 1
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -24,12 +25,27 @@ router = APIRouter(dependencies=[Depends(require_login)], include_in_schema=Fals
 
 GOOGLE_KEY = "OPENBERRY_GOOGLE_PLACES_KEY"
 GOOGLE_LIMIT = "OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT"
+GOOGLE_STATUS = "OPENBERRY_GOOGLE_PLACES_KEY_STATUS"   # why Google refused the key at the last check
 KEY_RE = re.compile(r"[A-Za-z0-9_-]{20,200}")
 GOOGLE_BACK = "/keys#google-maps"
+ON_THIS_PAGE = " Check it on the API keys page."
 
 
 def _back() -> RedirectResponse:
     return RedirectResponse(GOOGLE_BACK, status_code=303)
+
+
+def _key_tag(key: str) -> str:
+    """Ties a saved refusal to the key it is about, without keeping any of the key: a key changed by hand in the
+    .env file is not reported as refused."""
+    return hashlib.sha256(key.strip().encode()).hexdigest()[:12]
+
+
+def refused_reason() -> str:
+    """Why Google refused the current key at the last check, "" when it didn't (or it was another key)."""
+    settings = config.get_settings()
+    tag, _, reason = settings.google_places_key_status.partition(" ")
+    return reason if settings.google_places_key and tag == _key_tag(settings.google_places_key) else ""
 
 
 def keys_context() -> dict[str, Any]:
@@ -39,10 +55,26 @@ def keys_context() -> dict[str, Any]:
         "env_path": str(config.settings_file()),
         "google": envfile.setting_state(GOOGLE_KEY),
         "google_limit": envfile.setting_state(GOOGLE_LIMIT),
+        "google_refused": refused_reason(),
         "places": places,
         "free_per_month": google_places.GOOGLE_FREE_PER_MONTH,
         "resets_label": google_places.day_month(places["resets_on"]),
     }
+
+
+async def _check_and_remember(request: Request, key: str, saved: str) -> None:
+    """Ask Google about the key (free), remember a refusal for the page, and flash the answer."""
+    ok, why = await google_places.check_key(key)
+    status = f"{_key_tag(key)} {why.removesuffix(ON_THIS_PAGE)}" if ok is False else None
+    if ok is not None:  # Google answered: its answer replaces the last one
+        await run_in_threadpool(_save, request, {GOOGLE_STATUS: status}, "key check")
+    if ok:
+        flash(request, f"{saved} Google accepted it.")
+    elif ok is False:
+        flash(request, f"{saved.removesuffix('.')}, but Google refused it: {why.removesuffix(ON_THIS_PAGE)}",
+              "warning")
+    else:
+        flash(request, f"{saved} OpenBerry couldn't reach Google to check it ({why}).", "info")
 
 
 @router.get("/keys")
@@ -65,7 +97,7 @@ def _save(request: Request, changes: dict[str, str | None], what: str) -> bool:
 
 @router.post("/keys/google-maps")
 async def google_maps_save(request: Request, form: FormData = Depends(checked_form)) -> Response:
-    """action = save_key | remove_key | save_limit. Always redirects to /keys#google-maps with a flash.
+    """action = save_key | check_key | remove_key | save_limit. Always redirects to /keys#google-maps with a flash.
 
     The key never goes into a flash, a log line, an error message or the page.
     """
@@ -75,17 +107,17 @@ async def google_maps_save(request: Request, form: FormData = Depends(checked_fo
         if not KEY_RE.fullmatch(key):
             flash(request, "Paste the whole key: letters, digits, - and _ only.", "error")
             return _back()
-        if not await run_in_threadpool(_save, request, {GOOGLE_KEY: key}, "key"):
+        if not await run_in_threadpool(_save, request, {GOOGLE_KEY: key, GOOGLE_STATUS: None}, "key"):
             return _back()
-        ok, why = await google_places.check_key(key)
-        if ok:
-            flash(request, "Google Maps key saved. Google accepted it.")
-        elif ok is False:
-            flash(request, f"Google Maps key saved, but Google refused it: {why}", "warning")
+        await _check_and_remember(request, key, "Google Maps key saved.")
+    elif action == "check_key":  # after fixing billing or the API in Google Cloud
+        config.refresh_saved_settings()
+        if key := config.get_settings().google_places_key:
+            await _check_and_remember(request, key, "Google Maps key checked.")
         else:
-            flash(request, f"Google Maps key saved. OpenBerry couldn't reach Google to check it ({why}).", "info")
+            flash(request, "There is no Google Maps key to check.", "error")
     elif action == "remove_key":
-        if await run_in_threadpool(_save, request, {GOOGLE_KEY: None}, "key"):
+        if await run_in_threadpool(_save, request, {GOOGLE_KEY: None, GOOGLE_STATUS: None}, "key"):
             flash(request, "Google Maps key removed. Google Maps searches are off.", "info")
     elif action == "save_limit":
         raw = str(form.get("limit") or "").strip().replace(",", "")

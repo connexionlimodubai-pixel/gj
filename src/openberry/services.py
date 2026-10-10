@@ -57,6 +57,9 @@ def ingest(company_id: int, raw_signals: list[RawSignal]) -> IngestStats:
                     else:
                         stats.leads_updated += 1
                 _, sig_created = repo.add_signal(company_id, raw.signal, lead_id=lead_id, conn=c, rescore=False)
+                if raw.signal.source == "google_places" and raw.signal.external_id.startswith("gp:"):
+                    # Stored with its lead, in the same transaction: a business is "added" only once it is.
+                    repo.record_place_ids(company_id, {raw.signal.external_id[3:]: True}, conn=c)
                 if sig_created:
                     stats.signals_new += 1
                 else:

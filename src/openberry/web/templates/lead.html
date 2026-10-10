@@ -11,8 +11,9 @@
     <div class="min0">
       <h1>{{ m.lead_title(lead) }}</h1>
       <p class="lead-hero-sub">
-        {% if lead.kind == "account" and lead.source == "google_places" %}Account-level lead: a business that matches your Google Maps search. The right person isn't known yet.
-        {% elif lead.kind == "account" %}Account-level lead: the company is showing intent, the right person isn't known yet.
+        {% if lead.kind == "account" and has_intent %}Account-level lead: the company is showing intent, the right person isn't known yet.
+        {% elif lead.kind == "account" and found_on_maps %}Account-level lead: a business that matches your Google Maps search. The right person isn't known yet.
+        {% elif lead.kind == "account" %}Account-level lead: the right person isn't known yet.
         {% else %}{{ lead.title or "Title unknown" }}{% if lead.lead_company %} <span class="muted">at</span> {{ lead.lead_company }}{% endif %}{% endif %}
       </p>
       <p class="meta-inline">

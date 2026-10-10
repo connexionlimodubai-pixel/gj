@@ -6,12 +6,16 @@ business's Place ID, so everything else about a business comes from what its own
 What is read
     The homepage, plus at most MAX_EXTRA_PAGES same-site pages that look like contact or about pages (by their
     address or link text, English and Arabic). The extra pages are skipped when the homepage already lists an email
-    on the site's own domain and a phone number, and for a page deep inside a bigger site (a hotel's page on its
-    chain's website: see is_shared_page).
+    on the site's own domain and a phone number. For a page inside a bigger site (a hotel's page on its chain's
+    website: see is_deep_page) only pages under its own address are read (own_prefix), not the chain's.
 
 What is kept
     name         schema.org JSON-LD name of the Organization/LocalBusiness/Hotel..., else og:site_name, else the
-                 first part of the <title> ("Acme Events | Dubai" -> "Acme Events"), else the host name.
+                 first usable part of the <title> ("Acme Events | Dubai" -> "Acme Events", "Home - Sandstone Events"
+                 -> "Sandstone Events"), else the host name. Page words (Home, Contact us, About us...) are skipped.
+                 A page inside a bigger site is named by its own og:title or title, plus the site's brand when the
+                 name doesn't already carry it ("Dubai | Beta Legal" -> "Dubai – Beta Legal"), and gets no domain:
+                 two firms' Dubai office pages, or a chain's hotels, must not merge into one lead.
     emails       mailto: links and JSON-LD `email` for any domain (a business may use Gmail), except junk (noreply,
                  example domains, image file names such as logo@2x.png, error trackers, site builders); addresses in
                  the visible text, including "info [at] acme [dot] ae" and "info(at)acme.ae", only on the site's own
@@ -24,11 +28,13 @@ What is kept
 
 Limits and politeness
     robots.txt is honoured (RFC 9309) for the product token "openberry", else "*", with our own small matcher: the
-    longest matching rule wins and Allow wins a tie (urllib.robotparser applies the first matching rule). 401/403
+    longest matching rule wins and Allow wins a tie (urllib.robotparser applies the first matching rule); wildcards
+    are matched in linear time, never with a regular expression a hostile robots.txt could make backtrack. 401/403
     means "keep out"; 429, 5xx, a timeout or too many redirects mean the site is skipped; other 4xx mean no rules.
     robots.txt is fetched once per host per scan. Only public addresses are fetched (netguard), every redirect hop
-    is checked, each page is capped at PAGE_MAX_BYTES and PAGE_TIMEOUT, one business at SITE_TIME_LIMIT, and pages
-    are parsed in a worker thread so the dashboard sharing the event loop stays responsive.
+    is checked, each page is capped at PAGE_MAX_BYTES (after decompression) and PAGE_TIMEOUT, one business at
+    SITE_TIME_LIMIT, and pages and robots.txt files are parsed and searched in a worker thread (page_details), so the
+    dashboard sharing the event loop stays responsive: asyncio.timeout can't interrupt work on the loop itself.
 """
 
 from __future__ import annotations
@@ -73,7 +79,11 @@ PLATFORM_HOSTS = ("facebook.com", "fb.com", "instagram.com", "linkedin.com", "tw
                   "linkin.bio", "google.com", "goo.gl", "g.page", "business.site", "booking.com",
                   "tripadvisor.com", "yelp.com", "foursquare.com", "zomato.com", "talabat.com", "dubizzle.com")
 GENERIC_NAMES = {"home", "homepage", "home page", "welcome", "index", "untitled", "default", "main page",
-                 "website", "official website", "coming soon", "under construction"}
+                 "website", "official website", "coming soon", "under construction",
+                 # page words: "Contact Us - Alpha Trading" is Alpha Trading's contact page, not a company
+                 "contact", "contacts", "contact us", "get in touch", "about", "about us", "who we are", "overview",
+                 "offices", "our offices", "locations", "our locations", "اتصل بنا", "تواصل معنا", "من نحن",
+                 "الرئيسية"}
 ROLE_ORDER = ("info", "contact", "enquiries", "enquiry", "inquiries", "inquiry", "hello", "sales",
               "reservations", "reservation", "booking", "bookings", "events", "office", "admin", "support")
 CONTACT_HINTS = ("contact", "get-in-touch", "getintouch", "reach-us", "enquir", "inquir", "kontakt",
@@ -86,20 +96,31 @@ BUSINESS_TYPES = ("organization", "localbusiness", "business", "hotel", "agency"
 
 EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9][A-Za-z0-9._%+-]{0,63}@"
                       r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.){1,8}[A-Za-z]{2,24})(?![A-Za-z0-9-])")
-AT_RE = re.compile(r"\s*[\[\(\{]\s*at\s*[\]\)\}]\s*", re.I)      # info [at] x.ae, info(at)x.ae, info {at} x.ae
-DOT_RE = re.compile(r"\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*", re.I)    # x [dot] ae
+# On text whose whitespace is collapsed to single spaces: the gaps are bounded, so matching stays linear.
+AT_RE = re.compile(r"\s?[\[\(\{]\s?at\s?[\]\)\}]\s?", re.I)      # info [at] x.ae, info(at)x.ae, info {at} x.ae
+DOT_RE = re.compile(r"\s?[\[\(\{]\s?dot\s?[\]\)\}]\s?", re.I)    # x [dot] ae
 _JUNK_LOCAL_PREFIXES = ("noreply", "no-reply", "donotreply", "do-not-reply", "no_reply")
-_JUNK_LOCALS = {"mailer-daemon", "postmaster", "bounce", "bounces"}
+_JUNK_LOCALS = {"mailer-daemon", "postmaster", "bounce", "bounces",
+                "youremail", "your.email", "yourname", "your.name", "email", "name", "user", "username"}
+# Example and site-builder placeholder addresses: GoDaddy's filler@godaddy.com, Canva's hello@reallygreatsite.com.
 _JUNK_DOMAINS = ("example.com", "example.org", "example.net", "domain.com", "yourdomain.com", "your-domain.com",
-                 "email.com", "test.com", "mysite.com", "company.com", "sentry.io", "wixpress.com", "wix.com")
+                 "email.com", "test.com", "mysite.com", "company.com", "sentry.io", "wixpress.com", "wix.com",
+                 "godaddy.com", "reallygreatsite.com", "yourwebsite.com", "yoursite.com", "website.com",
+                 "yourcompany.com")
+_JUNK_SITE_LABEL = re.compile(r"domain|example|sample|website|mysite|your-?(?:domain|site|website|web|company|"
+                              r"companyname|business|brand|email|mail|name|url)")    # the name part of the domain
+_SECOND_LEVELS = {"co", "com", "net", "org", "ac", "gov", "edu"}   # yourdomain.co.uk, domain.com.au
 _JUNK_DOMAIN_PARTS = ("sentry", "wixpress")
 _JUNK_TLDS = {"example", "invalid", "local", "localhost", "test"}
 _FILE_SUFFIXES = {"png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "bmp", "tif", "tiff", "css", "js", "json", "pdf",
                   "mp4", "webm", "woff", "woff2", "ttf"}
 _HEX_LOCAL = re.compile(r"[0-9a-f]{24,}")
 _LANGUAGE_SEGMENT = re.compile(r"[a-z]{2}(-[a-z]{2,4})?")
-_HOME_SEGMENTS = {"home", "index", "index.html", "index.htm", "index.php", "default.aspx"}
-_TITLE_SEPARATOR = re.compile(r"\s+[|\-–—:·]\s+")
+_HOME_SEGMENTS = {"home", "homepage", "home-page", "home.html", "home.htm", "home.php", "home.aspx", "index",
+                  "index.html", "index.htm", "index.php", "index.asp", "index.aspx", "default.asp", "default.aspx",
+                  "default.htm", "default.html"}
+_TITLE_SEPARATOR = re.compile(r" [|\-–—:·] ")   # on whitespace-collapsed text
+_WELCOME_TO = re.compile(r"welcome to ", re.I)
 _UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _PERCENT = re.compile(r"%([0-9A-Fa-f]{2})")
 
@@ -114,7 +135,8 @@ class SiteContacts:
     url: str            # the site address to store: canonical URL on the same host, else the final URL, no query
     host: str           # final host, lowercase, no "www."
     domain: str         # normalize_domain(host); "" when `shared`
-    shared: bool        # the page is deep inside a bigger site (a hotel on its chain's site)
+    shared: bool        # the page is inside a site, not its home page: the site may be bigger than this business
+                        # (a hotel on its chain's site, a law firm's Dubai office page); see is_deep_page
     name: str
     description: str
     emails: list[str] = field(default_factory=list)   # best first, at most MAX_EMAILS
@@ -149,6 +171,16 @@ class PageFacts:
     jsonld: list[Any] = field(default_factory=list)         # parsed blocks
 
 
+@dataclass
+class PageDetails:
+    """A parsed page and the contact details on it."""
+
+    facts: PageFacts
+    emails: list[str]
+    phones: list[str]
+    links: list[str]    # contact_links: same-site contact pages, then about pages
+
+
 # --------------------------------------------------------------------------------------
 # robots.txt (RFC 9309)
 # --------------------------------------------------------------------------------------
@@ -165,17 +197,43 @@ def _canon_path(value: str) -> str:
     return _PERCENT.sub(fix, value)
 
 
-def _rule_re(pattern: str) -> re.Pattern[str]:
-    anchored = pattern.endswith("$")
-    body = _canon_path(pattern[:-1] if anchored else pattern)
-    return re.compile(".*".join(re.escape(part) for part in body.split("*")) + ("$" if anchored else ""), re.S)
+@dataclass(frozen=True)
+class _Rule:
+    """One Allow/Disallow pattern: the parts between its '*' wildcards, and whether '$' ends it."""
+
+    parts: tuple[str, ...]
+    anchored: bool
+
+    @classmethod
+    def compile(cls, pattern: str) -> _Rule:
+        anchored = pattern.endswith("$")
+        return cls(tuple(_canon_path(pattern[:-1] if anchored else pattern).split("*")), anchored)
+
+    def matches(self, path: str) -> bool:
+        """Linear time, like Google's robots.txt matcher: each part is found with str.find after the previous one
+        (the leftmost place is always the best one), never with a backtracking regular expression."""
+        first, *rest = self.parts
+        if not path.startswith(first):
+            return False
+        if not rest:
+            return path == first if self.anchored else True
+        pos = len(first)
+        *middle, last = rest
+        for part in middle:
+            found = path.find(part, pos)
+            if found < 0:
+                return False
+            pos = found + len(part)
+        if self.anchored:
+            return path.endswith(last) and len(path) - len(last) >= pos
+        return path.find(last, pos) >= 0
 
 
 class RobotsRules:
     """The rules of one robots.txt for our product token (or "*")."""
 
     def __init__(self, rules: list[tuple[bool, str]] | None = None, *, everything: bool | None = None) -> None:
-        self.rules = [(allow, len(pattern), _rule_re(pattern)) for allow, pattern in rules or []]
+        self.rules = [(allow, len(pattern), _Rule.compile(pattern)) for allow, pattern in rules or []]
         self.everything = everything  # True: allow all, False: disallow all, None: use the rules
 
     @classmethod
@@ -225,8 +283,8 @@ class RobotsRules:
             return True
         target = _canon_path(path + (f"?{parts.query}" if parts.query else ""))
         best_len, allowed = -1, True
-        for allow, length, rx in self.rules:
-            if (length > best_len or (length == best_len and allow)) and rx.match(target):
+        for allow, length, rule in self.rules:
+            if (length > best_len or (length == best_len and allow)) and rule.matches(target):
                 best_len, allowed = length, allow
         return allowed
 
@@ -352,6 +410,14 @@ def parse_contact_page(html: str, url: str) -> PageFacts:
     return parser.finish()
 
 
+def page_details(html: str, url: str) -> PageDetails:
+    """parse_contact_page, then the emails, phones and contact links on the page. Every regular expression that reads
+    the page runs here, so SiteReader runs it all in a worker thread."""
+    facts = parse_contact_page(html, url)
+    host = bare_host(url)
+    return PageDetails(facts, find_emails(facts, host), find_phones(facts), contact_links(facts, host))
+
+
 def _jsonld_objects(data: Any, depth: int = 0) -> list[dict[str, Any]]:
     """Every JSON object in a JSON-LD block (lists and @graph included), outermost first."""
     if depth > 6:
@@ -396,8 +462,18 @@ def same_site(email_or_host: str, site_host: str) -> bool:
 
 
 def deobfuscate(text: str) -> str:
-    """'info [at] acme [dot] ae' -> 'info@acme.ae'. Only bracketed words: a bare ' at ' is never rewritten."""
-    return DOT_RE.sub(".", AT_RE.sub("@", text or ""))
+    """'info [at] acme [dot] ae' -> 'info@acme.ae'. Only bracketed words: a bare ' at ' is never rewritten.
+    Whitespace is collapsed first (a page builder's indentation can be a run of 100,000 spaces)."""
+    text = " ".join((text or "").split())
+    return DOT_RE.sub(".", AT_RE.sub("@", text))
+
+
+def _site_label(domain: str) -> str:
+    """'mail.yourdomain.co.uk' -> 'yourdomain': the name part of the domain."""
+    labels = domain.split(".")[:-1]
+    if len(labels) >= 2 and labels[-1] in _SECOND_LEVELS:
+        labels.pop()
+    return labels[-1] if labels else ""
 
 
 def is_junk_email(email: str) -> bool:
@@ -405,6 +481,8 @@ def is_junk_email(email: str) -> bool:
     if local.startswith(_JUNK_LOCAL_PREFIXES) or local in _JUNK_LOCALS or _HEX_LOCAL.fullmatch(local):
         return True
     if any(domain == d or domain.endswith("." + d) for d in _JUNK_DOMAINS):
+        return True
+    if _JUNK_SITE_LABEL.fullmatch(_site_label(domain)):  # name@domain.ae, email@yourdomain.ae, info@yourwebsite.com
         return True
     tld = domain.rpartition(".")[2]
     return any(part in domain for part in _JUNK_DOMAIN_PARTS) or tld in _JUNK_TLDS or tld in _FILE_SUFFIXES
@@ -447,6 +525,8 @@ def normalize_phone(raw: str) -> str:
         digits = digits[2:]
     if not 7 <= len(digits) <= 15:
         return ""
+    if len(set(digits)) == 1 or "123456789" in digits:  # a template's 123-456-7890 or 0000000
+        return ""
     return "+" + digits if plus else digits
 
 
@@ -459,31 +539,69 @@ def find_phones(page: PageFacts) -> list[str]:
     return phones
 
 
-def _first_part(title: str) -> str:
-    return _TITLE_SEPARATOR.split(title or "")[0].strip()
+def _usable_name(name: str) -> bool:
+    return 2 <= len(name) <= 100 and name.casefold() not in GENERIC_NAMES
+
+
+def name_parts(title: str) -> list[str]:
+    """The usable parts of a title: 'Home - Sandstone Events' -> ['Sandstone Events'], 'Welcome to X' -> ['X']."""
+    parts = _TITLE_SEPARATOR.split(" ".join((title or "").split()))
+    return [name for part in parts if _usable_name(name := _WELCOME_TO.sub("", part, count=1).strip())]
 
 
 def site_name(page: PageFacts, host: str, shared: bool) -> str:
     """The business's name as its site gives it (see the module docstring), else the host."""
-    candidates = [str(obj.get("name") or "") for obj in _jsonld_objects(page.jsonld) if _is_business(obj)][:1]
-    if shared:
-        candidates.append(_first_part(page.meta.get("og:title", "")))
-    else:
-        candidates.append(page.meta.get("og:site_name", ""))
-    candidates.append(_first_part(page.title))
-    for candidate in candidates:
-        name = " ".join(candidate.split())
-        if 2 <= len(name) <= 100 and name.casefold() not in GENERIC_NAMES:
-            return name
-    return host
+    business = [" ".join(str(obj.get("name") or "").split()) for obj in _jsonld_objects(page.jsonld)
+                if _is_business(obj)][:1]
+    if business and _usable_name(business[0]):
+        return business[0]
+    site = " ".join(page.meta.get("og:site_name", "").split())
+    site = site if _usable_name(site) else ""
+    titles = name_parts(page.title)
+    if not shared:
+        return site or (titles[0] if titles else host)
+    # A page inside a bigger site: its own title ("Dubai | Beta Legal" -> "Dubai") plus the site's brand, so two
+    # firms' "Dubai" office pages are two leads.
+    parts = name_parts(page.meta.get("og:title", "")) + titles
+    if not parts:
+        return site or host
+    name, brand = parts[0], site or (titles or parts)[-1]
+    a, b = name.casefold(), brand.casefold()
+    if b in a or a in b or set(re.findall(r"\w{4,}", b)) & set(re.findall(r"\w+", a)):
+        return name  # "Palmcrest Marina Hotel Dubai" on the "Palmcrest Rewards" site
+    return f"{name} – {brand}"[:100]
+
+
+def _site_segments(url: str) -> list[str]:
+    """The path's segments besides language codes and home/index: '/en-us/hotels/x/overview/' -> hotels, x, overview."""
+    segments = [s for s in unquote(urlsplit(url).path).lower().split("/") if s]
+    return [s for s in segments if not _LANGUAGE_SEGMENT.fullmatch(s) and s not in _HOME_SEGMENTS]
+
+
+def is_deep_page(url: str) -> bool:
+    """Not a site's home page: grandseasons.com/dubaijb/, a firm's /en/offices/dubai/. The site may hold other
+    businesses (a chain's other hotels), so the page gets no domain and its own name: they must not merge."""
+    return bool(_site_segments(url))
 
 
 def is_shared_page(url: str) -> bool:
     """A page deep inside a bigger site, e.g. hotelchain.com/en-us/hotels/dxb-marina-hotel/overview/ (2+ path segments
-    besides language codes and home/index): the chain's other hotels must not merge into one lead."""
-    segments = [s for s in unquote(urlsplit(url).path).lower().split("/") if s]
-    rest = [s for s in segments if not _LANGUAGE_SEGMENT.fullmatch(s) and s not in _HOME_SEGMENTS]
-    return len(rest) >= 2
+    besides language codes and home/index)."""
+    return len(_site_segments(url)) >= 2
+
+
+def own_prefix(url: str) -> str:
+    """The path under which a deep page's own pages live: '/en-us/hotels/dxb-x/overview/' -> '/en-us/hotels/dxb-x/'
+    (its parent, while that is still deep inside: 2+ segments), '/dubaijb/' -> '/dubaijb/'."""
+    path = unquote(urlsplit(url).path).lower()
+    path = path if path.endswith("/") else path + "/"
+    parent = path.rstrip("/").rpartition("/")[0] + "/"
+    return parent if is_shared_page(parent) else path
+
+
+def _path_under(url: str, prefix: str) -> bool:
+    path = unquote(urlsplit(url).path).lower()
+    return (path if path.endswith("/") else path + "/").startswith(prefix)
 
 
 def is_platform(host: str) -> bool:
@@ -583,25 +701,27 @@ class SiteReader:
             raise SiteSkipped("unreachable", type(exc).__name__) from exc
 
     async def _read(self, url: str) -> SiteContacts:
-        page, final = await self._fetch_html(url)
-        host = bare_host(final)
-        shared = is_shared_page(final)
-        emails = find_emails(page, host)
-        phones = find_phones(page)
+        home, final = await self._fetch_html(url)
+        page, host = home.facts, bare_host(final)
+        # A home page that redirects to /en/welcome/ on the same host is still the business's own site.
+        shared = is_deep_page(final) and not (bare_host(url) == host and not is_deep_page(url))
+        emails, phones, links = list(home.emails), list(home.phones), home.links
+        if shared:  # only the business's own pages: a hotel's contact page, not its chain's
+            prefix = own_prefix(final)
+            links = [link for link in links if _path_under(link, prefix)]
         pages = [_without_query(final)]
-        if not shared:
-            for link in contact_links(page, host)[:MAX_EXTRA_PAGES]:
-                if phones and any(same_site(e, host) for e in emails):
-                    break
-                try:
-                    extra, extra_url = await self._fetch_html(link)
-                except SiteSkipped:
-                    continue  # disallowed or failed: the homepage's details still count
-                if bare_host(extra_url) != host:
-                    continue
-                pages.append(_without_query(extra_url))
-                emails += [e for e in find_emails(extra, host) if e not in emails]
-                phones += [p for p in find_phones(extra) if p not in phones]
+        for link in links[:MAX_EXTRA_PAGES]:
+            if phones and any(same_site(e, host) for e in emails):
+                break
+            try:
+                extra, extra_url = await self._fetch_html(link)
+            except SiteSkipped:
+                continue  # disallowed or failed: the homepage's details still count
+            if bare_host(extra_url) != host:
+                continue
+            pages.append(_without_query(extra_url))
+            emails += [e for e in extra.emails if e not in emails]
+            phones += [p for p in extra.phones if p not in phones]
         description = " ".join((page.meta.get("description") or page.meta.get("og:description") or "").split())
         return SiteContacts(
             url=_site_url(page, final), host=host, domain="" if shared else normalize_domain(host), shared=shared,
@@ -619,7 +739,7 @@ class SiteReader:
         except (TimeoutError, OSError, UnicodeError) as exc:
             raise SiteSkipped("unreachable", "host lookup failed") from exc
 
-    async def _fetch_html(self, url: str) -> tuple[PageFacts, str]:
+    async def _fetch_html(self, url: str) -> tuple[PageDetails, str]:
         """(parsed page, final URL), following redirects by hand: every hop is checked (public host, robots.txt)."""
         current = url
         for _ in range(PAGE_REDIRECTS + 1):
@@ -657,7 +777,7 @@ class SiteReader:
                 raise SiteSkipped("unreachable", "timed out") from exc
             except (httpx.HTTPError, httpx.InvalidURL, OSError, ValueError) as exc:
                 raise SiteSkipped("unreachable", type(exc).__name__) from exc
-            return await asyncio.to_thread(parse_contact_page, html, final), final
+            return await asyncio.to_thread(page_details, html, final), final
         raise SiteSkipped("unreachable", "too many redirects")
 
     async def _robots_for(self, url: str) -> RobotsRules | None:
@@ -689,7 +809,7 @@ class SiteReader:
                         continue
                     if 200 <= status < 300:
                         body = await website.read_capped(resp, ROBOTS_MAX_BYTES)
-                        return RobotsRules.parse(body.decode("utf-8", errors="replace"))
+                        return await asyncio.to_thread(RobotsRules.parse, body.decode("utf-8", errors="replace"))
             except (httpx.HTTPError, httpx.InvalidURL, UnsafeURL, OSError, ValueError):
                 return None
             if status in (401, 403):

@@ -168,6 +168,9 @@ class Settings:
     # Most Google Maps searches (Text Search requests, one per page of up to 20 businesses) per calendar month (UTC).
     # Google's free tier is 1,000 a month; 0 turns the searches off.
     google_places_monthly_limit: int = DEFAULT_GOOGLE_PLACES_MONTHLY_LIMIT
+    # Why Google refused the saved key when the API keys page last checked it: "<last 4 characters of the key>
+    # <reason>", "" when Google accepted it. Not secret; written by the API keys page only.
+    google_places_key_status: str = ""
     user_agent: str = "OpenBerry/0.1 (+https://github.com/connexionlimodubai-pixel/gj)"
     http_timeout: float = 20.0
     # Extra Host names accepted by the HTTP MCP endpoint (without an API token) and, in local
@@ -205,6 +208,7 @@ class Settings:
             google_places_key=os.environ.get("OPENBERRY_GOOGLE_PLACES_KEY", "").strip(),
             google_places_monthly_limit=max(0, _int("OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT",
                                                     DEFAULT_GOOGLE_PLACES_MONTHLY_LIMIT)),
+            google_places_key_status=os.environ.get("OPENBERRY_GOOGLE_PLACES_KEY_STATUS", "").strip(),
             allowed_hosts=[h.strip() for h in os.environ.get("OPENBERRY_ALLOWED_HOSTS", "").split(",") if h.strip()],
         )
         if not s.secret_key:
@@ -252,6 +256,7 @@ DASHBOARD_SETTINGS: dict[str, DashboardSetting] = {
     "OPENBERRY_GOOGLE_PLACES_KEY": DashboardSetting("google_places_key", "", True, str.strip),
     "OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT": DashboardSetting(
         "google_places_monthly_limit", DEFAULT_GOOGLE_PLACES_MONTHLY_LIMIT, False, _limit),
+    "OPENBERRY_GOOGLE_PLACES_KEY_STATUS": DashboardSetting("google_places_key_status", "", False, str.strip),
 }
 
 # What settings_file() looked like when this process last read it: (inode, mtime_ns, size), None before the first

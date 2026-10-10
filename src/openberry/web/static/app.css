@@ -494,6 +494,9 @@ a.sig-type:hover { color: var(--accent-text); }
 .table tbody tr:hover td { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .table-compact td { padding: 6px var(--s3); }
+.table tr.has-detail td { border-bottom: 0; }
+.table tr.run-detail td { padding-top: 0; white-space: normal; }
+.table tr.run-detail p { position: sticky; left: 0; max-width: calc(100vw - 72px); }  /* readable without scrolling */
 .lead-cell { display: flex; align-items: center; gap: var(--s3); min-width: 200px; max-width: 300px; }
 .loc-cell { min-width: 120px; }
 .dash-grid .lead-cell { min-width: 160px; max-width: 230px; }
@@ -617,6 +620,9 @@ a.lead-name:hover { color: var(--accent-text); }
 .keys-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s5); align-items: start; }
 .keys-block { display: grid; gap: var(--s3); align-content: start; min-width: 0; }
 .key-status .icon { color: var(--good); vertical-align: -2px; }
+.pill-key-refused { background: var(--warning-bg); color: var(--warning); }
+.key-refused { display: grid; gap: var(--s2); justify-items: start; padding: var(--s3); border-radius: 10px; background: var(--warning-bg); color: var(--text); }
+.key-refused .icon { color: var(--warning); vertical-align: -2px; }
 .keys-remove { justify-self: start; }
 .keys-meter { display: block; height: 8px; }
 .keys-meter.is-full .meter-fill { background: var(--warning); }

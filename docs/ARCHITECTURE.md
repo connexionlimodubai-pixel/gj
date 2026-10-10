@@ -49,8 +49,9 @@ A Python app stores everything, collects free public signals, scores leads, and 
   Added in schema version 3.
 - **api_usage**: paid API calls per service and calendar month (UTC), the monthly cap on Google Maps searches.
 - **place_searches**: when each company last read every page of each Google Maps search (a search runs at most once a
-  week). **place_ids**: the Google Place IDs a company already handled (`added = 1`: became a lead, never added again;
-  `added = 0`: skipped, checked again after 30 days). Google's terms allow storing Place IDs and nothing else from Places.
+  week). **place_ids**: the Google Place IDs a company already handled (`added = 1`: became a lead, never added again,
+  written by `services.ingest` with the lead so an interrupted scan loses nothing; `added = 0`: skipped, checked again
+  after 30 days). Google's terms allow storing Place IDs and nothing else from Places.
   The three tables are created with `CREATE TABLE IF NOT EXISTS` (no schema version change).
 - **ScanRun**: one scan with per-collector stats. Status: `running`, `ok`, `failed` (it crashed, or every source failed or
   found nothing and only warned) or `nothing_configured`, with the reason in `stats["error"]`.
@@ -106,7 +107,9 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
 - API keys page: logged-in dashboard users only (local mode: this machine). Keys go to the data folder's `.env` with mode 0600,
   are never shown back (the last 4 characters at most) and are never readable or settable through `/api` or MCP. A setting in
   the real environment, or in a `.env` file read first, wins and is shown read-only. Business websites found on Google Maps
-  are fetched like RSS feeds: public addresses only, size and time caps, plus robots.txt.
+  are fetched like RSS feeds: public addresses only, size and time caps (the size cap applies after decompression), plus
+  robots.txt. Everything that reads a page or a robots.txt file runs in a worker thread and in linear time (no
+  backtracking regular expressions on text a website controls), so one hostile site can't freeze the dashboard.
 - Outbound requests to user-supplied URLs (website auto-fill, RSS feeds, alert webhooks) only go to public IP addresses
   (`netguard.py`). The host is looked up once and the connection goes to the checked address, so DNS rebinding can't redirect
   it. These requests don't use the environment's HTTP(S) proxy, so a server that only reaches the internet through a proxy

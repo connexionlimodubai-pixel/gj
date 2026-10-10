@@ -4,6 +4,8 @@ names and contact pages. Websites are an httpx.MockTransport (tests/places_fakes
 from __future__ import annotations
 
 import asyncio
+import random
+import re
 import time
 
 import httpx
@@ -18,6 +20,7 @@ from openberry.sitecontacts import (
     deobfuscate,
     find_emails,
     is_junk_email,
+    is_deep_page,
     is_platform,
     is_shared_page,
     normalize_phone,
@@ -88,6 +91,40 @@ def test_wildcards_end_anchors_comments_and_empty_rules():
     assert allows("User-agent: *\r\nDisallow: /a\r\n", "/b") and not allows("User-agent: *\r\nDisallow: /a\r\n", "/a")
 
 
+def test_wildcard_rules_never_backtrack():
+    # A business controls both its robots.txt and the path we fetch (its Google listing, a redirect, a link). As a
+    # regular expression, 20 wildcards against a 60-character path ran for minutes.
+    robots = "User-agent: *\nDisallow: /" + "*a" * 30 + "*b\nDisallow: /x" + "*" * 1000 + "y$\n"
+    rules = RobotsRules.parse(robots)
+    started = time.monotonic()
+    assert rules.allows("https://site.example/" + "a" * 50_000)
+    assert not rules.allows("https://site.example/" + "a" * 50_000 + "b")
+    assert not rules.allows("https://site.example/x" + "z" * 50_000 + "y")
+    assert time.monotonic() - started < 0.5
+
+
+def _regex_allows(rules: list[tuple[bool, str]], path: str) -> bool:
+    """The old matcher (a regular expression per rule), as a reference for the linear one."""
+    best_len, allowed = -1, True
+    for allow, pattern in rules:
+        anchored = pattern.endswith("$")
+        body = pattern[:-1] if anchored else pattern
+        rx = re.compile(".*".join(re.escape(part) for part in body.split("*")) + ("$" if anchored else ""), re.S)
+        if (len(pattern) > best_len or (len(pattern) == best_len and allow)) and rx.match(path):
+            best_len, allowed = len(pattern), allow
+    return allowed
+
+
+def test_the_linear_matcher_agrees_with_a_regular_expression():
+    rnd = random.Random(9309)
+    for _ in range(3000):
+        rules = [(rnd.random() < 0.5, "/" + "".join(rnd.choice("ab*/") for _ in range(rnd.randint(0, 6)))
+                  + ("$" if rnd.random() < 0.3 else "")) for _ in range(rnd.randint(1, 3))]
+        path = "/" + "".join(rnd.choice("ab/") for _ in range(rnd.randint(0, 8)))
+        robots = "User-agent: *\n" + "".join(f"{'Allow' if a else 'Disallow'}: {p}\n" for a, p in rules)
+        assert allows(robots, path) == _regex_allows(rules, path), (rules, path)
+
+
 def test_percent_encoding_and_robots_txt_itself():
     assert not allows("User-agent: *\nDisallow: /%7Ejoe\n", "/~joe/page")
     assert not allows("User-agent: *\nDisallow: /ar/اتصل\n", "/ar/%D8%A7%D8%AA%D8%B5%D9%84")
@@ -155,14 +192,47 @@ async def test_a_contact_page_robots_disallows_is_not_fetched():
 
 
 async def test_a_chain_hotel_page_is_shared_and_gets_no_domain():
-    sites = FakeSites()
-    site = await read(
-        "https://www.palmcrest-hotels.com/en-us/hotels/dxbpm-palmcrest-marina-hotel-dubai/overview/?scid=x", sites)
+    hotel = "https://www.palmcrest-hotels.com/en-us/hotels/dxbpm-palmcrest-marina-hotel-dubai"
+    sites = FakeSites({f"{hotel}/contact/": lambda r: html('<a href="mailto:marina@palmcrest-hotels.com">Email</a>'),
+                       "https://www.palmcrest-hotels.com/about/": lambda r: html(
+                           '<a href="mailto:global@palmcrest-hotels.com">Email</a>')})
+    site = await read(f"{hotel}/overview/?scid=x", sites)
     assert site.shared and site.domain == "" and site.host == "palmcrest-hotels.com"
     assert site.name == "Palmcrest Marina Hotel Dubai"
     assert site.phones == ["+97145550140"]
-    assert site.url == "https://www.palmcrest-hotels.com/en-us/hotels/dxbpm-palmcrest-marina-hotel-dubai/overview/"
-    assert len(sites.requests) == 2  # robots.txt and the page: no extra pages on a shared site
+    assert site.url == f"{hotel}/overview/"
+    # The hotel's own contact page is read; the chain's about page is not.
+    assert site.emails == ["marina@palmcrest-hotels.com"]
+    assert sites.urls[1:] == [f"{hotel}/overview/?scid=x", f"{hotel}/contact/"]
+
+
+async def test_pages_inside_a_site_are_separate_businesses():
+    office = '<title>Dubai | {firm}</title>{site}<a href="tel:{phone}">Call</a><a href="/contact/">Contact</a>'
+    sites = FakeSites({
+        "https://alpha-law.com/en/offices/dubai/": lambda r: html(office.format(
+            firm="Alpha &amp; Co LLP", site="", phone="+97143330001")),
+        "https://betalegal.com/offices/middle-east/dubai.html": lambda r: html(office.format(
+            firm="Beta Legal", site='<meta property="og:site_name" content="Beta Legal">', phone="+97143330002")),
+        "https://grandseasons.com/dubaijb/": lambda r: html(
+            '<meta property="og:site_name" content="Grand Seasons"><title>Grand Seasons JBR | Grand Seasons</title>'
+            '<meta property="og:title" content="Grand Seasons Dubai JBR"><a href="/contact/">Contact</a>'),
+        "https://alpha-trading.ae/contact-us/": lambda r: html("<title>Contact Us - Alpha Trading LLC</title>"),
+        "https://sandstone-events.ae/": lambda r: redirect("https://sandstone-events.ae/en/homepage/welcome"),
+        "https://sandstone-events.ae/en/homepage/welcome": lambda r: html("<title>Home - Sandstone Events</title>"),
+    })
+    alpha = await read("https://alpha-law.com/en/offices/dubai/", sites)
+    beta = await read("https://betalegal.com/offices/middle-east/dubai.html", sites)
+    hotel = await read("https://grandseasons.com/dubaijb/", sites)
+    trading = await read("https://alpha-trading.ae/contact-us/", sites)
+    assert (alpha.name, alpha.domain, alpha.shared) == ("Dubai – Alpha & Co LLP", "", True)
+    assert (beta.name, beta.domain) == ("Dubai – Beta Legal", "")
+    assert (hotel.name, hotel.domain) == ("Grand Seasons Dubai JBR", "")
+    assert (trading.name, trading.domain) == ("Alpha Trading LLC", "")
+    # The site-wide contact page is not this office's or this hotel's.
+    assert not any(u.endswith("/contact/") for u in sites.urls)
+    # A home page that redirects deeper on its own host is still the business's own site.
+    sandstone = await read("https://sandstone-events.ae/", sites)
+    assert (sandstone.name, sandstone.domain, sandstone.shared) == ("Sandstone Events", "sandstone-events.ae", False)
 
 
 async def test_cloudflare_protected_emails_are_not_decoded():
@@ -340,7 +410,22 @@ async def test_pages_are_parsed_in_a_worker_thread(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(asyncio, "to_thread", spy)
     await read("https://desertdmc.com/", FakeSites())
-    assert calls == ["parse_contact_page"]
+    assert calls == ["page_details"]
+    calls.clear()
+    await read("https://www.acme-events.ae/", FakeSites())
+    assert calls == ["parse", "page_details", "parse", "page_details"]  # robots.txt and pages of two hosts
+
+
+@pytest.mark.parametrize("filler", [" " * 200_000, "<div>\n  " * 40_000, "\xa0 " * 100_000, "( " * 100_000,
+                                    "[ at " * 40_000])
+async def test_a_page_of_whitespace_is_read_quickly(filler: str):
+    # Page builders nest thousands of indented empty divs: the visible text is one long run of whitespace.
+    body = f"<title>Spaces Co</title><body>{filler}<p>info [at] spaces.ae</p></body>"
+    sites = FakeSites({"https://spaces.ae/": lambda r: html(body)})
+    started = time.monotonic()
+    site = await read("https://spaces.ae/", sites)
+    assert time.monotonic() - started < 1
+    assert site.name == "Spaces Co"
 
 
 # --------------------------------------------------------------------------------------
@@ -367,6 +452,7 @@ def test_text_emails_only_on_the_sites_own_domain():
 
 def test_deobfuscation_only_rewrites_bracketed_words():
     assert deobfuscate("info [at] acme [dot] ae") == "info@acme.ae"
+    assert deobfuscate("info  [ at ]\n acme {dot} ae") == "info@acme.ae"
     assert deobfuscate("info(at)acme.ae, sales {AT} acme.ae, x[at]y(dot)ae") == "info@acme.ae, sales@acme.ae, x@y.ae"
     assert deobfuscate("meet us at acme.ae") == "meet us at acme.ae"
     assert find_emails(page("<p>Meet us at acme.ae (at) the expo.</p>"), "acme.ae") == []
@@ -377,12 +463,16 @@ def test_deobfuscation_only_rewrites_bracketed_words():
     "mailer-daemon@acme.ae", "postmaster@acme.ae", "bounce@acme.ae", "you@example.com", "name@domain.com",
     "user@yourdomain.com", "logo@2x.png", "icon@3x.webp", "font@1x.woff2", "x@sentry-next.wixpress.com",
     "0123456789abcdef0123456789abcdef@o12.ingest.sentry.io", "a@test.com", "me@site.example", "x@host.local",
+    # site-builder placeholders: GoDaddy, Canva, templates
+    "filler@godaddy.com", "hello@reallygreatsite.com", "youremail@gmail.com", "user@domain.ae", "email@yourdomain.ae",
+    "info@yourwebsite.com", "name@example.ae", "info@your-company.co.uk", "hello@yoursite.ae",
 ])
 def test_junk_emails(email: str):
     assert is_junk_email(email)
 
 
-@pytest.mark.parametrize("email", ["info@acme.ae", "events@acme-events.ae", "owner@gmail.com", "sara@pngtree.ae"])
+@pytest.mark.parametrize("email", ["info@acme.ae", "events@acme-events.ae", "owner@gmail.com", "sara@pngtree.ae",
+                                   "info@yourevents.ae", "sales@domainexperts.ae", "info@mail.domain-holdings.com"])
 def test_real_emails_are_not_junk(email: str):
     assert not is_junk_email(email)
 
@@ -398,6 +488,9 @@ def test_ranking_puts_the_own_domain_and_role_addresses_first():
     ("00971 50 555 0102", "+971505550102"),
     ("04-555-0101", "045550101"), ("+44 (0)20 7946 0018", "+442079460018"), ("//+97145550101", "+97145550101"),
     ("123", ""), ("+1234567890123456", ""), ("", ""),
+    # template numbers
+    ("123-456-7890", ""), ("(123) 456-7890", ""), ("+1 123 456 7890", ""), ("0000000", ""),
+    ("+971 5555555", "+9715555555"),
 ])
 def test_phone_numbers(raw: str, phone: str):
     assert normalize_phone(raw) == phone
@@ -412,7 +505,19 @@ def test_site_names():
     assert site_name(page("<title>  </title>"), "acme.ae", shared=False) == "acme.ae"
     shared = page('<title>Hotel X | Chain</title><meta property="og:site_name" content="Chain">'
                   '<meta property="og:title" content="Hotel X Downtown | Chain">')
-    assert site_name(shared, "chain.com", shared=True) == "Hotel X Downtown"
+    assert site_name(shared, "chain.com", shared=True) == "Hotel X Downtown – Chain"
+    # Page words and "Home" are skipped: the next part names the business.
+    assert site_name(page("<title>Home - Sandstone Events</title>"), "x.ae", shared=False) == "Sandstone Events"
+    assert site_name(page("<title>Home | Royal Gala Events</title>"), "x.ae", shared=False) == "Royal Gala Events"
+    assert site_name(page("<title>Welcome to Sandstone Events</title>"), "x.ae", shared=False) == "Sandstone Events"
+    assert site_name(page("<title>Contact Us - Acme</title>"), "x.ae", shared=True) == "Acme"
+    assert site_name(page("<title>About us | Contact</title>"), "x.ae", shared=True) == "x.ae"
+    # A firm's office page: the place plus the firm, so two firms' "Dubai" pages are two leads.
+    assert site_name(page("<title>Dubai | Clifford Chance</title>"), "x.com", shared=True) == "Dubai – Clifford Chance"
+    assert site_name(page('<title>Dubai | Beta</title><meta property="og:site_name" content="Beta Legal">'),
+                     "x.com", shared=True) == "Dubai – Beta Legal"
+    whitespace = page('<meta property="og:title" content="' + " " * 100_000 + 'Hotel Y | Chain">')
+    assert site_name(whitespace, "chain.com", shared=True) == "Hotel Y – Chain"
 
 
 def test_contact_links():
@@ -438,6 +543,15 @@ def test_contact_links():
 ])
 def test_shared_pages(url: str, shared: bool):
     assert is_shared_page(url) is shared
+
+
+@pytest.mark.parametrize(("url", "deep"), [
+    ("https://acme.ae/", False), ("https://acme.ae/en/home", False), ("https://acme.ae/en-ae/homepage/", False),
+    ("https://acme.ae/?utm_source=x", False), ("https://grandseasons.com/dubaijb/", True),
+    ("https://acme.ae/contact-us/", True),
+])
+def test_deep_pages(url: str, deep: bool):
+    assert is_deep_page(url) is deep
 
 
 def test_platforms():

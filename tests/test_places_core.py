@@ -76,6 +76,19 @@ def test_reserve_api_call_grants_until_the_limit():
     assert repo.usage_month(late) == "2026-11"
 
 
+def test_release_api_call_gives_back_one_call_of_that_month():
+    november = datetime(2026, 11, 1, 0, 0, tzinfo=timezone.utc)
+    repo.reserve_api_call(SERVICE, 3, now=NOW)
+    repo.reserve_api_call(SERVICE, 3, now=NOW)
+    repo.reserve_api_call(SERVICE, 3, now=november)
+    repo.release_api_call(SERVICE, "2026-10")
+    assert repo.api_usage(SERVICE, 3, now=NOW).used == 1 and repo.api_usage(SERVICE, 3, now=november).used == 1
+    for _ in range(3):
+        repo.release_api_call(SERVICE, "2026-10")
+        repo.release_api_call(SERVICE, "2026-09")  # no row: nothing happens
+    assert repo.api_usage(SERVICE, 3, now=NOW).used == 0  # never below 0
+
+
 def test_limit_zero_never_grants_and_reading_creates_no_row():
     assert not repo.reserve_api_call(SERVICE, 0, now=NOW).granted
     assert repo.api_usage(SERVICE, 900, now=NOW).used == 0
@@ -189,6 +202,24 @@ def test_accounts_merge_by_place_id_and_lose_the_key_as_a_person(company):
     assert not any(k.startswith("acct:") for k in keys)
     third, created = repo.upsert_lead(company.id, LeadIn(lead_company="Other Name Ltd", profile_url=maps))
     assert created and third.id != first.id
+
+
+def test_two_places_with_the_same_name_are_two_businesses(company):
+    alpha, _ = repo.upsert_lead(company.id, LeadIn(lead_company="Dubai", company_domain="alpha-law.com",
+                                                   profile_url=repo.maps_place_url(PLACE)))
+    beta, created = repo.upsert_lead(company.id, LeadIn(lead_company="Dubai", company_domain="betalegal.com",
+                                                        profile_url=repo.maps_place_url(OTHER_PLACE)))
+    assert created and beta.id != alpha.id
+    assert repo.get_lead(alpha.id).email == "" and beta.company_domain == "betalegal.com"
+    # The same name still merges a lead without a Place ID (added by hand or by Claude), and the same website merges
+    # a second Google Maps listing of one business.
+    manual, _ = repo.upsert_lead(company.id, LeadIn(lead_company="Acme Events LLC"))
+    found, created = repo.upsert_lead(company.id, LeadIn(lead_company="Acme Events", profile_url=repo.maps_place_url(
+        "ChIJAcmeEvents00001")))
+    assert not created and found.id == manual.id
+    branch, created = repo.upsert_lead(company.id, LeadIn(lead_company="Alpha Law", company_domain="alpha-law.com",
+                                                          profile_url=repo.maps_place_url("ChIJAlphaBranch0002")))
+    assert not created and branch.id == alpha.id
 
 
 # --------------------------------------------------------------------------------------

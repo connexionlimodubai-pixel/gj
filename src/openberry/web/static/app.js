@@ -83,6 +83,56 @@
     return true;
   }
 
+  // Keep your place across a reload. Tabs (.tabs a) and forms or links marked data-keep-scroll load
+  // the same page again; without this the browser starts at the top. Just before leaving, remember
+  // where the page's [data-scroll-anchor] was on screen; the next page on the same path puts it back
+  // there, so the list stays where it was even if something above it changed height.
+  const KEEP_SCROLL_KEY = "openberry-keep-scroll";
+  const KEEP_SCROLL_MS = 15000;
+
+  function rememberScroll(focusTab) {
+    const anchor = $("[data-scroll-anchor]");
+    const state = {
+      path: location.pathname, y: window.scrollY, at: Date.now(), focusTab: focusTab,
+      top: anchor ? anchor.getBoundingClientRect().top : null,
+    };
+    try { sessionStorage.setItem(KEEP_SCROLL_KEY, JSON.stringify(state)); } catch (err) { /* storage blocked */ }
+  }
+
+  function restoreScroll() {
+    let state = null;
+    try {
+      state = JSON.parse(sessionStorage.getItem(KEEP_SCROLL_KEY) || "null");
+      sessionStorage.removeItem(KEEP_SCROLL_KEY);
+    } catch (err) { return; }
+    // Another page, an old click, or a #section link (it decides where to land) start as usual.
+    if (!state || state.path !== location.pathname || location.hash) return;
+    if (!(Date.now() - state.at >= 0 && Date.now() - state.at < KEEP_SCROLL_MS)) return;
+    const anchor = $("[data-scroll-anchor]");
+    const y = anchor && typeof state.top === "number"
+      ? anchor.getBoundingClientRect().top + window.scrollY - state.top
+      : state.y;
+    if (typeof y === "number" && isFinite(y)) window.scrollTo(0, Math.max(0, y));
+    if (state.focusTab) {
+      const current = $('.tabs a[aria-current="page"]');
+      if (current) current.focus({ preventScroll: true });
+    }
+  }
+
+  function initKeepScroll() {
+    restoreScroll();
+    document.addEventListener("click", (e) => {
+      const link = e.target.closest(".tabs a[href], a[data-keep-scroll]");
+      if (!link || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      if (link.target && link.target !== "_self") return;
+      // A keyboard press on a tab (click with detail 0) gets the focus back on the tab it opened.
+      rememberScroll(e.detail === 0 && link.matches(".tabs a"));
+    });
+    document.addEventListener("submit", (e) => {
+      if (!e.defaultPrevented && e.target.matches("form[data-keep-scroll]")) rememberScroll(false);
+    });
+  }
+
   // Outreach Drafts tab: tick drafts, then approve or skip them together. Without this script the
   // checkboxes and buttons still work; it adds "Select all", the live count and the confirm text.
   function initBulk() {
@@ -432,6 +482,7 @@
   }
 
   function init() {
+    initKeepScroll();
     initNav();
     initAutosubmit();
     initConfirm();

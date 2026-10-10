@@ -143,7 +143,8 @@
   </div>
 </section>
 
-<nav class="tabs" aria-label="Outreach queue">
+{# Tabs and the actions below reload the page: app.js keeps the tabs where they were on screen (data-keep-scroll). #}
+<nav class="tabs" aria-label="Outreach queue" data-scroll-anchor>
   {% for key, label in tabs %}
   <a href="?tab={{ key }}"{% if tab == key %} aria-current="page"{% endif %}>{{ label }}<span class="count">{{ tab_counts[key] }}</span></a>
   {% endfor %}
@@ -201,10 +202,10 @@
     {% endif %}
     <div class="btn-row">
       {% if msg.status == "draft" %}
-      <form method="post" action="{{ base }}/messages/{{ msg.id }}">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm" type="submit" name="action" value="approve">{{ m.icon("check", 14) }}Approve</button></form>
+      <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll>{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm" type="submit" name="action" value="approve">{{ m.icon("check", 14) }}Approve</button></form>
       {% endif %}
       {% if msg.status in ("draft", "approved") %}
-      <form method="post" action="{{ base }}/messages/{{ msg.id }}">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button></form>
+      <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll>{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button></form>
       {% endif %}
       {{ m.copy_button("#q-" ~ msg.id ~ "-body") }}
       {% if msg.direction == "outbound" and msg.status in ("draft", "approved") %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{{ m.icon("edit", 14) }}Edit</a>
@@ -215,7 +216,7 @@
   {% endfor %}
 </ul>
 {% if bulk %}
-<form method="post" action="{{ base }}/outreach/bulk" id="bulk-form" class="bulk-bar" data-bulk aria-label="Approve or skip several drafts">
+<form method="post" action="{{ base }}/outreach/bulk" id="bulk-form" class="bulk-bar" data-bulk data-keep-scroll aria-label="Approve or skip several drafts">
   {{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab=drafts">
   <label class="bulk-all" data-bulk-js hidden><input type="checkbox" data-bulk-all>Select all</label>
   <p class="bulk-count" data-bulk-count aria-live="polite">Tick drafts to approve or skip them together.</p>

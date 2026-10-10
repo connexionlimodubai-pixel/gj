@@ -1945,3 +1945,35 @@ def test_bulk_bar_script_keeps_the_clicked_action():
     assert "function initBulk()" in js and "initBulk();" in js
     # A button disabled before the browser reads the form would drop action=approve from the request.
     assert "setTimeout(() => buttons.forEach((btn) => { btn.disabled = true; }), 0)" in js
+
+
+def test_outreach_tabs_and_list_actions_keep_your_place(client, company):
+    """Tabs and list actions reload the page: they must not throw the user back to the top (app.js initKeepScroll)."""
+    base = f"/c/{company.id}"
+    draft_for(company.id, "Sara Ali")
+    approved = draft_for(company.id, "Omar Haddad")
+    repo.update_message(approved.id, status="approved")
+    for tab in ("drafts", "approved", "sent", "replies", "followups"):
+        page = client.get(f"{base}/outreach?tab={tab}").text
+        assert re.search(r'<nav class="tabs" aria-label="Outreach queue" data-scroll-anchor>', page)
+        assert page.count("data-scroll-anchor") == 1  # one anchor per page: the tabs
+    drafts = client.get(f"{base}/outreach?tab=drafts").text
+    # Approve, Mark sent and the bulk bar come back to this page: each remembers the position.
+    forms = re.findall(r'<form method="post" action="[^"]*/(?:messages/\d+|outreach/bulk)"[^>]*>', drafts)
+    assert len(forms) == 3 and all("data-keep-scroll" in f for f in forms)
+    approved_tab = client.get(f"{base}/outreach?tab=approved").text
+    forms = re.findall(r'<form method="post" action="[^"]*/messages/\d+"[^>]*>', approved_tab)
+    assert len(forms) == 1 and "data-keep-scroll" in forms[0]  # Mark sent
+    # The agent card's forms land on #agent instead, so they don't keep the position.
+    agent = re.findall(r'<form method="post" action="[^"]*/outreach/agent[^"]*"[^>]*>', drafts)
+    assert agent and not any("data-keep-scroll" in f for f in agent)
+
+
+def test_keep_scroll_script():
+    js = (Path(__file__).parent.parent / "src" / "openberry" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "function initKeepScroll()" in js
+    init = js[js.index("function init() {"):]
+    assert init.index("initKeepScroll();") < init.index("initNav();")  # restore before anything else runs
+    keep = js[js.index("function rememberScroll"):js.index("function initKeepScroll")]
+    assert "state.path !== location.pathname || location.hash" in keep  # other pages and #section links: as usual
+    assert "sessionStorage" in keep and "try {" in keep  # storage can be blocked

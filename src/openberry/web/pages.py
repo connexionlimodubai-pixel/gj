@@ -389,9 +389,11 @@ def as_pending_review(data: CompanyIn) -> CompanyIn:
         "status": "paused",
         "signals": data.signals.model_copy(update={"rss_feeds": []}),
         "notify": data.notify.model_copy(update={"slack_webhook_url": "", "discord_webhook_url": ""}),
-        # Only the operator turns on AI agent sending (the public form doesn't show it).
+        # Only the operator turns on AI agent sending and auto-approve (the public form shows neither).
         "outreach": data.outreach.model_copy(update={
-            "agent_sending": False, "agent_daily_limit": OutreachConfig.model_fields["agent_daily_limit"].default}),
+            "agent_sending": False, "agent_daily_limit": OutreachConfig.model_fields["agent_daily_limit"].default,
+            "auto_approve": False, "auto_approve_hours": OutreachConfig.model_fields["auto_approve_hours"].default,
+            "auto_approve_since": None}),
     })
 
 
@@ -489,10 +491,22 @@ def signals_page(request: Request, company_id: int, type: str = "", source: str 
 # Outreach queue
 # --------------------------------------------------------------------------------------
 
+def auto_approve_status(company: Company, due: dict[str, Any]) -> dict[str, Any]:
+    """Auto-approve for the Outreach page's card, from repo.auto_approve_due's result (run as the page opened)."""
+    out = company.outreach
+    return {
+        "enabled": out.auto_approve, "hours": out.auto_approve_hours, "paused": company.status != "active",
+        "waiting": due["waiting"], "held": due["held"], "blocked": due["blocked"],
+        "next_at": _as_datetime(due["next_at"]),
+    }
+
+
 @router.get("/c/{company_id}/outreach")
 def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Response:
     company = repo.get_company(company_id)
     remember_company(request, company_id)
+    # Approve what is due first, so the page is current even with the scheduler off (OPENBERRY_SCHEDULER=false).
+    due = repo.auto_approve_due(company_id)
     tab = choice(tab, dict(OUTREACH_TABS)) or "drafts"
     counts = repo.company_stats(company_id)["messages"]
     replies = repo.list_messages(company_id, direction="inbound", limit=200)
@@ -515,7 +529,63 @@ def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Res
         "agent_queued_ids": {item["message_id"] for item in agent["items"]},
         "agent_leads": leads_by_id(s["lead_id"] for s in agent["skipped"][:AGENT_SKIPPED_SHOWN]),
         "agent_skipped_shown": AGENT_SKIPPED_SHOWN,
+        "auto": auto_approve_status(company, due),
+        "auto_states": repo.auto_approve_states(company, messages) if company.outreach.auto_approve else {},
     })
+
+
+def _auto_hours(raw: Any) -> int | None:
+    """The submitted review window, or None when it isn't a whole number of hours in the allowed range."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    low, high = forms.AUTO_APPROVE_HOURS_RANGE
+    return int(text) if text.isdigit() and low <= int(text) <= high else None
+
+
+def hours_text(hours: int) -> str:
+    return f"{hours} hour{'' if hours == 1 else 's'}"
+
+
+@router.post("/c/{company_id}/outreach/auto-approve")
+def auto_approve_settings(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Turn auto-approve on or off and set its review window. Turning it off always works.
+
+    Turning it on starts every draft's window again from now (auto_approve_since): drafts already waiting are
+    never approved at once.
+    """
+    company = repo.get_company(company_id)
+    back = f"/c/{company_id}/outreach#auto-approve"
+    turn_on = str(form.get("auto_approve") or "").strip().lower() in forms.TRUTHY
+    raw_hours = form.get("auto_approve_hours")
+    hours = _auto_hours(raw_hours)
+    if not turn_on:
+        patch: dict[str, Any] = {"auto_approve": False}
+        if hours is not None:
+            patch["auto_approve_hours"] = hours
+        repo.update_company(company_id, {"outreach": patch})
+        flash(request, "Auto-approve is off. Drafts wait for you to approve them.", "info")
+        return redirect(back)
+    if hours is None and isinstance(raw_hours, str) and raw_hours.strip():
+        low, high = forms.AUTO_APPROVE_HOURS_RANGE
+        flash(request, f"The review window must be a whole number of hours from {low} to {high}. Nothing was "
+                       "changed.", "error")
+        return redirect(back)
+    hours = hours or company.outreach.auto_approve_hours
+    was_on = company.outreach.auto_approve
+    patch = {"auto_approve": True, "auto_approve_hours": hours}
+    if not was_on:
+        patch["auto_approve_since"] = repo.iso()
+    repo.update_company(company_id, {"outreach": patch})
+    paused = "" if company.status == "active" else " The company is paused: nothing is approved until you activate it."
+    if was_on:
+        flash(request, f"Review window saved: drafts are approved {hours_text(hours)} after they're written or "
+                       f"last edited.{paused}")
+    else:
+        agent = " With AI agent sending on, your agent may then send the LinkedIn ones." if (
+            company.outreach.agent_sending) else ""
+        flash(request, f"Auto-approve is on: drafts you don't edit, hold or skip are approved {hours_text(hours)} "
+                       f"after they're written. Drafts you already have get {hours_text(hours)} from now.{agent}"
+                       f"{paused}")
+    return redirect(back)
 
 
 def _agent_limit(raw: Any) -> int | None:

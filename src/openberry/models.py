@@ -66,6 +66,11 @@ AGENT_CHANNELS = ("linkedin_connect", "linkedin_dm")
 # "claude" = Claude marked it sent with update_message (counts toward the agent's daily limit too).
 SENT_VIA = ("", "agent", "claude")
 AGENT_PAUSE_REASON_MAX = 500
+# OutreachConfig fields of auto-approve: changed on the dashboard's Outreach page only (repo.update_company keeps them
+# on a profile save; Claude and the JSON API may only turn it off or make the window longer).
+AUTO_APPROVE_SETTINGS = ("auto_approve", "auto_approve_hours", "auto_approve_since")
+# Message.approved_via: "auto" = auto-approve approved it (repo.auto_approve_due), "" = a person did.
+APPROVED_VIA_AUTO = "auto"
 
 
 # --------------------------------------------------------------------------------------
@@ -206,7 +211,10 @@ class OutreachConfig(_Model):
     followup_days: Annotated[list[int], BeforeValidator(lambda v: [int(x) for x in split_list(v)] if isinstance(v, str) else v)] = Field(
         default_factory=lambda: [3, 7], description="Days to wait after each sent message before the next follow-up is due")
     mode: Literal["review", "auto_draft"] = Field(
-        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot lead, however it turned hot (scan, Claude, import or edit). Nothing is ever sent automatically.")
+        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot "
+                                      "lead, however it turned hot (scan, Claude, import or edit). Drafts are never "
+                                      "sent: a person approves them (or auto_approve does, if the user turned it on) "
+                                      "and sends them, or lets their own AI agent send approved LinkedIn messages.")
     banned_words: StrList = Field(default_factory=list, description="Words/phrases messages must never use")
     extra_instructions: str = Field(default="", description="Anything Claude must respect when writing messages")
     # LinkedIn's own limits on connection-request notes depend on the account (LinkedIn help a563153, a6239760):
@@ -218,21 +226,30 @@ class OutreachConfig(_Model):
     # AI agent sending: an MCP-capable browser agent in the user's own browser sends the LinkedIn messages the
     # user approved, through the send queue (repo.send_queue). These four are changed in the dashboard only.
     agent_sending: bool = Field(
-        default=False, description="Let an AI agent in your own browser send the LinkedIn messages you approved")
+        default=False, description="Let an AI agent in your own browser send approved LinkedIn messages")
     agent_daily_limit: int = Field(
         default=15, ge=1, le=50, description="Most LinkedIn messages the agent may send in any 24 hours")
     agent_paused_until: datetime | None = Field(
         default=None, description="Agent sending is paused until then (the agent reported a problem)")
     agent_pause_reason: str = Field(default="", description="The problem the agent reported")
+    # Auto-approve (repo.auto_approve_due): a draft the user doesn't edit, hold or skip is approved once its review
+    # window has passed. Off by default, and like agent sending only the dashboard turns it on.
+    auto_approve: bool = Field(
+        default=False, description="Approve drafts automatically once they have waited auto_approve_hours for you")
+    auto_approve_hours: int = Field(
+        default=2, ge=1, le=72, description="Hours a draft waits for you after it was written or last edited")
+    auto_approve_since: datetime | None = Field(
+        default=None, description="When auto-approve was turned on: drafts written before get the full window from "
+                                  "then")
 
     @field_validator("linkedin_account", mode="before")
     @classmethod
     def _account_word(cls, v: Any) -> Any:
         return v.strip().lower() if isinstance(v, str) else v
 
-    @field_validator("agent_paused_until")
+    @field_validator("agent_paused_until", "auto_approve_since")
     @classmethod
-    def _utc_pause(cls, v: datetime | None) -> datetime | None:
+    def _utc_times(cls, v: datetime | None) -> datetime | None:
         return v.replace(tzinfo=timezone.utc) if v is not None and v.tzinfo is None else v
 
     @field_validator("agent_pause_reason")
@@ -419,6 +436,9 @@ class Message(_Model):
     sent_at: datetime | None = None
     sent_via: str = Field(default="", description="'' = marked sent by the user, 'agent' = the AI agent sent it, "
                                                    "'claude' = Claude marked it sent")
+    auto_hold: bool = Field(default=False, description="The user held this draft: auto-approve never approves it")
+    approved_via: str = Field(default="", description="'auto' = auto-approve approved it after its review window, "
+                                                       "'' = a person did (or it isn't approved)")
 
 
 class ScanRun(_Model):

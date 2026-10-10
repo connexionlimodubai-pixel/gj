@@ -75,7 +75,7 @@
           <button class="btn" type="submit" name="agent_sending" value="on">{{ m.icon("check", 14) }}Save limit</button>
           <button class="btn" type="submit" name="agent_sending" value="off" formnovalidate>{{ m.icon("pause", 14) }}Turn off</button>
           {% else %}
-          <button class="btn btn-primary" type="submit" name="agent_sending" value="on" data-confirm="Turn on AI agent sending? LinkedIn's rules forbid automation and your account could be restricted. Only messages you approve are sent.">{{ m.icon("play", 14) }}Turn on</button>
+          <button class="btn btn-primary" type="submit" name="agent_sending" value="on" data-confirm="Turn on AI agent sending? LinkedIn's rules forbid automation and your account could be restricted. Only approved messages are sent.">{{ m.icon("play", 14) }}Turn on</button>
           {% endif %}
         </div>
       </form>
@@ -84,7 +84,8 @@
         <div>
           <p><strong>At your own risk.</strong> LinkedIn's rules forbid automation. Even an AI agent working in your own browser, with your own login, can get your LinkedIn account restricted.</p>
           <ul>
-            <li>Only messages you approve here are sent, exactly as you approved them. Email is never sent this way.</li>
+            <li>Only approved messages are sent, exactly as approved. Email is never sent this way.</li>
+            {% if auto.enabled %}<li>Auto-approve is on: drafts you don't edit, hold or skip in time are approved, so your agent may send them without you reading them.</li>{% endif %}
             <li>Keep the daily limit low.</li>
             <li>If LinkedIn shows a warning, a security check or a limit, your agent stops and OpenBerry pauses sending for 24 hours.</li>
           </ul>
@@ -143,6 +144,39 @@
   </div>
 </section>
 
+{% set auto_low, auto_high = AUTO_APPROVE_HOURS_RANGE %}
+<section class="card agent-card auto-card" id="auto-approve" aria-labelledby="auto-title">
+  <header class="agent-head">
+    <span class="agent-icon" aria-hidden="true">{{ m.icon("clock", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="auto-title" class="title-row">Auto-approve drafts <span class="pill pill-agent-{{ 'on' if auto.enabled else 'off' }}">{{ "On" if auto.enabled else "Off" }}</span></h2>
+      <p class="agent-status">
+        {% if not auto.enabled %}Off. Drafts wait for you to approve them.
+        {% else %}On: drafts you don't edit, hold or skip are approved {{ auto.hours|plural("hour") }} after they're written.
+          {% if auto.paused %}The company is paused, so nothing is approved until you activate it.
+          {% elif auto.waiting %}{{ auto.waiting|plural("draft") }} waiting{% if auto.next_at %}; the next one is approved at <time datetime="{{ auto.next_at|iso_dt }}">{{ auto.next_at|abs_dt }}</time> ({{ auto.next_at|ago }}){% endif %}.
+          {% else %}No draft is waiting.
+          {% endif %}
+        {% endif %}
+      </p>
+      <p class="small muted auto-never">Never approved automatically: drafts you hold, leads who replied or are on your never-contact list, notes too long for your LinkedIn account, banned words, and a second message to the same person.</p>
+    </div>
+  </header>
+  <form method="post" action="/c/{{ company.id }}/outreach/auto-approve" class="auto-form field">{{ m.csrf() }}
+    <label for="auto-hours">Review window (hours)</label>
+    <div class="auto-row">
+      <input class="input" id="auto-hours" name="auto_approve_hours" type="number" min="{{ auto_low }}" max="{{ auto_high }}" inputmode="numeric" value="{{ auto.hours }}" aria-describedby="auto-hours-help">
+      {% if auto.enabled %}
+      <button class="btn" type="submit" name="auto_approve" value="on">{{ m.icon("check", 14) }}Save</button>
+      <button class="btn" type="submit" name="auto_approve" value="off" formnovalidate>{{ m.icon("pause", 14) }}Turn off</button>
+      {% else %}
+      <button class="btn btn-primary" type="submit" name="auto_approve" value="on" data-confirm="Turn on auto-approve? Drafts you don't edit, hold or skip in time are approved without you. With AI agent sending on, your agent may then send them on LinkedIn without you reading them.">{{ m.icon("play", 14) }}Turn on</button>
+      {% endif %}
+    </div>
+    <p class="help" id="auto-hours-help">How long a draft waits for you after it's written or edited ({{ auto_low }}–{{ auto_high }}).</p>
+  </form>
+</section>
+
 {# Tabs and the actions below reload the page: app.js keeps the tabs where they were on screen (data-keep-scroll). #}
 <nav class="tabs" aria-label="Outreach queue" data-scroll-anchor>
   {% for key, label in tabs %}
@@ -191,10 +225,12 @@
       {{ m.score(lead.score, lead.tier) }}
       {% endif %}
       {{ m.msg_pill(msg.status) }}
+      {{ m.approved_via(msg) }}
       {% if msg.id in agent_queued_ids %}<span class="pill pill-agent-on">{{ m.icon("bot", 12) }}Queued for your agent</span>{% endif %}
       {{ m.sent_via(msg) }}
     </div>
     <p class="queue-meta">{{ msg.channel|channel_label }} · step {{ msg.step }} · {{ m.when(msg.sent_at or msg.created_at) }}</p>
+    {{ m.auto_line(msg, auto_states.get(msg.id), base ~ "/outreach?tab=" ~ tab, keep_scroll=true) }}
     {% if msg.subject %}<p class="queue-subject"><span class="muted">Subject:</span> {{ msg.subject }}</p>{% endif %}
     <div class="queue-body" id="q-{{ msg.id }}-body">{{ msg.body }}</div>
     {% if msg.channel == "linkedin_connect" %}

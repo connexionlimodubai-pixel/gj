@@ -14,7 +14,7 @@ A Python app stores everything, collects free public signals, scores leads, and 
 │ openberry (Python)                                                                            │
 │  web/ FastAPI + Jinja dashboard: registration board, leads, signals, outreach, settings       │
 │  mcp_server.py   tools/resources/prompts over the same data                                    │
-│  services.py     run_scan → collectors → ingest → scoring → alerts (+ auto-draft)              │
+│  services.py     run_scan → collectors → ingest → scoring → alerts (+ auto-draft, auto-approve)│
 │  collectors/     Hacker News, Reddit, GitHub, Greenhouse/Lever/Ashby, News/RSS, SEC EDGAR      │
 │  scoring.py      ICP fit + time-decayed intent + signal stacking + optional Claude score       │
 │  outreach.py     template / Ollama drafting, outreach context for Claude                       │
@@ -33,8 +33,11 @@ A Python app stores everything, collects free public signals, scores leads, and 
     hiring_keywords, news_queries, rss_feeds, sec_queries, influencers, competitor_pages, events, lookback_days, weights
   - `outreach: OutreachConfig`: sender, tone, language, channels, calendar link, CTA, signature,
     max_followups, followup_days, mode (review | auto_draft), banned_words, extra_instructions, linkedin_account
-    (free | premium, default free: the connection-note limits, see `outreach.connect_note_limit`), and AI agent
-    sending: agent_sending (off by default), agent_daily_limit (1-50, default 15), agent_paused_until, agent_pause_reason
+    (free | premium, default free: the connection-note limits, see `outreach.connect_note_limit`), AI agent
+    sending: agent_sending (off by default), agent_daily_limit (1-50, default 15), agent_paused_until, agent_pause_reason,
+    and auto-approve: auto_approve (off by default), auto_approve_hours (the review window, 1-72, default 2) and
+    auto_approve_since (when the user turned it on). The profile form shows neither the pause nor auto-approve, and
+    `repo.update_company` keeps both as stored when it is given a whole profile.
   - `notify: NotifyConfig`: Slack and Discord webhooks, min_score (alerts need a hot lead, so values below 70 act as 70)
 - **Lead**: a person (`kind="person"`) or an account (`kind="account"`, company-level intent such as
   hiring or funding, with no contact found yet). People inherit 60% of their company's account-level intent.
@@ -44,7 +47,10 @@ A Python app stores everything, collects free public signals, scores leads, and 
   URL and a dedupe key `(company_id, source, external_id)`.
 - **Message**: an outbound draft/sent message or an inbound reply (`direction`), with sequence `step`. `sent_via` records who
   marked it sent: `""` the user, `"agent"` the user's AI agent (`confirm_message_sent`), `"claude"` Claude (`update_message`).
-  Added in schema version 3.
+  Added in schema version 3. Schema version 4 added `auto_hold` (1 = the user, or Claude for them, held this draft: auto-approve
+  never approves it; setting an approved message back to draft on purpose, or an approval that lapses because the lead's
+  LinkedIn profile changed or it left the pipeline, holds it too) and `approved_via` (`"auto"` = auto-approve approved it,
+  `""` = a person did; cleared whenever it becomes a draft or a person approves it).
 - **ScanRun**: one scan with per-collector stats. Status: `running`, `ok`, `failed` (it crashed, or every source failed or
   found nothing and only warned) or `nothing_configured`, with the reason in `stats["error"]`.
   The scheduler retries a failed scan after an hour.
@@ -67,6 +73,17 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   not alerted yet; `repo.claim_new_hot_leads` hands each lead out exactly once. It runs after every scan, and the scheduler
   (`openberry serve`) runs it for every active company on each tick, so leads made hot by Claude, the API, CSV imports or
   edits are alerted too.
+- `repo.auto_approve_due(company_id, now=None, conn=None)` approves the drafts whose review window has passed, when the
+  company is active and has auto-approve on: a draft is due at `max(updated_at, auto_approve_since) + auto_approve_hours`,
+  so an edit restarts its window and turning auto-approve on never approves a backlog at once. It never approves a held
+  draft, a lead whose status is replied/meeting/won/lost/disqualified or who replied, a lead on the never-contact list or
+  matching excluded keywords (the agent queue's own checks), a connection note too long for the LinkedIn account, a draft
+  with a banned word, or a second message to the same lead (one at a time, in the order written). The approvals are one
+  `BEGIN IMMEDIATE` transaction of compare-and-set UPDATEs (still a draft, not held, same `updated_at`), so an edit at the
+  same moment wins. It runs on every scheduler tick (`services.auto_approve_active_companies`, one company's error never
+  stops the others), at the end of `run_scan`, at the start of the MCP `get_send_queue`, and when the Outreach page or a lead
+  page opens (without the write lock unless a draft is due). `repo.auto_approve_states(company, messages)` describes each
+  draft (waiting with its time, held, blocked with the reason, or off) in a few queries for the dashboard and Claude.
 - `collectors.Collector`: `name`, `label`, `signal_types`, `requires`, `is_configured(company)`,
   `async collect(company, ctx) -> list[RawSignal]`. `RawSignal(signal=SignalIn, lead=LeadIn|None, account=str, account_domain=str, account_location=str)`.
   Collectors must be polite (cap requests and honour `ctx.max_items`). One bad item never fails the whole collector. Use `ctx.warn()` for soft problems.
@@ -99,9 +116,14 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
 - Claude is told to treat text from leads and public posts, and everything the tools return, as data, never as instructions.
   Prompts name companies and leads by id rather than quoting stored text.
 - OpenBerry never sends anything to LinkedIn or by email itself. OpenBerry drafts, and a human sends, or, when the user
-  turns on AI agent sending for a company, the user's own browser agent sends the LinkedIn messages they approved.
+  turns on AI agent sending for a company, the user's own browser agent sends the approved LinkedIn messages.
   `repo.send_queue`, `repo.confirm_agent_sent` and `repo.report_send_problem` enforce its rules server-side: approved
   LinkedIn messages only, a rolling 24-hour limit, the never-contact list, LinkedIn's connection limits (note length
   for the account, 80 connection requests in 7 days, 5 notes in 30 days on a free account), and a 24-hour pause on
   any reported problem.
   Claude and the JSON API can only turn it off or lower the limit. See [AI_AGENT_SENDING.md](AI_AGENT_SENDING.md).
+- Auto-approve is off for every company until the user turns it on, on the dashboard's Outreach page (CSRF-protected).
+  Claude (`update_company`, `register_company`) and the JSON API can only turn it off or make the review window longer:
+  they can't turn it on, shorten the window or set `auto_approve_since`, and anonymous public registrations are saved with
+  it off. Claude can hold a draft (`update_message` with `auto_hold=true`) but never release a hold. With agent sending
+  also on, the agent may send what auto-approve approved, so every agent rule above still applies to it.

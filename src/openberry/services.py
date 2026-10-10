@@ -1,4 +1,4 @@
-"""Orchestration: run collectors, turn raw signals into scored leads, alert on new hot leads."""
+"""Orchestration: run collectors, turn raw signals into scored leads, alert on new hot leads, auto-approve drafts."""
 
 from __future__ import annotations
 
@@ -132,6 +132,7 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
     repo.set_last_scan(company_id)
     # Every person who is hot and not alerted yet, including leads that turned hot outside a scan.
     alerts = await alert_new_hot_leads(company_id, company)
+    auto_approved = await auto_approve_company(company_id)
 
     stats = {
         "collectors": per_collector,
@@ -141,6 +142,7 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
         "leads_new": ingest_stats.leads_new,
         "leads_updated": ingest_stats.leads_updated,
         **alerts,
+        "auto_approved": auto_approved,
         "errors": ingest_stats.errors[:20],
     }
     status, problem = scan_status(collectors, per_collector)
@@ -227,6 +229,29 @@ async def alert_active_companies() -> dict[int, dict[str, Any]]:
             continue
         if result["newly_hot"]:
             results[company.id] = result
+    return results
+
+
+async def auto_approve_company(company_id: int) -> list[int]:
+    """repo.auto_approve_due for one company: the drafts it approved. A failure is logged, never raised, so it
+    can't fail the scan or the tick that runs it."""
+    try:
+        return (await asyncio.to_thread(repo.auto_approve_due, company_id))["approved"]
+    except Exception:
+        log.exception("auto-approve failed for company %s", company_id)
+        return []
+
+
+async def auto_approve_active_companies() -> dict[int, list[int]]:
+    """Auto-approve due drafts for every active company that turned it on; returns {company_id: approved ids}
+    for the companies where something was approved. One company's error never stops the others."""
+    results = {}
+    for company in repo.list_companies():
+        if company.status != "active" or not company.outreach.auto_approve:
+            continue
+        approved = await auto_approve_company(company.id)
+        if approved:
+            results[company.id] = approved
     return results
 
 

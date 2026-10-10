@@ -36,7 +36,7 @@ from ..outreach import (
     account_label,
     connect_note_limit,
 )
-from .forms import AGENT_LIMIT_RANGE
+from .forms import AGENT_LIMIT_RANGE, AUTO_APPROVE_HOURS_RANGE
 from .icons import ICONS, LOGO
 from .session import csrf_token, is_logged_in, pop_flashes
 
@@ -293,7 +293,7 @@ def _build_env() -> jinja2.Environment:
         select_options=select_options, check_options=check_options, pending_review=pending_review,
         SCAN_STATUS_LABELS=SCAN_STATUS_LABELS,
         DOCS_URL=DOCS_URL, AGENT_DOCS_URL=AGENT_DOCS_URL, ICONS=ICONS, LOGO=LOGO,
-        AGENT_LIMIT_RANGE=AGENT_LIMIT_RANGE,
+        AGENT_LIMIT_RANGE=AGENT_LIMIT_RANGE, AUTO_APPROVE_HOURS_RANGE=AUTO_APPROVE_HOURS_RANGE,
         message_version=repo.message_version, BULK_MESSAGES_MAX=repo.BULK_MESSAGES_MAX,
         SIZE_OPTIONS=[(s, f"{s} employees") for s in COMPANY_SIZES],
         SIZE_CHIPS=[(s, s) for s in COMPANY_SIZES],

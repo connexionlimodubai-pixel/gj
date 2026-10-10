@@ -121,7 +121,9 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     sent_at TEXT,
-    sent_via TEXT NOT NULL DEFAULT ''  -- who recorded the send: '' the user, 'agent' the AI agent, 'claude' Claude
+    sent_via TEXT NOT NULL DEFAULT '',  -- who recorded the send: '' the user, 'agent' the AI agent, 'claude' Claude
+    auto_hold INTEGER NOT NULL DEFAULT 0,  -- 1: the user held this draft, so auto-approve never approves it
+    approved_via TEXT NOT NULL DEFAULT ''  -- 'auto': auto-approve approved it after its review window
 );
 CREATE INDEX IF NOT EXISTS ix_messages_company_status ON messages(company_id, status);
 
@@ -137,7 +139,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 CREATE INDEX IF NOT EXISTS ix_scan_runs_company ON scan_runs(company_id, started_at DESC);
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -153,6 +155,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
         if "sent_via" not in message_columns:  # version 3: AI agent sending counts the agent's sends
             conn.execute("ALTER TABLE messages ADD COLUMN sent_via TEXT NOT NULL DEFAULT ''")
+        if "auto_hold" not in message_columns:  # version 4: auto-approve (drafts the user held stay drafts)
+            conn.execute("ALTER TABLE messages ADD COLUMN auto_hold INTEGER NOT NULL DEFAULT 0")
+        if "approved_via" not in message_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN approved_via TEXT NOT NULL DEFAULT ''")
         # After the column exists (an old database gets it just above): the agent's rolling 24-hour count.
         conn.execute("CREATE INDEX IF NOT EXISTS ix_messages_company_sent ON messages(company_id, sent_via, sent_at)")
         # Older versions left sent_at empty on an outbound message recorded straight away as 'replied' (sent, then

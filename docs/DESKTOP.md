@@ -107,7 +107,7 @@ comes with the app.
    icon next to the clock and choose **Quit**. On a Mac, use **Claude → Quit Claude**.
 5. Ask Claude: *"Use openberry: list my companies."*
 
-To let Claude send the LinkedIn messages you approved from your own Chrome (optional, off by default, at your own
+To let Claude send approved LinkedIn messages from your own Chrome (optional, off by default, at your own
 risk), see [AI agent sending](AI_AGENT_SENDING.md).
 
 The settings look like this. The paths are examples, and your own are in the **Connect Claude** page:

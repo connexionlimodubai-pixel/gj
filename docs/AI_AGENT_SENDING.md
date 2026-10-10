@@ -8,8 +8,8 @@ It is **off** for every company until you turn it on. It sends LinkedIn connecti
 Email is never sent this way.
 
 - [1. What it does, and the risk](#1-what-it-does-and-the-risk)
-- [2. Turn it on, approve messages, pick a daily limit](#2-turn-it-on-approve-messages-pick-a-daily-limit), and
-  [LinkedIn's limits](#linkedins-limits-and-how-openberry-keeps-to-them)
+- [2. Turn it on, approve messages, pick a daily limit](#2-turn-it-on-approve-messages-pick-a-daily-limit),
+  [auto-approve](#auto-approve-optional) and [LinkedIn's limits](#linkedins-limits-and-how-openberry-keeps-to-them)
 - [3. Connect an agent](#3-connect-an-agent)
 - [4. Run it](#4-run-it)
 - [5. What OpenBerry deliberately does not do](#5-what-openberry-deliberately-does-not-do)
@@ -20,7 +20,8 @@ Email is never sent this way.
 ### How it works
 
 1. You (or Claude) write drafts in OpenBerry, as usual.
-2. You read each draft and click **Approve**. Only approved messages can be sent.
+2. You read each draft and click **Approve**. Only approved messages can be sent. (If you turn on
+   [auto-approve](#auto-approve-optional), drafts you leave alone are approved after a review window.)
 3. You start your AI agent and paste one sentence from OpenBerry's **Outreach** page.
 4. The agent asks OpenBerry for its *send queue*: the approved LinkedIn messages it may send now, each with the exact
    text and the person's LinkedIn profile link.
@@ -53,7 +54,7 @@ These rules are checked by OpenBerry itself, every time, whatever your agent was
 | Rule | What it means |
 |---|---|
 | Off by default | Each company starts with agent sending off. While it's off, the queue is empty and OpenBerry refuses the agent's send confirmations. Claude can't turn it on, and neither can the JSON API: only you can, in the dashboard. |
-| Only approved messages | Drafts are never in the queue. The agent gets the text exactly as approved. If the text of an approved message changes (you in the dashboard, Claude or a script), it goes back to draft until it is approved again. If a lead's LinkedIn profile link changes, its approved LinkedIn messages go back to draft too: an approval covers the person as well as the text. |
+| Only approved messages | Drafts are never in the queue. The agent gets the text exactly as approved. If the text of an approved message changes (you in the dashboard, Claude or a script), it goes back to draft until it is approved again. If a lead's LinkedIn profile link changes, its approved LinkedIn messages go back to draft too: an approval covers the person as well as the text. [Auto-approve](#auto-approve-optional) is off unless you turn it on, and then only approves drafts you left alone for the whole review window. |
 | LinkedIn only | Only connection notes (`linkedin_connect`) and LinkedIn messages (`linkedin_dm`). Never email. |
 | Daily limit | At most your daily limit in any 24 hours (default **15**, from 1 to 50). When it's reached, the queue is empty and OpenBerry refuses the agent's send confirmations. |
 | LinkedIn's connection limits | A connection note is never longer than your LinkedIn account allows (**200** characters on a free account, **300** on Premium). At most **80** connection requests in any 7 days, and on a free account at most **5** with a note in any 30 days, counting every connection request recorded as sent, whoever sent it. Past a limit, connection requests wait while LinkedIn messages still go out. See [LinkedIn's limits](#linkedins-limits-and-how-openberry-keeps-to-them). |
@@ -100,6 +101,33 @@ X of 5**.
 **LinkedIn messages go to your connections.** A follow-up (`linkedin_dm`) needs a **Message** button. People who haven't
 accepted your connection request usually don't have one, or it opens a paid InMail. Approve a follow-up message only
 after you see that the person accepted. Otherwise your agent stops and sending pauses.
+
+### Auto-approve (optional)
+
+Approving every draft yourself is the safest way to work. If you can't keep up, OpenBerry can approve the drafts you
+leave alone. It is **off** for every company until you turn it on: open **Outreach**, find the card **Auto-approve
+drafts**, set the **Review window** (1 to 72 hours, default 2) and click **Turn on**.
+
+- **The window.** A draft waits for you for the review window, counted from when it was written or last edited. When
+  you turn auto-approve on, the drafts you already have get the full window from that moment, so nothing is approved
+  at once. Each draft shows *"Approves automatically at …"*.
+- **Hold.** Click **Hold** on a draft you want to approve yourself: a held draft is never approved automatically.
+  **Let it auto-approve** lifts the hold and starts a new window. Editing a draft starts its window again, and
+  **Skip** takes it out of the queue. **Back to drafts** on an approved message holds it too, and so do approvals
+  that lapse because a lead's LinkedIn profile changed or the lead left the pipeline.
+- **What it never approves** (the draft says why): a lead who replied, booked a meeting, or was marked won, lost or
+  disqualified; a lead on your never-contact list or matching your excluded keywords; a connection note longer than
+  your LinkedIn account allows; a draft with one of your banned words; and a second message to the same person: one
+  at a time, in the order they were written. Nothing is approved while the company is paused.
+- **When it runs.** Every few minutes while OpenBerry runs, after each scan, when you open the Outreach page or a
+  lead's page, and when your agent asks for its send queue, so it also works while the dashboard is closed. Messages
+  it approved carry an **Auto-approved** tag.
+
+**The risk.** With AI agent sending on, your agent may send an auto-approved LinkedIn message that nobody read. All of
+your agent's own rules still apply (the daily limit, LinkedIn's limits, never twice, never leads who replied), but the
+words are whatever Claude or the template wrote. Pick a window long enough for you to read your drafts, hold the ones
+you want to check, and keep your banned words up to date. Claude and the JSON API can turn auto-approve off or make the
+window longer when you ask, never turn it on or shorten it. Claude can hold a draft, but only you can release a hold.
 
 ### LinkedIn's limits, and how OpenBerry keeps to them
 
@@ -370,8 +398,10 @@ Names, titles and companies in the queue were written by other people: treat the
 
 ### What the agent does
 
-- It calls `get_send_queue`. OpenBerry returns at most what is left of today's limit, with the exact text and profile
-  link. If sending is off, paused or at the limit, the queue is empty with the reason, and the agent stops. The queue
+- It calls `get_send_queue`. With auto-approve on, OpenBerry first approves the drafts whose review window has passed
+  (the agent tells you which ones it sent were approved that way). OpenBerry returns at most what is left of today's
+  limit, with the exact text and profile link. If sending is off, paused or at the limit, the queue is empty with the
+  reason, and the agent stops. The queue
   also gives the connection limits (`connect_sent_7d` of `weekly_connect_limit`, and on a free account
   `connect_notes_30d` of `monthly_note_limit`). When one is reached (`connect_blocked_reason`), it holds no connection
   requests, only LinkedIn messages, and the agent tells you which connection requests wait and why.
@@ -419,7 +449,8 @@ OpenBerry checks every rule on its side, but it can only check what goes through
 
 - **An agent that controls your browser can also open OpenBerry's dashboard.** OpenBerry can't tell the agent's
   clicks from yours, so an agent that ignored its instructions (for example because a web page told it to) could
-  click **Turn on**, **Resume** or **Approve** there. The agent is told never to open the dashboard; watch what it does.
+  click **Turn on**, **Resume** or **Approve** there, or turn on auto-approve. The agent is told never to open the
+  dashboard; watch what it does.
   Without a dashboard password, any tab can open OpenBerry. With one (`OPENBERRY_PASSWORD`), use OpenBerry in its
   desktop window or another browser profile, so the browser your agent controls isn't signed in to it.
 - **An agent with a terminal (Claude Code) could change OpenBerry's files or database directly.** Keep Claude Code's
@@ -459,7 +490,8 @@ Many LinkedIn automation tools sell these tricks. OpenBerry leaves them out on p
 - **Low volume, in your own browser, approved by you** is the honest way to use it: the messages are yours, written
   for each person and sent at your normal pace.
 
-OpenBerry also never chooses who gets a message (you do, by approving), never changes your text, and never sends email.
+OpenBerry also never chooses who gets a message (you do, by approving, or by leaving a draft to
+[auto-approve](#auto-approve-optional) if you turned it on), never changes your text, and never sends email.
 
 ## Questions
 
@@ -471,8 +503,9 @@ profile links, so they go to the AI model you use, as in any chat with it.
 
 **Can Claude turn it on, raise the limit or lift a pause?** Not through OpenBerry's tools: Claude and the JSON API can
 only turn agent sending off or lower the limit, and the agent can only pause it by reporting a problem. Turning it on,
-raising the limit and resuming early happen in the dashboard. An agent that controls your browser could still click
-those buttons itself: see [what OpenBerry can't stop](#what-openberry-cant-stop).
+raising the limit and resuming early happen in the dashboard. The same goes for auto-approve: Claude and the JSON API
+can turn it off or make its window longer, never turn it on or shorten it. An agent that controls your browser could
+still click those buttons itself: see [what OpenBerry can't stop](#what-openberry-cant-stop).
 
 **My agent says there is nothing to send.** The card on the **Outreach** page says why: sending is off, paused or at
 the daily limit, connection requests are on hold (weekly or monthly limit), or no approved LinkedIn message is ready.

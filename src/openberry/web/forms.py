@@ -15,7 +15,16 @@ from typing import Any
 from pydantic import ValidationError
 from starlette.datastructures import FormData
 
-from ..models import JOB_BOARD_PROVIDERS, CompanyIn, LeadIn, OutreachConfig, SignalConfig, SignalIn, split_list
+from ..models import (
+    JOB_BOARD_PROVIDERS,
+    PROSPECT_TYPES,
+    CompanyIn,
+    LeadIn,
+    OutreachConfig,
+    SignalConfig,
+    SignalIn,
+    split_list,
+)
 
 NESTED = ("icp", "signals", "outreach", "notify")
 
@@ -48,7 +57,8 @@ FIELDS: tuple[Field, ...] = (
     Field("signals.enabled_types", "checks", "signals"),
     *(Field(f"signals.{n}", "list", "signals") for n in (
         "keywords", "subreddits", "github_repos", "job_boards", "hiring_keywords", "news_queries", "rss_feeds",
-        "sec_queries", "influencers", "competitor_pages", "events") if n in SignalConfig.model_fields),
+        "sec_queries", "places_queries", "influencers", "competitor_pages", "events",
+    ) if n in SignalConfig.model_fields),
     Field("signals.lookback_days", "int", "signals"),
     Field("scan_interval_hours", "int", "signals"),
     Field("leads_per_week", "int", "signals"),
@@ -110,7 +120,9 @@ def company_to_values(company: CompanyIn) -> dict[str, Any]:
     for f in FIELDS:
         group, _, key = f.name.rpartition(".")
         value = (dumped[group] if group else dumped).get(key)
-        if f.name == "signals.job_boards":
+        if f.name == "signals.enabled_types":  # prospect types aren't offered: the searches are the opt-in
+            values[f.name] = [t for t in value or [] if t not in PROSPECT_TYPES]
+        elif f.name == "signals.job_boards":
             values[f.name] = "\n".join(f"{b['provider']}:{b['token']}:{b['company']}" for b in value or [])
         elif f.name == "outreach.followup_days":
             values[f.name] = ", ".join(str(d) for d in value or [])

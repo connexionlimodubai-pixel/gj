@@ -1,0 +1,16 @@
+{
+  "places": [
+    {
+      "id": "ChIJPrivateClub0008",
+      "websiteUri": "https://private-club.ae/"
+    },
+    {
+      "id": "ChIJCloudflare00009",
+      "websiteUri": "https://cf-protected.ae/"
+    },
+    {
+      "id": "ChIJJunkFree0000010",
+      "websiteUri": "http://junkfree.ae"
+    }
+  ]
+}

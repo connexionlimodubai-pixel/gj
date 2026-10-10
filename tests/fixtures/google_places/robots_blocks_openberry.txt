@@ -1,0 +1,8 @@
+User-agent: Googlebot
+Allow: /
+
+User-agent: OpenBerry
+Disallow: /
+
+User-agent: *
+Allow: /

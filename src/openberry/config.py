@@ -6,8 +6,10 @@ import json
 import os
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 
@@ -24,22 +26,55 @@ def _dotenv_value(raw: str) -> str:
     return re.split(r"\s#", raw, maxsplit=1)[0].strip().strip('"').strip("'")
 
 
-def _load_dotenv(path: Path) -> None:
-    """Minimal .env loader so we don't need python-dotenv. Existing env vars win."""
-    if not path.is_file():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
+def read_dotenv(path: Path) -> dict[str, str]:
+    """KEY -> value of a .env file ({} when it is missing or unreadable). The first line of a key wins."""
+    try:
+        if not path.is_file():
+            return {}
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    values: dict[str, str] = {}
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), _dotenv_value(value))
+        values.setdefault(key.strip(), _dotenv_value(value))
+    return values
+
+
+# Variables a .env file put into os.environ, and that file (resolved). Anything else in os.environ came from the
+# real environment, which always wins.
+_FROM_FILE: dict[str, Path] = {}
+
+
+def _resolved(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve()
+    except (OSError, RuntimeError):  # a symlink loop, an unreadable folder
+        return path.expanduser().absolute()
+
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env loader so we don't need python-dotenv. Existing env vars win.
+
+    An empty value doesn't count for the settings the dashboard can save (DASHBOARD_SETTINGS): docker compose passes
+    `KEY=` lines of its env_file on as empty variables, which would otherwise hide a key saved in the dashboard.
+    """
+    for key, value in read_dotenv(path).items():
+        current = os.environ.get(key)
+        if current is None or (key in DASHBOARD_SETTINGS and not current.strip() and value.strip()):
+            os.environ[key] = value
+            _FROM_FILE[key] = _resolved(path)
 
 
 # Fixed per-user home so the dashboard and Claude Desktop (which starts `openberry mcp` from an
 # unpredictable working directory) always share the same database and .env file.
 OPENBERRY_HOME = Path(os.environ.get("OPENBERRY_HOME", "~/.openberry")).expanduser()
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+# Google Maps searches a month: Google's free tier is 1,000, so a margin is kept (its month starts in Pacific time).
+DEFAULT_GOOGLE_PLACES_MONTHLY_LIMIT = 900
 # Written by the desktop app (desktop.py) while it runs: {"url": ..., "pid": ..., "version": ...}.
 DESKTOP_STATE_FILE = "desktop.json"
 
@@ -127,6 +162,12 @@ class Settings:
     allow_private_feeds: bool = False
     # Contact e-mail sent in the User-Agent where APIs require one (SEC EDGAR fair-access policy).
     contact_email: str = ""
+    # Optional Google Maps Platform key ("Places API (New)") for the Google Maps businesses source. Saved from the
+    # dashboard's API keys page or set here; never shown back, never sent to Claude.
+    google_places_key: str = field(default="", repr=False)
+    # Most Google Maps searches (Text Search requests, one per page of up to 20 businesses) per calendar month (UTC).
+    # Google's free tier is 1,000 a month; 0 turns the searches off.
+    google_places_monthly_limit: int = DEFAULT_GOOGLE_PLACES_MONTHLY_LIMIT
     user_agent: str = "OpenBerry/0.1 (+https://github.com/connexionlimodubai-pixel/gj)"
     http_timeout: float = 20.0
     # Extra Host names accepted by the HTTP MCP endpoint (without an API token) and, in local
@@ -161,11 +202,15 @@ class Settings:
             reddit_username=os.environ.get("REDDIT_USERNAME", ""),
             allow_private_feeds=_bool("OPENBERRY_ALLOW_PRIVATE_FEEDS", False),
             contact_email=os.environ.get("OPENBERRY_CONTACT_EMAIL", ""),
+            google_places_key=os.environ.get("OPENBERRY_GOOGLE_PLACES_KEY", "").strip(),
+            google_places_monthly_limit=max(0, _int("OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT",
+                                                    DEFAULT_GOOGLE_PLACES_MONTHLY_LIMIT)),
             allowed_hosts=[h.strip() for h in os.environ.get("OPENBERRY_ALLOWED_HOSTS", "").split(",") if h.strip()],
         )
         if not s.secret_key:
             # Sessions won't survive restarts without a fixed key; that's acceptable locally.
             s.secret_key = secrets.token_hex(32)
+        _mark_settings_file_seen()
         return s
 
 
@@ -183,3 +228,122 @@ def set_settings(settings: Settings) -> None:
     """Override settings (used by tests and the CLI)."""
     global _settings
     _settings = settings
+
+
+# --------------------------------------------------------------------------------------
+# Settings the dashboard can save (envfile.save_settings writes them to settings_file())
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DashboardSetting:
+    attr: str                       # Settings attribute
+    default: Any
+    secret: bool                    # never shown back; the dashboard says "ending in 1234" at most
+    parse: Callable[[str], Any]     # raw .env text -> attribute value; ValueError -> default
+
+
+def _limit(raw: str) -> int:
+    return max(0, int(raw.strip()))
+
+
+# Only these names can be written from the dashboard. SMTP/IMAP credentials, for example, would be one entry each.
+DASHBOARD_SETTINGS: dict[str, DashboardSetting] = {
+    "OPENBERRY_GOOGLE_PLACES_KEY": DashboardSetting("google_places_key", "", True, str.strip),
+    "OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT": DashboardSetting(
+        "google_places_monthly_limit", DEFAULT_GOOGLE_PLACES_MONTHLY_LIMIT, False, _limit),
+}
+
+# What settings_file() looked like when this process last read it: (inode, mtime_ns, size), None before the first
+# look. os.replace gives every save a new inode, so two saves within one clock tick still differ.
+_settings_file_seen: tuple[int, int, int] | None = None
+
+
+def settings_file() -> Path:
+    """The .env file the dashboard writes: OPENBERRY_ENV_FILE when set (it is then the only file read),
+    else OPENBERRY_HOME/.env (~/.openberry/.env, the data folder)."""
+    if env_file := os.environ.get("OPENBERRY_ENV_FILE"):
+        return Path(env_file).expanduser()
+    return OPENBERRY_HOME / ".env"
+
+
+def _file_signature(path: Path) -> tuple[int, int, int]:
+    try:
+        st = path.stat()
+    except OSError:
+        return (-1, -1, -1)
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def _mark_settings_file_seen() -> None:
+    global _settings_file_seen
+    _settings_file_seen = _file_signature(settings_file())
+
+
+def setting_source(name: str) -> tuple[str, Path | None]:
+    """Where a setting's value comes from.
+
+    ("environment", None): a real environment variable (it wins, the dashboard can't change it);
+    ("file", path): loaded from (or saved to) that .env file; ("", None): not set, or set to an empty value.
+    """
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return "", None
+    if name in _FROM_FILE:
+        return "file", _FROM_FILE[name]
+    return "environment", None
+
+
+def apply_setting(name: str, value: str | None, path: Path, settings: Settings | None = None) -> None:
+    """Make a value saved to `path` live in this process: os.environ, _FROM_FILE and the cached Settings.
+
+    The Settings object is changed in place, so app.state.settings (the same object) sees it, and every other
+    field (secret_key included: logins survive) stays as it is. None removes it (the attribute goes back to its
+    default).
+    """
+    spec = DASHBOARD_SETTINGS[name]
+    settings = settings or get_settings()
+    if value is None or not value.strip():
+        os.environ.pop(name, None)
+        _FROM_FILE.pop(name, None)
+        setattr(settings, spec.attr, spec.default)
+        return
+    os.environ[name] = value
+    _FROM_FILE[name] = _resolved(path)
+    try:
+        parsed = spec.parse(value)
+    except ValueError:
+        parsed = spec.default
+    setattr(settings, spec.attr, parsed)
+
+
+def refresh_saved_settings(settings: Settings | None = None) -> bool:
+    """Apply dashboard settings another process saved to settings_file() since this process last looked.
+
+    Cheap: one stat() call; the file is parsed only when it changed. Only DASHBOARD_SETTINGS names change, and only
+    when they don't come from the real environment or from another .env file that is read before this one (./.env).
+    Returns True when a value changed. Called at the start of each scan, by the collector overview, the API keys
+    page and the Google Maps usage summary, so the long-running `openberry mcp` that Claude Desktop starts and a
+    second `openberry serve` see a key saved in the dashboard without a restart. get_settings() never does this by
+    itself: a value changing in the middle of a request is not wanted.
+    """
+    global _settings_file_seen
+    path = settings_file()
+    signature = _file_signature(path)
+    if signature == _settings_file_seen:
+        return False
+    _settings_file_seen = signature
+    values = read_dotenv(path)
+    target = _resolved(path)
+    changed = False
+    for name in DASHBOARD_SETTINGS:
+        source, where = setting_source(name)
+        if source == "environment" or (source == "file" and where != target):
+            continue
+        new = values.get(name)
+        new = new if new is not None and new.strip() else None
+        current = os.environ.get(name) if source == "file" else None
+        if new != current:
+            apply_setting(name, new, path, settings)
+            changed = True
+    return changed

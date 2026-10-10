@@ -15,10 +15,11 @@ A Python app stores everything, collects free public signals, scores leads, and 
 │  web/ FastAPI + Jinja dashboard: registration board, leads, signals, outreach, settings       │
 │  mcp_server.py   tools/resources/prompts over the same data                                    │
 │  services.py     run_scan → collectors → ingest → scoring → alerts (+ auto-draft)              │
-│  collectors/     Hacker News, Reddit, GitHub, Greenhouse/Lever/Ashby, News/RSS, SEC EDGAR      │
+│  collectors/     HN, Reddit, GitHub, Greenhouse/Lever/Ashby, News/RSS, SEC EDGAR, Google Maps  │
 │  scoring.py      ICP fit + time-decayed intent + signal stacking + optional Claude score       │
 │  outreach.py     template / Ollama drafting, outreach context for Claude                       │
-│  repo.py + db.py SQLite (WAL) – companies, leads, lead_keys, signals, messages, scan_runs      │
+│  repo.py + db.py SQLite (WAL) – companies, leads, lead_keys, signals, messages, scan_runs,     │
+│                  api_usage, place_searches, place_ids                                          │
 └───────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -30,7 +31,8 @@ A Python app stores everything, collects free public signals, scores leads, and 
   - `icp: ICP`: job_titles, seniorities, industries, company_sizes, locations, keywords,
     exclude_keywords, exclude_companies (never-contact list), company_types (guides Claude only, not scored)
   - `signals: SignalConfig`: enabled_types, keywords, subreddits, github_repos, job_boards,
-    hiring_keywords, news_queries, rss_feeds, sec_queries, influencers, competitor_pages, events, lookback_days, weights
+    hiring_keywords, news_queries, rss_feeds, sec_queries, places_queries (Google Maps searches, one per line),
+    influencers, competitor_pages, events, lookback_days, weights
   - `outreach: OutreachConfig`: sender, tone, language, channels, calendar link, CTA, signature,
     max_followups, followup_days, mode (review | auto_draft), banned_words, extra_instructions, linkedin_account
     (free | premium, default free: the connection-note limits, see `outreach.connect_note_limit`), and AI agent
@@ -45,6 +47,11 @@ A Python app stores everything, collects free public signals, scores leads, and 
 - **Message**: an outbound draft/sent message or an inbound reply (`direction`), with sequence `step`. `sent_via` records who
   marked it sent: `""` the user, `"agent"` the user's AI agent (`confirm_message_sent`), `"claude"` Claude (`update_message`).
   Added in schema version 3.
+- **api_usage**: paid API calls per service and calendar month (UTC), the monthly cap on Google Maps searches.
+- **place_searches**: when each company last read every page of each Google Maps search (a search runs at most once a
+  week). **place_ids**: the Google Place IDs a company already handled (`added = 1`: became a lead, never added again;
+  `added = 0`: skipped, checked again after 30 days). Google's terms allow storing Place IDs and nothing else from Places.
+  The three tables are created with `CREATE TABLE IF NOT EXISTS` (no schema version change).
 - **ScanRun**: one scan with per-collector stats. Status: `running`, `ok`, `failed` (it crashed, or every source failed or
   found nothing and only warned) or `nothing_configured`, with the reason in `stats["error"]`.
   The scheduler retries a failed scan after an hour.
@@ -69,7 +76,14 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   edits are alerted too.
 - `collectors.Collector`: `name`, `label`, `signal_types`, `requires`, `is_configured(company)`,
   `async collect(company, ctx) -> list[RawSignal]`. `RawSignal(signal=SignalIn, lead=LeadIn|None, account=str, account_domain=str, account_location=str)`.
-  Collectors must be polite (cap requests and honour `ctx.max_items`). One bad item never fails the whole collector. Use `ctx.warn()` for soft problems.
+  Collectors must be polite (cap requests and honour `ctx.max_items`). One bad item never fails the whole collector. Use `ctx.warn()` for soft problems,
+  and `ctx.count(name)` for what happened (stored as `stats.collectors.<name>.counts`). `Collector.timeout_seconds` overrides the shared
+  120-second limit, and `Collector.usage()` reports paid-API usage for the dashboard and `get_company_profile`.
+- `repo.reserve_api_call(service, limit)` counts one paid call before it is made, unless the month's limit is reached; it runs under
+  `BEGIN IMMEDIATE`, so processes never go over the limit together.
+- `config.refresh_saved_settings()` applies settings another process saved to the data folder's `.env` (one `stat()` when nothing
+  changed); scans, the collector overview and the API keys page call it, so no restart is needed. `envfile.save_settings()` writes
+  them, for the names in `config.DASHBOARD_SETTINGS` only (the dashboard's API keys page).
 - `web.app.create_app(settings=None) -> FastAPI`. It mounts the MCP Streamable HTTP endpoint at `/mcp` via `mcp_server.mount_http(app)` when enabled.
 - `mcp_server.build_server() -> MCPServer` (mcp Python SDK 2.x, `from mcp.server.mcpserver import MCPServer`).
 
@@ -89,6 +103,10 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   operator activates them. Anonymous registrations and website auto-fills are limited to 5 a minute per address and 30 a minute
   in total (429 with Retry-After). The registration form refuses a company name that is already registered.
 - Request bodies are capped at 8 MB.
+- API keys page: logged-in dashboard users only (local mode: this machine). Keys go to the data folder's `.env` with mode 0600,
+  are never shown back (the last 4 characters at most) and are never readable or settable through `/api` or MCP. A setting in
+  the real environment, or in a `.env` file read first, wins and is shown read-only. Business websites found on Google Maps
+  are fetched like RSS feeds: public addresses only, size and time caps, plus robots.txt.
 - Outbound requests to user-supplied URLs (website auto-fill, RSS feeds, alert webhooks) only go to public IP addresses
   (`netguard.py`). The host is looked up once and the connection goes to the checked address, so DNS rebinding can't redirect
   it. These requests don't use the environment's HTTP(S) proxy, so a server that only reaches the internet through a proxy

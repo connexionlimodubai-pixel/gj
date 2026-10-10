@@ -211,6 +211,7 @@
               {% elif s.configured %}<span class="pill pill-off">Signal types off</span>
               {% else %}<span class="pill pill-off">Needs setup</span>{% endif %}</p>
             {% if not s.enabled %}<p class="small muted">Needs {{ s.requires }}. <a href="{{ s.setup_url or base ~ '/settings#step-signals' }}">Set up</a></p>{% endif %}
+            {% if s.usage and (s.enabled or s.usage.api_key_set) %}<p class="small muted source-usage">{{ s.usage.searches_used_this_month|compact }} of {{ s.usage.monthly_limit|compact }} searches used this month</p>{% endif %}
           </div>
         </li>
         {% endfor %}

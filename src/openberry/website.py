@@ -123,12 +123,12 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
             resp.raise_for_status()
             if "html" not in resp.headers.get("content-type", "html"):
                 raise UnsafeURL("URL did not return an HTML page")
-            body = await _read_capped(resp, MAX_BYTES)
+            body = await read_capped(resp, MAX_BYTES)
             return parse_page(body.decode(resp.encoding or "utf-8", errors="replace"), str(resp.url))
     raise UnsafeURL("too many redirects")
 
 
-async def _read_capped(resp: httpx.Response, limit: int) -> bytes:
+async def read_capped(resp: httpx.Response, limit: int) -> bytes:
     """The first `limit` bytes of the body; the rest is never downloaded."""
     chunks: list[bytes] = []
     size = 0
@@ -138,6 +138,9 @@ async def _read_capped(resp: httpx.Response, limit: int) -> bytes:
         if size >= limit:
             break
     return b"".join(chunks)[:limit]
+
+
+_read_capped = read_capped  # the old name
 
 
 def suggest_profile(summary: dict[str, Any]) -> dict[str, str]:

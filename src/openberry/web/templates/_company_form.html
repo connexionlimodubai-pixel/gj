@@ -105,6 +105,16 @@
     {% if "signals.sec_queries" in values %}
     {{ m.listarea("signals.sec_queries", "SEC EDGAR queries", help="US companies: new Form D funding filings and 8-K executive changes.") }}
     {% endif %}
+    {% if not public_mode %}
+    {% set places = places_usage() %}
+    <div class="places-field">
+      {{ m.textarea("signals.places_queries", "Google Maps searches", rows=3, help="One search per line, as you'd type it in Google Maps. Each business found becomes an account lead with the email and phone from its own website.", placeholder="event management companies in Dubai\nlaw firms in DIFC\nhotels in Business Bay") }}
+      <p class="help places-usage" id="places-usage">{{ m.icon("pin", 13) }}
+        {% if places.api_key_set %}{{ places.searches_used_this_month|compact }} of {{ places.monthly_limit|compact }} Google Maps searches used this month. <a href="/keys#google-maps">API keys</a>
+        {% else %}Add your Google Maps API key on the <a href="/keys#google-maps">API keys</a> page to run these searches.{% endif %}
+      </p>
+    </div>
+    {% endif %}
     {{ m.listarea("signals.influencers", "LinkedIn influencers", help="Profile URLs. Claude checks who engages with their posts.") }}
     {{ m.listarea("signals.competitor_pages", "Competitor LinkedIn pages", help="Claude checks who engages with them.") }}
     {{ m.listarea("signals.events", "Events & webinars", help="Attendees are good leads.") }}

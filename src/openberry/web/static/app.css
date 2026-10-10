@@ -608,6 +608,26 @@ a.lead-name:hover { color: var(--accent-text); }
 .field > label.check-card { padding: var(--s3) var(--s4) var(--s3) 40px; font-weight: 400; font-size: 14px; }
 .check-card input { accent-color: var(--accent); }
 
+/* API keys page and Google Maps usage lines */
+.keys-card { display: grid; gap: var(--s4); max-width: 960px; scroll-margin-top: var(--s5); }
+.keys-head { display: flex; align-items: flex-start; gap: var(--s3); }
+.keys-head h2 { gap: var(--s2); }
+.keys-icon { flex: none; width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-text); }
+.keys-intro { color: var(--text-2); margin-top: 2px; }
+.keys-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s5); align-items: start; }
+.keys-block { display: grid; gap: var(--s3); align-content: start; min-width: 0; }
+.key-status .icon { color: var(--good); vertical-align: -2px; }
+.keys-remove { justify-self: start; }
+.keys-meter { display: block; height: 8px; }
+.keys-meter.is-full .meter-fill { background: var(--warning); }
+.usage-line strong { font-variant-numeric: tabular-nums; }
+.keys-howto .steps-list { list-style: decimal; padding-left: 20px; display: grid; gap: 4px; color: var(--text-2); }
+.keys-terms { display: flex; gap: 6px; align-items: flex-start; }
+.keys-terms .icon { flex: none; margin-top: 2px; }
+.places-field { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.places-usage .icon { vertical-align: -2px; }
+.break { overflow-wrap: anywhere; }
+
 /* ------------------------------------------------------------------ registration board */
 .company-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--s4); }
 .company-card { display: flex; flex-direction: column; gap: var(--s4); }
@@ -787,7 +807,7 @@ a.lead-name:hover { color: var(--accent-text); }
   .feed-item { flex-wrap: wrap; }
   .feed-lead-col { width: 100%; padding-left: 38px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; }
   .outreach-tools { grid-template-columns: 1fr; }
-  .agent-grid, .agent-fields { grid-template-columns: 1fr; }
+  .agent-grid, .agent-fields, .keys-grid { grid-template-columns: 1fr; }
   .agent-pause { grid-template-columns: auto minmax(0, 1fr); }
   .agent-pause form { grid-column: 1 / -1; }
   .agent-pause .btn { width: 100%; }

@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from . import repo
+from . import config, repo
 from .collectors import CollectContext, RawSignal, get_collectors
 from .config import get_settings
 from .db import connect
@@ -88,6 +88,7 @@ async def run_scan(company_id: int, *, trigger: str = "manual", sources: list[st
     Returns a stats dict (also stored on the scan run) with per-collector counts and errors.
     Raises ScanInProgress while another scan of the company runs (in any process).
     """
+    config.refresh_saved_settings()  # a key saved in the dashboard by another process counts at once
     company = repo.get_company(company_id)
     collectors = [c for c in get_collectors(sources) if c.enabled_for(company)]
     run_id = repo.start_scan_run(company_id, trigger)
@@ -114,14 +115,17 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
     try:
         async def run_one(collector) -> None:
             ctx = CollectContext(client=client, since=since, settings=settings)
+            timeout = getattr(collector, "timeout_seconds", None) or COLLECTOR_TIMEOUT_SECONDS
             try:
-                raw = await asyncio.wait_for(collector.collect(company, ctx), COLLECTOR_TIMEOUT_SECONDS)
+                raw = await asyncio.wait_for(collector.collect(company, ctx), timeout)
                 all_raw.extend(raw)
-                per_collector[collector.name] = {"found": len(raw), "warnings": ctx.warnings}
+                per_collector[collector.name] = {"found": len(raw), "warnings": ctx.warnings,
+                                                 **({"counts": dict(ctx.counts)} if ctx.counts else {})}
             except Exception as exc:
                 log.warning("collector %s failed: %s", collector.name, exc)
                 per_collector[collector.name] = {"found": 0, "error": f"{type(exc).__name__}: {exc}",
-                                                 "warnings": ctx.warnings}
+                                                 "warnings": ctx.warnings,
+                                                 **({"counts": dict(ctx.counts)} if ctx.counts else {})}
 
         await asyncio.gather(*(run_one(c) for c in collectors))
     finally:
@@ -153,7 +157,7 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
 
 
 NOTHING_CONFIGURED = ("No signal source is configured for this company: add keywords, subreddits, GitHub repos, "
-                      "job boards, news queries or RSS feeds to its profile.")
+                      "job boards, news queries, RSS feeds or Google Maps searches to its profile.")
 NOTHING_WORKED = ("No source returned anything and every one failed or reported problems (see the warnings): "
                   "check the network, proxy or API limits.")
 
@@ -244,9 +248,11 @@ async def scan_due_companies(trigger: str = "schedule") -> list[dict[str, Any]]:
 
 
 def collector_overview(company: Company) -> list[dict[str, Any]]:
-    """Which sources will run for this company and what each one still needs."""
-    return [
-        {
+    """Which sources will run for this company and what each one still needs (and paid-API usage, if any)."""
+    config.refresh_saved_settings()
+    rows = []
+    for c in get_collectors():
+        row: dict[str, Any] = {
             "name": c.name,
             "label": c.label,
             "signal_types": list(c.signal_types),
@@ -254,5 +260,7 @@ def collector_overview(company: Company) -> list[dict[str, Any]]:
             "configured": c.is_configured(company),
             "enabled": c.enabled_for(company),
         }
-        for c in get_collectors()
-    ]
+        if (usage := c.usage() if hasattr(c, "usage") else None) is not None:
+            row["usage"] = usage
+        rows.append(row)
+    return rows

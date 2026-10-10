@@ -135,6 +135,38 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     stats TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS ix_scan_runs_company ON scan_runs(company_id, started_at DESC);
+
+-- Paid API calls, per service and calendar month (UTC): the monthly cap on Google Maps searches. One row per
+-- month; repo.reserve_api_call adds to it under BEGIN IMMEDIATE so processes never go over the cap together.
+CREATE TABLE IF NOT EXISTS api_usage (
+    service TEXT NOT NULL,              -- e.g. 'google_places_search'
+    month TEXT NOT NULL,                -- 'YYYY-MM', UTC
+    used INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (service, month)
+);
+
+-- Google Maps searches (signals.places_queries): when each company last read every page of each search, so a
+-- search runs at most once a week. Only the search text and our own counts: nothing from Google.
+CREATE TABLE IF NOT EXISTS place_searches (
+    company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    query_key TEXT NOT NULL,            -- the search, casefolded, single spaces
+    searched_at TEXT NOT NULL,
+    found INTEGER NOT NULL DEFAULT 0,   -- businesses Google listed
+    added INTEGER NOT NULL DEFAULT 0,   -- leads they gave
+    PRIMARY KEY (company_id, query_key)
+);
+
+-- Google Place IDs a company already handled. Google allows storing Place IDs indefinitely and nothing else
+-- from Places. added = 1: it became a lead and is never added again, even after that lead is deleted;
+-- added = 0: skipped (no usable website, robots.txt, excluded), checked again 30 days after checked_at.
+CREATE TABLE IF NOT EXISTS place_ids (
+    company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    place_id TEXT NOT NULL,
+    added INTEGER NOT NULL DEFAULT 0,
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (company_id, place_id)
+);
 """
 
 SCHEMA_VERSION = 3

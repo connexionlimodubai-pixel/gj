@@ -187,6 +187,7 @@ def kpi_tiles(company_id: int, stats: dict[str, Any]) -> list[dict[str, Any]]:
 FIELD_LABELS = {
     "job_boards": "job boards of target accounts", "rss_feeds": "RSS / Atom feeds", "sec_queries": "SEC EDGAR queries",
     "news_queries": "news queries", "hiring_keywords": "hiring keywords", "github_repos": "GitHub repositories",
+    "places_queries": "Google Maps searches",
 }
 _FIELD_KEY = re.compile(r"\b(" + "|".join(FIELD_LABELS) + r")\b")
 
@@ -198,6 +199,8 @@ def sources_panel(company: Company) -> list[dict[str, Any]]:
         row["requires"] = _FIELD_KEY.sub(lambda m: FIELD_LABELS[m.group(1)], row["requires"])
         if row["name"] == "reddit" and not (settings.reddit_client_id and settings.reddit_client_secret):
             row["setup_url"] = "/help#server-sources"  # needs the server admin's API app, not a profile field
+        if row["name"] == "google_places" and company.signals.places_queries and not settings.google_places_key:
+            row["setup_url"] = "/keys#google-maps"  # the searches are set; the key is missing
     s = company.signals
     claude_inputs = bool(s.influencers or s.competitor_pages or s.events)
     rows.append({
@@ -346,6 +349,7 @@ def help_page(request: Request) -> Response:
         "desktop_config": json.dumps(desktop, indent=2, ensure_ascii=False),
         "page_url": page_url, "base_url_differs": page_url != settings.base_url.rstrip("/"),
         "reddit_ready": bool(settings.reddit_client_id and settings.reddit_client_secret),
+        "google_maps_ready": bool(settings.google_places_key),
         "packaged": packaged, "install_warning": unstable_location(launch["command"]) if packaged else "",
     })
 
@@ -382,12 +386,13 @@ def as_pending_review(data: CompanyIn) -> CompanyIn:
     """An anonymous registration waits, paused, until the operator reviews and activates it.
 
     The scheduler skips paused companies, and the outbound URLs a visitor could choose (RSS feeds,
-    alert webhooks) are dropped: the operator adds them while reviewing the profile. The public
-    form doesn't show those fields.
+    alert webhooks) are dropped: the operator adds them while reviewing the profile. Google Maps searches
+    are dropped too: a visitor must not spend the operator's Google quota. The public form doesn't show
+    those fields.
     """
     return data.model_copy(update={
         "status": "paused",
-        "signals": data.signals.model_copy(update={"rss_feeds": []}),
+        "signals": data.signals.model_copy(update={"rss_feeds": [], "places_queries": []}),
         "notify": data.notify.model_copy(update={"slack_webhook_url": "", "discord_webhook_url": ""}),
         # Only the operator turns on AI agent sending (the public form doesn't show it).
         "outreach": data.outreach.model_copy(update={

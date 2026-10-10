@@ -24,12 +24,17 @@ SIGNAL_TYPES: dict[str, tuple[str, int]] = {
     "profile_visit": ("Visited your profile or website", 35),
     "event": ("Attending a relevant event", 15),
     "company_news": ("Company in the news", 15),
+    # Not intent: the business matched a search the user set up (a prospect list). Scored mostly on ICP fit.
+    "business_search": ("Matches a business search you set up", 10),
     "custom": ("Other signal", 15),
 }
+# Signal types that only say where a lead was found. They are not offered under "Signal types to track"
+# (the searches themselves are the opt-in) and never count toward signal stacking.
+PROSPECT_TYPES = ("business_search",)
 
 SIGNAL_SOURCES = (
     "hackernews", "reddit", "github", "greenhouse", "lever", "ashby",
-    "google_news", "rss", "sec_edgar", "linkedin", "web", "manual", "claude", "csv", "demo",
+    "google_news", "rss", "sec_edgar", "google_places", "linkedin", "web", "manual", "claude", "csv", "demo",
 )
 
 SENIORITIES: dict[str, str] = {
@@ -66,6 +71,9 @@ AGENT_CHANNELS = ("linkedin_connect", "linkedin_dm")
 # "claude" = Claude marked it sent with update_message (counts toward the agent's daily limit too).
 SENT_VIA = ("", "agent", "claude")
 AGENT_PAUSE_REASON_MAX = 500
+# Google Maps searches (SignalConfig.places_queries) a profile may hold, and their length.
+MAX_PLACES_QUERIES = 30
+MAX_PLACES_QUERY_CHARS = 200
 
 
 # --------------------------------------------------------------------------------------
@@ -95,6 +103,34 @@ def split_list(value: Any) -> list[str]:
 
 
 StrList = Annotated[list[str], BeforeValidator(split_list)]
+
+
+def split_lines(value: Any) -> list[str]:
+    """Like split_list, but only line breaks separate items: a search may contain commas ("law firms in DIFC, Dubai").
+
+    Whitespace inside an item collapses to single spaces; duplicates (case-insensitive) and blanks are dropped.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts: list[Any] = re.split(r"\r\n|\r|\n", value)
+    elif isinstance(value, (list, tuple)):
+        parts = []
+        for item in value:
+            parts.extend(split_lines(item) if isinstance(item, str) else [item])
+    else:
+        parts = [value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = " ".join(str(part).split())
+        if text and text.casefold() not in seen:
+            seen.add(text.casefold())
+            out.append(text)
+    return out
+
+
+LineList = Annotated[list[str], BeforeValidator(split_lines)]
 
 
 def _blank_to_none(value: Any) -> Any:
@@ -157,7 +193,8 @@ def parse_job_boards(value: Any) -> list[dict[str, str]] | Any:
 class SignalConfig(_Model):
     """What to watch. Each list feeds one or more collectors."""
 
-    enabled_types: StrList = Field(default_factory=lambda: list(SIGNAL_TYPES), description="Signal types to track")
+    enabled_types: StrList = Field(default_factory=lambda: [t for t in SIGNAL_TYPES if t not in PROSPECT_TYPES],
+                                   description="Signal types to track")
     keywords: StrList = Field(default_factory=list, description="Topics to monitor on HN/Reddit/news, e.g. 'corporate chauffeur'")
     subreddits: StrList = Field(default_factory=list, description="Subreddits to watch (without r/)")
     github_repos: StrList = Field(default_factory=list, description="owner/repo of competitor or related repos: issue authors and forkers become leads (stargazers only for repos you admin, with GITHUB_TOKEN)")
@@ -166,6 +203,11 @@ class SignalConfig(_Model):
     news_queries: StrList = Field(default_factory=list, description="Google News queries, e.g. 'raises Series A fintech'")
     rss_feeds: StrList = Field(default_factory=list, description="Any RSS/Atom feed URLs to scan for keywords")
     sec_queries: StrList = Field(default_factory=list, description="SEC EDGAR full-text queries (US companies). Form D funding filings match names, places, people and industry labels (e.g. 'Other Technology', 'Texas'); 8-K executive changes match topical phrases (e.g. 'logistics software')")
+    places_queries: LineList = Field(default_factory=list, description=(
+        "Google Maps searches, one per line, as typed in Google Maps, e.g. 'event management companies in Dubai'. "
+        "Each business found becomes an account lead with the email and phone its own website lists. Needs a "
+        f"Google Maps API key, which the user adds in the dashboard. At most {MAX_PLACES_QUERIES}, each under "
+        f"{MAX_PLACES_QUERY_CHARS} characters"))
     influencers: StrList = Field(default_factory=list, description="LinkedIn profile URLs whose post engagers Claude should check")
     competitor_pages: StrList = Field(default_factory=list, description="Competitor LinkedIn/company pages whose engagers Claude should check")
     events: StrList = Field(default_factory=list, description="Events/webinars whose attendees are good leads")
@@ -186,6 +228,15 @@ class SignalConfig(_Model):
             if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
                 out.append(repo)
         return out
+
+    @field_validator("places_queries")
+    @classmethod
+    def _check_places_queries(cls, v: list[str]) -> list[str]:
+        if len(v) > MAX_PLACES_QUERIES:
+            raise ValueError(f"At most {MAX_PLACES_QUERIES} Google Maps searches")
+        if any(len(q) > MAX_PLACES_QUERY_CHARS for q in v):
+            raise ValueError(f"Keep each Google Maps search under {MAX_PLACES_QUERY_CHARS} characters")
+        return v
 
     @field_validator("weights")
     @classmethod

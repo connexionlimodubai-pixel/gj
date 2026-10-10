@@ -9,14 +9,16 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 import pytest
 
-from openberry import repo, services
-from openberry.collectors import ALL, news, sec_edgar
+from openberry import envfile, repo, services
+from openberry.collectors import ALL, google_places, news, sec_edgar
+from openberry.models import LeadIn
+from places_fakes import ACME, DESERT, GOOGLE_KEY, QUERY, FakeGoogle, FakeSites, go_offline
 
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
 HERE = Path(__file__).parent
@@ -51,6 +53,7 @@ class Router:
             "news.google.com": (web := NEWS.FakeWeb()),
             "techcrunch.com": web,
             "efts.sec.gov": SEC.FakeEdgar(),
+            "places.googleapis.com": FakeGoogle(),
         }
         self.hosts: list[str] = []
 
@@ -66,6 +69,8 @@ def scan_ready(company, settings, monkeypatch):
     monkeypatch.setattr(repo, "utcnow", lambda: NOW)
     monkeypatch.setattr(news, "_utcnow", lambda: NOW)
     monkeypatch.setattr(sec_edgar, "_utcnow", lambda: NOW)
+    monkeypatch.setattr(google_places, "_utcnow", lambda: NOW)
+    go_offline(monkeypatch, FakeSites())  # business websites found on Google Maps
 
     async def public(_url: str) -> None:
         return None
@@ -78,11 +83,13 @@ def scan_ready(company, settings, monkeypatch):
     monkeypatch.setattr(settings, "reddit_client_id", "id")
     monkeypatch.setattr(settings, "reddit_client_secret", "secret")
     monkeypatch.setattr(settings, "contact_email", "ops@acme.example")
+    monkeypatch.setattr(settings, "google_places_key", GOOGLE_KEY)
     return repo.update_company(company.id, {
         "signals": {
             "rss_feeds": [NEWS.TC_FEED],
             "news_queries": [NEWS.DUBAI, NEWS.SERIES_A],
             "sec_queries": ["logistics software"],
+            "places_queries": [QUERY],
             "lookback_days": 14,
         },
         "notify": {"slack_webhook_url": "", "min_score": 0},
@@ -103,7 +110,9 @@ async def test_one_scan_runs_every_source_and_scores_leads(scan_ready):
     found = {name: result["found"] for name, result in stats["collectors"].items()}
     assert all(n > 0 for n in found.values()), found
     assert set(router.hosts) >= {"hn.algolia.com", "oauth.reddit.com", "api.github.com", "boards-api.greenhouse.io",
-                                 "api.lever.co", "news.google.com", "techcrunch.com", "efts.sec.gov"}
+                                 "api.lever.co", "news.google.com", "techcrunch.com", "efts.sec.gov",
+                                 "places.googleapis.com"}
+    assert stats["collectors"]["google_places"]["counts"]["added"] == 6
 
     assert stats["signals_new"] == sum(found.values()) - stats["signals_duplicate"]
     leads, total = repo.list_leads(company.id, limit=500)
@@ -113,7 +122,7 @@ async def test_one_scan_runs_every_source_and_scores_leads(scan_ready):
     assert people and accounts
     assert all(lead.score_reasons for lead in leads)
     assert {s["source"] for s in repo.company_stats(company.id, now=NOW)["signals_by_source"]} >= {
-        "hackernews", "reddit", "github", "greenhouse", "lever", "google_news", "rss", "sec_edgar"}
+        "hackernews", "reddit", "github", "greenhouse", "lever", "google_news", "rss", "sec_edgar", "google_places"}
 
     # New hot leads get a first-touch draft in auto_draft mode; nothing is ever marked sent.
     drafts = repo.list_messages(company.id)
@@ -125,3 +134,73 @@ async def test_one_scan_runs_every_source_and_scores_leads(scan_ready):
         again = await services.run_scan(company.id, client=client)
     assert again["signals_new"] == 0 and again["leads_new"] == 0
     assert repo.list_leads(company.id, limit=500)[1] == total
+
+
+# --------------------------------------------------------------------------------------
+# Google Maps businesses: merging with what other sources found
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def maps_ready(company, settings, monkeypatch):
+    """The conftest company with only Google Maps searches, a key, and a clock the test can move."""
+    clock = {"now": NOW}
+    monkeypatch.setattr(repo, "utcnow", lambda: clock["now"])
+    monkeypatch.setattr(google_places, "_utcnow", lambda: clock["now"])
+    go_offline(monkeypatch, FakeSites())
+    monkeypatch.setattr(settings, "google_places_key", GOOGLE_KEY)
+    company = repo.update_company(company.id, {"signals": {"places_queries": [QUERY]}})
+    return company, clock
+
+
+async def scan_maps(company_id: int) -> dict:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(FakeGoogle())) as client:
+        return await services.run_scan(company_id, sources=["google_places"], client=client)
+
+
+def lead_named(company_id: int, name: str):
+    return next(lead for lead in repo.list_leads(company_id, limit=500)[0] if lead.lead_company == name)
+
+
+async def test_google_maps_businesses_merge_with_existing_leads(maps_ready):
+    company, clock = maps_ready
+    hiring, _ = repo.upsert_lead(company.id, LeadIn(lead_company="Acme Events", source="greenhouse"))
+    by_domain, _ = repo.upsert_lead(company.id, LeadIn(company_domain="desertdmc.com", source="csv"))
+    person, _ = repo.upsert_lead(company.id, LeadIn(full_name="Sara Ahmed", title="Events Director",
+                                                    lead_company="Acme Events"))
+
+    stats = await scan_maps(company.id)
+
+    assert stats["status"] == "ok" and stats["leads_new"] == 4 and stats["leads_updated"] == 2
+    assert stats["collectors"]["google_places"]["counts"]["added"] == 6
+    acme = repo.get_lead(hiring.id)
+    assert (acme.company_domain, acme.email, acme.phone, acme.website, acme.source) == (
+        "acme-events.ae", "info@acme-events.ae", "+97145550101", "https://www.acme-events.ae/", "greenhouse")
+    assert acme.profile_url == repo.maps_place_url(ACME)
+    desert = repo.get_lead(by_domain.id)
+    assert desert.lead_company == "Desert DMC" and desert.email == "info@desertdmc.com"
+    # The person at Acme Events inherits a little of the account's (small) intent.
+    sara = repo.get_lead(person.id)
+    assert any("Matches a business search you set up (company)" in r for r in sara.score_reasons)
+    new = lead_named(company.id, "Gulf Law Partners")
+    assert new.kind == "account" and new.location == "Dubai" and new.tier != "hot"
+
+    # A week later the search runs again: the same businesses give no new leads or signals.
+    clock["now"] = NOW + timedelta(days=8)
+    total = repo.list_leads(company.id, limit=500)[1]
+    again = await scan_maps(company.id)
+    assert again["status"] == "ok" and again["leads_new"] == 0 and again["signals_new"] == 0
+    assert again["collectors"]["google_places"]["counts"]["already_handled"] == 10  # every business, no visit
+    assert repo.list_leads(company.id, limit=500)[1] == total
+
+
+async def test_a_key_saved_from_the_dashboard_works_without_a_restart(maps_ready, settings, monkeypatch):
+    company, _ = maps_ready
+    monkeypatch.setattr(settings, "google_places_key", "")
+    assert (await scan_maps(company.id))["status"] == "nothing_configured"
+    monkeypatch.setenv("OPENBERRY_GOOGLE_PLACES_KEY", "")
+    monkeypatch.delenv("OPENBERRY_GOOGLE_PLACES_KEY")  # removed again after the test
+    envfile.save_settings({"OPENBERRY_GOOGLE_PLACES_KEY": GOOGLE_KEY})
+    stats = await scan_maps(company.id)
+    assert stats["status"] == "ok" and stats["leads_new"] == 6
+    assert DESERT in {s.external_id.removeprefix("gp:") for s in repo.list_signals(company.id)[0]}

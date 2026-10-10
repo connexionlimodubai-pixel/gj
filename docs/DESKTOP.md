@@ -149,7 +149,7 @@ Inside the folder:
 
 - **`openberry.db`** holds all your companies, leads, signals and messages. To back up, copy this file while
   OpenBerry is closed.
-- **`.env`** holds your settings, if you have any (see below).
+- **`.env`** holds your settings and keys, if you have any (see below).
 - **`logs/desktop.log`** records what the app did. Look here, or send it along, when something goes wrong.
 - **`webview/`** and **`desktop-secret-key`** keep you logged in to the window between runs.
 
@@ -163,6 +163,9 @@ GITHUB_TOKEN=ghp_your_token
 
 Then close OpenBerry and open it again. The [README](../README.md#configuration) and
 [`.env.example`](../.env.example) list every setting.
+
+Some settings can be entered in the app: open **API keys** in the menu to add your Google Maps key. It is saved in the
+same `.env` file, which only your user account can read, and you don't need to restart.
 
 ## Updating
 

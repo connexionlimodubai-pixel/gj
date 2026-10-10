@@ -11,7 +11,7 @@ This page lists the GitHub projects we checked (October 2026), what each one add
 
 | Need | Project | Licence | Why |
 |---|---|---|---|
-| **Claude ↔ your leads** | **OpenBerry** (this repo) | MIT | Registration board, signals, scoring, outreach drafts, 24 MCP tools |
+| **Claude ↔ your leads** | **OpenBerry** (this repo) | MIT | Registration board, signals, scoring, outreach drafts, 25 MCP tools |
 | Read web pages | [modelcontextprotocol/servers — fetch](https://github.com/modelcontextprotocol/servers/tree/main/src/fetch) | MIT | Zero-setup URL → markdown for company research |
 | Browse like a human (JS sites, careers pages) | [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp) | Apache-2.0 | Persistent browser profile, works with logged-in sites |
 | Web search without paid APIs | [searxng/searxng](https://github.com/searxng/searxng) + [ihor-sokoliuk/mcp-searxng](https://github.com/ihor-sokoliuk/mcp-searxng) | AGPL-3.0 / MIT | Self-hosted metasearch; `site:linkedin.com/in` queries |

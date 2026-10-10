@@ -150,7 +150,7 @@
   {{ m.radios("outreach.mode", "Drafting mode", [
       ("review", "Review", "You draft on demand from a lead's page or by asking Claude."),
       ("auto_draft", "Auto-draft", "A first-touch draft is created for every person lead that turns hot (in a scan, through Claude, the API, an import or an edit)."),
-    ], help="Nothing is sent until it is approved" ~ ("." if public_mode else ", by you or, if you turn it on, by auto-approve (Outreach page). You send approved messages yourself, or let your own AI agent send approved LinkedIn messages (below).")) }}
+    ], help="Nothing is sent until it is approved" ~ ("." if public_mode else ", by you or, if you turn it on, by auto-approve (Outreach page). You send approved messages yourself, let your own AI agent send approved LinkedIn messages (below), or let OpenBerry email approved emails from your mailbox (Outreach page).")) }}
   <div class="grid-2">
     {{ m.textarea("outreach.signature", "Signature", rows=2) }}
     {{ m.listarea("outreach.banned_words", "Banned words", help="Words and phrases messages must never use.", rows=2) }}
@@ -165,6 +165,10 @@
     {{ m.input("outreach.agent_daily_limit", "Agent daily limit", type="number", help="Most messages in any 24 hours (" ~ agent_low ~ "–" ~ agent_high ~ "). Keep it low.", attrs={"min": agent_low, "max": agent_high, "inputmode": "numeric"}) }}
   </div>
   <p class="callout callout-warning">{{ m.icon("alert", 14) }}<span><strong>At your own risk.</strong> LinkedIn's rules forbid automation, and even an agent in your own browser can get your account restricted. Only approved messages are sent. If LinkedIn complains, your agent stops and OpenBerry pauses sending for 24 hours. <a href="{{ AGENT_DOCS_URL }}" target="_blank" rel="noopener noreferrer">How it works</a></span></p>
+  {% if company is defined and company and company.id %}
+  <h3 class="sub-head" id="email-sending">Email sending (your mailbox)</h3>
+  <p class="help email-profile-line">{{ m.icon("mail", 14) }} Email sending: {% if company.outreach.email_sending %}<strong>On</strong>, at most {{ company.outreach.email_daily_limit }} a day{% else %}<strong>Off</strong>{% endif %}. Change it on the <a href="/c/{{ company.id }}/outreach#email">Outreach page</a>.</p>
+  {% endif %}
   {% endif %}
   <h3 class="sub-head">Hot-lead alerts</h3>
   {% if public_mode %}

@@ -1,9 +1,10 @@
 """Save settings from the dashboard into the data folder's .env file (the one config.py reads).
 
-Only names in config.DASHBOARD_SETTINGS can be written, and only from the dashboard (the JSON API and the MCP
-server never read or set them). The file is replaced atomically and is readable by this user only (0600 where
-the OS supports it; on Windows the user profile folder is private already). Every other line and comment of the
-file is kept as it was. Secrets are never shown again: setting_state() gives "ending in 1234" at most.
+Only names in config.DASHBOARD_SETTINGS can be written (the API keys page and the Mailbox page), and only from the
+dashboard (the JSON API and the MCP server never read or set them). The file is replaced atomically and is readable
+by this user only (0600 where the OS supports it; on Windows the user profile folder is private already). Every other
+line and comment of the file is kept as it was. Secrets are never shown again: setting_state() gives "ending in 1234"
+at most, and the Mailbox page doesn't show even that for its passwords.
 
 Two dashboards saving at the same moment: the last write wins for the whole file. Only the dashboard writes it.
 """
@@ -71,11 +72,17 @@ def _check(name: str, value: str | None) -> str | None:
         raise SettingNotSaved(f"{name} is set in the server's environment. Change it there.")
     if source == "file" and where != config._resolved(config.settings_file()):
         raise SettingNotSaved(f"{name} is set in {where}, which OpenBerry reads first. Change it there.")
-    value = (value or "").strip()
-    if not value:
+    value = value or ""
+    if config.DASHBOARD_SETTINGS[name].strip:
+        value = value.strip()
+    if not value.strip():
         return None
-    if any(ch in value for ch in "\n\r\0") or ('"' in value and "'" in value):
-        raise SettingNotSaved("Use a value without line breaks or quotes.")
+    if any(ch in value for ch in "\n\r\0"):
+        raise SettingNotSaved("Use a value without line breaks.")
+    if '"' in value and "'" in value:
+        # The .env file quotes a value with one kind of quote, so it can't hold both.
+        raise SettingNotSaved("Use a value without both kinds of quotes (' and \"): OpenBerry's settings file can't "
+                              "hold both in one value.")
     return value
 
 

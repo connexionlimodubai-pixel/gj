@@ -16,7 +16,8 @@ from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, Response
 
 from .. import repo, website
-from ..models import AUTO_APPROVE_SETTINGS, CompanyIn, LeadIn, OutreachConfig
+from ..models import AUTO_APPROVE_SETTINGS, EMAIL_SETTINGS, CompanyIn, LeadIn, OutreachConfig
+from ..outreach import email_setting_refusals
 from . import scans
 from .auth import is_anonymous, require_api_auth
 from .ratelimit import client_key, limits, retry_header
@@ -78,6 +79,20 @@ def _check_auto_approve_settings(changes: Any, current: OutreachConfig) -> None:
                                  "Outreach page. The API may turn auto-approve off or make its window longer.")
 
 
+def _check_email_settings(changes: Any, current: OutreachConfig) -> None:
+    """Email sending likewise: a script may only make it safer (off, a lower limit, emails further apart, narrower
+    hours, no auto-approved emails), never turn it on, raise its limits, change the footer or lift a pause."""
+    if not isinstance(changes, dict) or not any(key in changes for key in EMAIL_SETTINGS):
+        return
+    wanted = OutreachConfig.model_validate(
+        {**current.model_dump(mode="json"), **{k: v for k, v in changes.items() if k in EMAIL_SETTINGS}})
+    if refused := email_setting_refusals(current, wanted):
+        raise HTTPException(403, f"Not changed: only the user can {' or '.join(refused)}, on the dashboard's "
+                                 "Outreach page. The API may only turn email sending off, lower its daily limit, "
+                                 "space emails further apart, narrow its sending hours or stop auto-approved emails "
+                                 "being sent.")
+
+
 @router.get("/companies")
 def api_list_companies() -> dict[str, Any]:
     return {"items": [_dump(c) for c in repo.list_companies()]}
@@ -88,6 +103,7 @@ def api_create_company(data: CompanyIn) -> dict[str, Any]:
     _check_agent_settings(data.outreach.model_dump(mode="json", include=set(AGENT_SETTINGS)), OutreachConfig())
     _check_auto_approve_settings(data.outreach.model_dump(mode="json", include=set(AUTO_APPROVE_SETTINGS)),
                                  OutreachConfig())
+    _check_email_settings(data.outreach.model_dump(mode="json", include=set(EMAIL_SETTINGS)), OutreachConfig())
     return _dump(repo.create_company(data))
 
 
@@ -102,7 +118,18 @@ def api_patch_company(company_id: int, patch: dict[str, Any] = Body(...)) -> dic
     current = repo.get_company(company_id).outreach
     _check_agent_settings(patch.get("outreach"), current)
     _check_auto_approve_settings(patch.get("outreach"), current)
+    _check_email_settings(patch.get("outreach"), current)
     return _dump(repo.update_company(company_id, patch))
+
+
+@router.get("/companies/{company_id}/email-status")
+def api_email_status(company_id: int) -> dict[str, Any]:
+    """Email sending for the company, read-only (the MCP tool get_email_status). Never the mailbox's server,
+    username or password. Nothing in the API sends email, sets the mailbox, resumes or resolves emails."""
+    from ..mcp_server import get_email_status
+
+    repo.get_company(company_id)
+    return get_email_status(company_id)
 
 
 @router.get("/companies/{company_id}/stats")

@@ -20,8 +20,8 @@ from starlette.responses import RedirectResponse, Response
 
 from .. import repo, services
 from ..config import get_settings
-from ..models import PROSPECT_TYPES, SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
-from . import charts, forms, scans
+from ..models import EMAIL_SETTINGS, PROSPECT_TYPES, SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
+from . import charts, forms, mail, scans
 from .auth import LoginRequired, checked_form, public_registration_open, require_login
 from .ratelimit import client_key, limits, retry_header
 from .session import COMPANY_KEY, flash, is_logged_in, remember_company, safe_next
@@ -422,11 +422,12 @@ def as_pending_review(data: CompanyIn) -> CompanyIn:
         "status": "paused",
         "signals": data.signals.model_copy(update={"rss_feeds": [], "places_queries": []}),
         "notify": data.notify.model_copy(update={"slack_webhook_url": "", "discord_webhook_url": ""}),
-        # Only the operator turns on AI agent sending and auto-approve (the public form shows neither).
+        # Only the operator turns on AI agent sending, auto-approve and email sending (the public form shows none).
         "outreach": data.outreach.model_copy(update={
             "agent_sending": False, "agent_daily_limit": OutreachConfig.model_fields["agent_daily_limit"].default,
             "auto_approve": False, "auto_approve_hours": OutreachConfig.model_fields["auto_approve_hours"].default,
-            "auto_approve_since": None}),
+            "auto_approve_since": None,
+            **{key: OutreachConfig().model_dump()[key] for key in EMAIL_SETTINGS}}),
     })
 
 
@@ -485,7 +486,7 @@ def dashboard(request: Request, company_id: int) -> Response:
         "top_leads": top_leads, "recent": recent, "signal_leads": leads_by_id(s.lead_id for s in recent),
         "followups": repo.followups_due(company_id)[:6], "sources": sources_panel(company),
         "runs": [run_summary(r) for r in runs], "scan": scans.status(company_id),
-        "prompts": claude_prompts(company_id), "agent": agent_status(company),
+        "prompts": claude_prompts(company_id), "agent": agent_status(company), "email": mail.email_status(company),
     })
 
 
@@ -554,6 +555,8 @@ def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Res
         status = {"drafts": "draft", "approved": "approved", "sent": "sent"}[tab]
         messages = repo.list_messages(company_id, status=status, direction="outbound", limit=200)
     agent = agent_status(company)
+    repo.expire_email_claims()  # an email stuck since a crash shows as "may have been sent", not "sending"
+    email = mail.email_status(company, messages)
     return render(request, "outreach.html", {
         "company": company, "active": "outreach", "title": "Outreach", "tab": tab, "tabs": OUTREACH_TABS,
         "tab_counts": tab_counts, "messages": messages, "followups": followups,
@@ -564,6 +567,7 @@ def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Res
         "agent_skipped_shown": AGENT_SKIPPED_SHOWN,
         "auto": auto_approve_status(company, due),
         "auto_states": repo.auto_approve_states(company, messages) if company.outreach.auto_approve else {},
+        "email": email, "email_leads": leads_by_id(mail.email_lead_ids(email)),
     })
 
 

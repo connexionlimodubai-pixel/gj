@@ -1,0 +1,24 @@
+From: Mail Delivery System <Mailer-Daemon@mail.acme-mail.example>
+To: sam@acme-mail.example
+Subject: Mail delivery failed: returning message to sender
+Date: Mon, 12 Oct 2026 09:12:00 +0000
+Message-ID: <exim-bounce-1@mail.acme-mail.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+
+This message was created automatically by mail delivery software.
+
+A message that you sent could not be delivered to one or more of its
+recipients. This is a permanent error. The following address(es) failed:
+
+  {lead}
+    host mx.gulfbank.example [192.0.2.10]
+    SMTP error from remote mail server after RCPT TO:<{lead}>:
+    550 5.1.1 No such user here
+
+------ This is a copy of the message, including all the headers. ------
+
+Message-ID: {ours}
+From: Sam Rahman <sam@acme-mail.example>
+To: {lead}
+Subject: Airport transfers for your Dubai office

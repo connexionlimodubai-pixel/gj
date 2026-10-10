@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
+import time
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
 
-from . import config, repo
+from . import config, mailer, repo
 from .collectors import CollectContext, RawSignal, get_collectors
 from .config import get_settings
 from .db import connect
@@ -273,6 +275,135 @@ async def scan_due_companies(trigger: str = "schedule") -> list[dict[str, Any]]:
             log.exception("scheduled scan failed for company %s", company.id)
             results.append({"company_id": company.id, "status": "failed", "error": str(exc)})
     return results
+
+
+# --------------------------------------------------------------------------------------
+# Email sending from the user's own mailbox (the dashboard process only: scheduler.email_loop and the dashboard's
+# buttons). `openberry mcp` never calls these.
+# --------------------------------------------------------------------------------------
+
+INBOX_EVERY = timedelta(minutes=5)     # the inbox is checked this often while OpenBerry is open
+RECORD_ATTEMPTS = 3                    # writing a sent email to the database, ~10 seconds in all
+RECORD_WAIT_SECONDS = 3.0
+# Set when a sent email couldn't be recorded in the database: this process sends nothing more until it restarts.
+_sending_stopped = ""
+
+
+def connected_mailbox() -> mailer.Mailbox | None:
+    """The mailbox the Mailbox page saved (another process's save counts at once), or None while it isn't set up."""
+    config.refresh_saved_settings()
+    return mailer.Mailbox.from_settings(get_settings())
+
+
+def sending_stopped() -> str:
+    return _sending_stopped
+
+
+def _record_sent(job: mailer.EmailJob, address: str, now: datetime | None) -> bool:
+    for attempt in range(RECORD_ATTEMPTS):
+        try:
+            repo.record_email_sent(job.message_id, job.header_id, address, now=now)
+            return True
+        except Exception:
+            log.exception("couldn't record sent email %s (attempt %s)", job.message_id, attempt + 1)
+            if attempt < RECORD_ATTEMPTS - 1:
+                time.sleep(RECORD_WAIT_SECONDS)
+    return False
+
+
+def send_next_email(now: datetime | None = None) -> dict[str, Any]:
+    """Send at most one approved email from the mailbox (repo.claim_next_email decides which, if any).
+
+    Blocking (SMTP): run it in a worker thread. Returns {"status": "sent" | "idle" | "not_connected" | "stopped" |
+    an Outcome kind, "message_id", "text"}. Never raises for a mail problem. `now` is for tests: the claim, the
+    email's Date header and the record all use it.
+    """
+    global _sending_stopped
+    box = connected_mailbox()
+    if box is None:
+        return {"status": "not_connected"}
+    if _sending_stopped:
+        return {"status": "stopped", "text": _sending_stopped}
+    claim = secrets.token_hex(16)
+    job = repo.claim_next_email(claim, box.from_email, box.from_name, now=now)
+    if job is None:
+        return {"status": "idle"}
+    outcome = mailer.send(job, box, on_data=lambda: repo.mark_email_data(job.message_id, claim, now=now), now=now)
+    if outcome.ok:
+        if not _record_sent(job, box.address, now):
+            # It went out but the database can't say so: send nothing more until a restart. The email stays in
+            # "data" and becomes "may have been sent" (never sent again automatically).
+            _sending_stopped = ("An email was sent but OpenBerry couldn't record it in its database, so it stopped "
+                                "sending. Restart OpenBerry.")
+            log.error("email sending stopped: message %s was sent but not recorded", job.message_id)
+            return {"status": "stopped", "message_id": job.message_id, "text": _sending_stopped}
+        if box.save_sent and (problem := mailer.save_sent_copy(box, outcome.data)):
+            log.warning("couldn't save a copy of email %s in the Sent folder: %s", job.message_id, problem)
+        log.info("email sent: message %s", job.message_id)
+        return {"status": "sent", "message_id": job.message_id}
+    repo.record_email_failure(job.message_id, claim, outcome.kind, outcome.text, box.address, now=now)
+    log.warning("email %s not sent (%s): %s", job.message_id, outcome.kind, outcome.text)
+    return {"status": outcome.kind, "message_id": job.message_id, "text": outcome.text}
+
+
+def inbox_due(now: datetime | None = None) -> bool:
+    """A mailbox is connected and its inbox wasn't tried in the last INBOX_EVERY."""
+    address = get_settings().mailbox_address()
+    if not address:
+        return False
+    tried = repo.mailbox_state(address)["inbox_tried_at"]
+    return not tried or datetime.fromisoformat(tried) <= (now or repo.utcnow()) - INBOX_EVERY
+
+
+def check_inbox(now: datetime | None = None) -> dict[str, Any]:
+    """Read the inbox (and the junk folder) read-only for replies, opt-outs and bounces about OpenBerry's leads.
+
+    Blocking (IMAP): run it in a worker thread. Each message is recorded once (repo.record_inbound); mail that is about
+    no lead is never read in full or stored. Returns {"status": "ok" | "failed" | "not_connected", "checked",
+    "recorded", "text"}.
+    """
+    box = connected_mailbox()
+    if box is None:
+        return {"status": "not_connected"}
+    now = now or repo.utcnow()
+    positions = repo.imap_positions(box.address)
+    previous = repo.mailbox_state(box.address)
+    since = datetime.fromisoformat(previous["inbox_checked_at"]).date() - timedelta(days=1) \
+        if previous["inbox_checked_at"] else now.date() - timedelta(days=1)
+    index = repo.inbound_index(now)
+
+    def relevant(headers: Any) -> bool:
+        facts = mailer.header_facts(headers)
+        return bool(facts["references"] & index["ours"] or facts["from_email"] in index["leads"] or facts["bounce"]
+                    or facts["unsubscribe"])
+
+    checked = recorded = 0
+    try:
+        with mailer.Inbox(box) as inbox:
+            folders = inbox.folders()
+            for folder in dict.fromkeys(f for f in (folders["inbox"], folders["junk"]) if f):
+                found, positions[folder] = inbox.fetch_new(folder, positions.get(folder), relevant, since=since)
+                for key, raw in found:
+                    checked += 1
+                    try:
+                        result = repo.record_inbound(mailer.classify_inbound(raw), key, now=now)
+                    except Exception:  # one unreadable message never stops the check
+                        log.warning("inbox message %s skipped", key, exc_info=True)
+                        continue
+                    recorded += result["status"] == "recorded"
+    except mailer.MailError as exc:
+        repo.save_inbox_check(box.address, False, exc.text, now=now)
+        return {"status": "failed", "text": exc.text, "kind": exc.kind}
+    repo.save_inbox_check(box.address, True, positions=positions, now=now)
+    return {"status": "ok", "checked": checked, "recorded": recorded}
+
+
+def send_test_email() -> mailer.Outcome:
+    """Send a short test email to the mailbox's own address (never anyone else). Not counted toward any limit."""
+    box = connected_mailbox()
+    if box is None:
+        return mailer.Outcome(mailer.CONFIG, "Connect your mailbox first: fill in every field and save.")
+    return mailer.send_test(box)
 
 
 def collector_overview(company: Company) -> list[dict[str, Any]]:

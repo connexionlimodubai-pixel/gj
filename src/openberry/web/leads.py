@@ -16,7 +16,7 @@ from ..models import (
     AGENT_CHANNELS, APPROVED_VIA_AUTO, LEAD_STATUSES, MESSAGE_CHANNELS, PROSPECT_TYPES, TIERS, Company, Lead, Message,
 )
 from ..repo import AGENT_QUEUE_MAX
-from . import forms
+from . import forms, mail
 from .auth import checked_form, require_login
 from .pages import hours_text, redirect
 from .session import flash, remember_company, safe_next
@@ -29,6 +29,10 @@ MAX_CSV_BYTES = 5 * 1024 * 1024
 MESSAGE_ACTIONS = {"save": None, "approve": "approved", "sent": "sent", "skip": "skipped", "draft": "draft"}
 # Auto-approve: hold a waiting draft (it is never approved automatically), or let a held one auto-approve again.
 HOLD_ACTIONS = {"hold": True, "release": False}
+# What the lead page's timeline shows of what came back to the mailbox (replies are messages of their own).
+EMAIL_TIMELINE_EVENTS = ("auto_reply", "bounce", "soft_bounce", "policy_reject", "opt_out", "send_failed", "unknown",
+                         "resolved")
+NO_SUBJECT = "Add a subject first: an email needs one."
 
 
 def _lead_filters(tier: str, status: str, kind: str, source: str, q: str, sort: str) -> dict[str, Any]:
@@ -165,10 +169,15 @@ def lead_page(request: Request, company_id: int, lead_id: int) -> Response:
     messages = sorted(repo.list_messages(company_id, lead_id=lead_id, limit=500), key=lambda m: (m.created_at, m.id))
     contacts = repo.contacts_at_account(lead)
     channel, step = outreach.next_touch(company, lead, messages)
+    repo.expire_email_claims()
+    email = mail.email_status(company, messages)
     return render(request, "lead.html", {
         "company": company, "lead": lead, "active": "leads", "title": lead.display_name,
         "signals": signals, "signal_total": signal_total, "messages": messages, "contacts": contacts,
         "auto_states": repo.auto_approve_states(company, messages) if company.outreach.auto_approve else {},
+        # Email sending: what happens to each email, whether the address may be emailed, and what came back.
+        "email": email, "suppression": repo.suppressed_addresses([lead.email]).get(repo.normalize_email(lead.email)),
+        "email_events": repo.list_email_events(lead_id=lead.id, kinds=EMAIL_TIMELINE_EVENTS, limit=20),
         # A business found on Google Maps is a prospect: only its other signals show intent.
         "has_intent": any(s.type not in PROSPECT_TYPES for s in signals),
         "found_on_maps": lead.source == "google_places" or any(s.type in PROSPECT_TYPES for s in signals),
@@ -282,8 +291,24 @@ def lead_reply(request: Request, company_id: int, lead_id: int, form: FormData =
 # Messages
 # --------------------------------------------------------------------------------------
 
+def _approved_email_note(company_id: int, message: Message) -> str:
+    """What happens to an email just approved: OpenBerry emails it from the user's mailbox, or the user sends it."""
+    if not repo.get_company(company_id).outreach.email_sending:
+        return "Approved. Copy it and send it from your inbox."
+    queue = repo.email_queue(company_id, limit=repo.EMAIL_QUEUE_MAX)
+    why_not = next((s["reason"] for s in queue["skipped"] if s["message_id"] == message.id), "")
+    if why_not:
+        return f"Approved. It won't be emailed now ({why_not}); you can copy it and send it yourself."
+    if queue["blocked_reason"] and queue["blocked_reason"] != "outside_hours":
+        return (f"Approved. OpenBerry emails it from your mailbox once it can send again "
+                f"({repo.email_blocked_message(queue)[:1].lower()}{repo.email_blocked_message(queue)[1:]}).")
+    return "Approved. OpenBerry will email it from your mailbox, exactly as it is, with your footer."
+
+
 def _approved_note(company_id: int, message: Message) -> str:
-    """What happens to a message just approved: the user sends it, or their AI agent may."""
+    """What happens to a message just approved: the user sends it, their AI agent may, or OpenBerry emails it."""
+    if message.channel == "email":
+        return _approved_email_note(company_id, message)
     if message.channel not in AGENT_CHANNELS or not repo.get_company(company_id).outreach.agent_sending:
         return "Approved. Copy it and send it from LinkedIn or your inbox."
     queue = repo.send_queue(company_id, limit=AGENT_QUEUE_MAX)
@@ -331,8 +356,9 @@ def bulk_message_action(request: Request, company_id: int, form: FormData = Depe
     if done:
         text = f"{verb} {len(done)} draft{'' if len(done) == 1 else 's'}."
         if action == "approve":
-            text += (" Your AI agent can send the LinkedIn ones." if company.outreach.agent_sending
-                     else f" Send {'it' if len(done) == 1 else 'them'} from the Approved tab.")
+            senders = [*([" Your AI agent can send the LinkedIn ones."] if company.outreach.agent_sending else []),
+                       *([" OpenBerry emails the emails from your mailbox."] if company.outreach.email_sending else [])]
+            text += "".join(senders) or f" Send {'it' if len(done) == 1 else 'them'} from the Approved tab."
         if problems:
             text += f" {sum(problems.values())} not {verb.lower()}: {_bulk_problems(problems)}."
     else:
@@ -352,7 +378,11 @@ def message_action(request: Request, company_id: int, message_id: int,
     back = safe_next(form.get("next"), f"/c/{company_id}/leads/{message.lead_id}#outreach")
     action = _form_text(form, "action", "save")
     if action == "delete":
-        repo.delete_message(message_id)
+        try:
+            repo.delete_message(message_id)
+        except ValueError as exc:  # an email being sent right now
+            flash(request, str(exc), "error")
+            return redirect(back)
         flash(request, "Message deleted.", "info")
         return redirect(back.split("#", 1)[0])  # its #msg anchor is gone: the form's data-keep-scroll keeps the place
     if action not in MESSAGE_ACTIONS and action not in HOLD_ACTIONS:
@@ -365,6 +395,10 @@ def message_action(request: Request, company_id: int, message_id: int,
         edits["subject"] = _form_text(form, "subject")
     if action in HOLD_ACTIONS:
         return _hold_action(request, company_id, message, HOLD_ACTIONS[action], back, edits)
+    if (action == "approve" and message.channel == "email" and message.direction == "outbound"
+            and not edits.get("subject", message.subject).strip()):
+        flash(request, NO_SUBJECT, "error")
+        return redirect(back)
     try:
         updated = repo.update_message(message_id, status=MESSAGE_ACTIONS[action], **edits)
     except ValueError as exc:

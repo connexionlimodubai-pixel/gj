@@ -5,7 +5,8 @@ This optional feature lets an AI agent send the approved LinkedIn messages in Op
 sends anything.** It gives your agent a list of the approved messages and refuses anything outside the rules below.
 
 It is **off** for every company until you turn it on. It sends LinkedIn connection notes and LinkedIn messages only.
-Email is never sent this way.
+Email is never sent this way: to have OpenBerry email the emails you approve from your own mailbox, see
+[email sending](EMAIL_SENDING.md).
 
 - [1. What it does, and the risk](#1-what-it-does-and-the-risk)
 - [2. Turn it on, approve messages, pick a daily limit](#2-turn-it-on-approve-messages-pick-a-daily-limit),
@@ -134,7 +135,9 @@ drafts**, set the **Review window** (1 to 72 hours, default 2) and click **Turn 
   lead's page, when Claude lists or reads your drafts, and when your agent asks for its send queue, so it also works
   while the dashboard is closed. Messages it approved carry an **Auto-approved** tag.
 
-**The risk.** With AI agent sending on, your agent may send an auto-approved LinkedIn message that nobody read. All of
+**The risk.** With AI agent sending on, your agent may send an auto-approved LinkedIn message that nobody read.
+Auto-approved emails are emailed from your mailbox only if you also tick **Also send emails that auto-approve
+approved** on the Email sending card ([email sending](EMAIL_SENDING.md#6-auto-approve-and-fully-automatic-sending)). All of
 your agent's own rules still apply (the daily limit, LinkedIn's limits, never twice, never leads who replied), but the
 words are whatever Claude or the template wrote. Pick a window long enough for you to read your drafts, hold the ones
 you want to check, and keep your banned words up to date. Claude and the JSON API can turn auto-approve off or make the
@@ -503,7 +506,8 @@ Many LinkedIn automation tools sell these tricks. OpenBerry leaves them out on p
   for each person and sent at your normal pace.
 
 OpenBerry also never chooses who gets a message (you do, by approving, or by leaving a draft to
-[auto-approve](#auto-approve-optional) if you turned it on), never changes your text, and never sends email.
+[auto-approve](#auto-approve-optional) if you turned it on), never changes your text, and never sends email this way
+([email sending](EMAIL_SENDING.md) is a separate feature, with its own switch).
 
 ## Questions
 
@@ -531,7 +535,8 @@ own connection requests do count toward the weekly limit (80) and, on a free acc
 notes can be at most 200 characters. Shorten the note and approve it again, or, if you have Premium, set **Your
 LinkedIn account** to Premium in the company profile (300 characters).
 
-**What about email?** Email drafts are never in the queue. Copy them into your email and click **Mark sent**, as before.
+**What about email?** Email drafts are never in the agent's queue. Copy them into your email and click **Mark sent**,
+as before, or turn on [email sending](EMAIL_SENDING.md) so OpenBerry emails the ones you approve from your own mailbox.
 
 ## Sources
 

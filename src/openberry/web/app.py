@@ -21,7 +21,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .. import __version__, repo
 from ..config import Settings, get_settings, set_settings
-from . import api, auth, keys, leads, pages, scans
+from . import api, auth, keys, leads, mail, pages, scans
 from .ratelimit import Limits
 from .ui import STATIC_DIR, render
 
@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 SESSION_COOKIE = "openberry_session"
 SESSION_MAX_AGE = 14 * 24 * 3600
 SCHEDULER_STOP_TIMEOUT = 5.0
+EMAIL_STOP_TIMEOUT = 30.0
 LifespanHook = Callable[[], AbstractAsyncContextManager[Any]]
 
 ERROR_TITLES = {
@@ -98,10 +99,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stack.enter_async_context(hook())
         stop = asyncio.Event()
         scheduler_task: asyncio.Task[None] | None = None
+        email_task: asyncio.Task[None] | None = None
+        app.state.email_wake = None
         if settings.scheduler_enabled:
-            from ..scheduler import scheduler_loop
+            from ..scheduler import email_loop, scheduler_loop
 
             scheduler_task = asyncio.create_task(scheduler_loop(stop), name="openberry-scheduler")
+            # Email from the user's mailbox: only this process (the dashboard, the desktop app) sends, never
+            # `openberry mcp`. The dashboard's Send now sets email_wake.
+            app.state.email_wake = asyncio.Event()
+            email_task = asyncio.create_task(email_loop(stop, app.state.email_wake), name="openberry-email")
         try:
             yield
         finally:
@@ -109,6 +116,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             if scheduler_task is not None:
                 with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
                     await asyncio.wait_for(scheduler_task, SCHEDULER_STOP_TIMEOUT)
+            if email_task is not None:  # an email being sent finishes first (its thread can't be stopped anyway)
+                with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                    await asyncio.wait_for(email_task, EMAIL_STOP_TIMEOUT)
+            app.state.email_wake = None
             await scans.cancel_all()
 
 
@@ -128,6 +139,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.limits = Limits()  # login and anonymous-form rate limits (see ratelimit.py)
+    app.state.email_wake = None  # set by _lifespan while the email loop runs (Send now wakes it)
     hooks: list[LifespanHook] = []  # entered in _lifespan; mcp_server.mount_http appends to it
     app.state.lifespan_hooks = hooks
 
@@ -157,6 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(pages.public_router)
     app.include_router(pages.router)
     app.include_router(keys.router)
+    app.include_router(mail.router)
     app.include_router(leads.router)
 
     if settings.http_mcp_enabled:

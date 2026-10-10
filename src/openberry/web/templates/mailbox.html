@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% macro mb_input(name, label, value, type="text", help="", attrs={}) -%}
+<div class="field">
+  <label for="mb-{{ name }}">{{ label }}</label>
+  <input class="input" id="mb-{{ name }}" name="{{ name }}" type="{{ type }}" value="{{ value or '' }}"{% if locked[name] %} readonly aria-readonly="true"{% endif %}{% if help or locked[name] %} aria-describedby="mb-{{ name }}-help"{% endif %}{% for k, v in attrs.items() %} {{ k }}="{{ v }}"{% endfor %}>
+  {% if locked[name] %}<p class="help" id="mb-{{ name }}-help">Set outside OpenBerry ({{ states[name].name }}): change it there.</p>{% elif help %}<p class="help" id="mb-{{ name }}-help">{{ help }}</p>{% endif %}
+</div>
+{%- endmacro %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">Workspace</p>
+    <h1>Mailbox</h1>
+    <p class="lede">OpenBerry sends the emails you approve from this mailbox, and reads its inbox for replies, opt-outs and bounces. Turn sending on for each company on its Outreach page. Your password is saved in OpenBerry's settings file, <code class="break">{{ env_path }}</code>, which only your user account can read. It is never shown again.</p>
+  </div>
+</div>
+
+{% if plain_http %}
+<div class="flash flash-warning mailbox-http" role="alert">{{ m.icon("alert") }}<p><strong>This page isn't encrypted.</strong> Type your password only on the computer that runs OpenBerry.</p></div>
+{% endif %}
+{% if sending_stopped %}
+<div class="flash flash-error" role="alert">{{ m.icon("alert") }}<p>{{ sending_stopped }}</p></div>
+{% endif %}
+
+{% if connected and mailbox %}
+<section class="card keys-card mailbox-status" id="status" aria-labelledby="status-title">
+  <header class="keys-head">
+    <span class="keys-icon" aria-hidden="true">{{ m.icon("mail", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="status-title" class="title-row">Your mailbox
+        {% if mailbox.paused %}<span class="pill pill-agent-paused">Paused</span>
+        {% elif mailbox.inbox_error %}<span class="pill pill-key-refused">Inbox problem</span>
+        {% elif mailbox.inbox_ok %}<span class="pill pill-on">Connected</span>
+        {% else %}<span class="pill pill-agent-limit">Inbox not checked</span>{% endif %}</h2>
+      <p class="keys-intro">Sends as <strong>{% if values.from_name %}{{ values.from_name }} &lt;{{ address }}&gt;{% else %}{{ address }}{% endif %}</strong>.
+        {% if mailbox.inbox_checked_at %}Inbox checked {{ m.when(mailbox.inbox_checked_at|todatetime) }}.{% else %}The inbox hasn't been checked yet.{% endif %}</p>
+    </div>
+  </header>
+  {% if mailbox.inbox_error %}
+  <div class="key-refused" role="status"><p>{{ m.icon("alert", 14) }} OpenBerry couldn't read your inbox: {{ mailbox.inbox_error }}</p><p class="small">Nothing is sent until it can, because it must see replies and opt-outs first.</p></div>
+  {% endif %}
+  {% if mailbox.paused %}
+  <div class="agent-pause" role="alert">
+    {{ m.icon("alert", 18) }}
+    <div class="min0 grow">
+      <p><strong>{% if mailbox.auth_failed %}Sending is paused until you fix the mailbox settings:{% else %}Sending is paused until {{ (mailbox.paused_until|todatetime)|abs_dt }}:{% endif %}</strong></p>
+      <p class="agent-reason">{{ mailbox.pause_reason or "No details given." }}</p>
+    </div>
+    <form method="post" action="/mailbox">{{ m.csrf() }}<button class="btn btn-sm" type="submit" name="action" value="retry">{{ m.icon("refresh", 14) }}Try again</button></form>
+  </div>
+  {% endif %}
+  <div class="btn-row">
+    <form method="post" action="/mailbox">{{ m.csrf() }}<button class="btn btn-sm" type="submit" name="action" value="test" data-confirm="Send a test email to {{ address }}? It goes to your own address only.">{{ m.icon("send", 14) }}Send test email</button></form>
+    <form method="post" action="/mailbox">{{ m.csrf() }}<button class="btn btn-sm" type="submit" name="action" value="check">{{ m.icon("inbox", 14) }}Check inbox</button></form>
+    <form method="post" action="/mailbox">{{ m.csrf() }}<button class="btn btn-sm btn-ghost btn-danger-text" type="submit" name="action" value="disconnect" data-confirm="Disconnect this mailbox? Its settings and password are removed, and email sending turns off for every company.">{{ m.icon("x", 14) }}Disconnect</button></form>
+  </div>
+  <p class="small muted">OpenBerry checks the inbox every 5 minutes while it is open, read-only: it never marks your mail as read, moves or deletes anything.</p>
+</section>
+{% endif %}
+
+<section class="card keys-card" id="settings" aria-labelledby="settings-title">
+  <header class="keys-head">
+    <span class="keys-icon" aria-hidden="true">{{ m.icon("key", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="settings-title" class="title-row">{{ "Mailbox settings" if connected else "Connect your mailbox" }}</h2>
+      <p class="keys-intro">Choose your provider: it fills in the servers. Use a mailbox you are allowed to use for outreach.</p>
+    </div>
+  </header>
+  <form method="post" action="/mailbox" class="mailbox-form" data-mailbox-form data-presets='{{ presets_json|tojson }}'>
+    {{ m.csrf() }}
+    <div class="grid-2">
+      <div class="field">
+        <label for="mb-provider">Provider</label>
+        <select class="input" id="mb-provider" name="provider" data-mail-provider{% if locked.provider %} disabled{% endif %}>
+          {% for key, p in providers.items() %}<option value="{{ key }}"{% if key == provider %} selected{% endif %}>{{ p.label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field" data-provider-only="zoho zoho_personal"{% if provider not in ("zoho", "zoho_personal") %} hidden{% endif %}>
+        <label for="mb-region">Zoho data centre</label>
+        <select class="input" id="mb-region" name="region" data-mail-region aria-describedby="mb-region-help">
+          {% for value, label in zoho_regions %}<option value="{{ value }}"{% if value == region %} selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select>
+        <p class="help" id="mb-region-help">The ending of the address you sign in at, like mail.zoho.eu.</p>
+      </div>
+    </div>
+    {% for key, p in providers.items() %}
+    <div class="provider-help" data-provider-help="{{ key }}"{% if key != provider %} hidden{% endif %}>
+      {% if p.warning %}<p class="callout callout-warning">{{ m.icon("alert", 14) }}<span><strong>{{ p.label }}:</strong> {{ p.warning }}</span></p>{% endif %}
+      {% if p.note %}<p class="small muted">{{ p.note }}</p>{% endif %}
+      <p class="small">{{ m.icon("info", 14) }} {{ p.help }}</p>
+    </div>
+    {% endfor %}
+
+    <div class="grid-2">
+      {{ mb_input("from_email", "Your email address", values.from_email, "email", "The From address of your emails, and where replies arrive.", attrs={"autocomplete": "email", "spellcheck": "false"}) }}
+      {{ mb_input("from_name", "Your name", values.from_name, "text", "Shown as the sender, e.g. Sam Rahman.", attrs={"maxlength": "100"}) }}
+      {{ mb_input("username", "Username", values.username, "text", "Usually your full email address. Leave it empty to use it.", attrs={"autocomplete": "off", "spellcheck": "false", "autocapitalize": "off"}) }}
+      <div class="field">
+        <label for="mb-password">Password</label>
+        {% if locked.password %}
+        <p class="key-status">Set outside OpenBerry ({{ states.password.name }}).</p>
+        {% else %}
+        <input class="input" id="mb-password" name="password" type="password" value="" autocomplete="off" spellcheck="false" autocapitalize="off"{% if not password_saved %} required{% endif %} placeholder="{{ 'Saved. Type a new one to change it.' if password_saved else 'Your mailbox password or app password' }}" aria-describedby="mb-password-help">
+        <p class="help" id="mb-password-help">{% if password_saved %}{{ m.icon("check", 12) }} Saved. Leave it empty to keep it.{% else %}With two-step sign-in, use an app password.{% endif %}</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="grid-3 mailbox-servers">
+      {{ mb_input("smtp_host", "Sending server (SMTP)", values.smtp_host, "text", "", attrs={"spellcheck": "false", "autocapitalize": "off", "data-mail-smtp": "1"}) }}
+      <div class="field">
+        <label for="mb-smtp_port">Port</label>
+        <select class="input" id="mb-smtp_port" name="smtp_port" data-mail-port{% if locked.smtp_port %} disabled{% endif %} aria-describedby="mb-port-help">
+          <option value="465"{% if values.smtp_port == 465 %} selected{% endif %}>465 (SSL/TLS)</option>
+          <option value="587"{% if values.smtp_port == 587 %} selected{% endif %}>587 (STARTTLS)</option>
+        </select>
+        <p class="help" id="mb-port-help">Always encrypted.</p>
+      </div>
+      {{ mb_input("imap_host", "Reading server (IMAP, port 993)", values.imap_host, "text", "", attrs={"spellcheck": "false", "autocapitalize": "off", "data-mail-imap": "1"}) }}
+    </div>
+
+    <label class="check-line"><input type="checkbox" name="save_sent" value="true" data-mail-save-sent{% if values.save_sent %} checked{% endif %}{% if locked.save_sent %} disabled{% endif %}> Save a copy of each sent email in your Sent folder <span class="muted">(Gmail does this itself)</span></label>
+
+    <details class="inline-details"{% if values.imap_username %} open{% endif %}>
+      <summary>{{ m.icon("chevron-right", 14) }}Use different details for reading mail</summary>
+      <div class="grid-2">
+        {{ mb_input("imap_username", "Reading username", values.imap_username, "text", "Empty: the same as above.", attrs={"autocomplete": "off", "spellcheck": "false"}) }}
+        <div class="field">
+          <label for="mb-imap_password">Reading password</label>
+          <input class="input" id="mb-imap_password" name="imap_password" type="password" value="" autocomplete="off" placeholder="{{ 'Saved. Type a new one to change it.' if imap_password_saved else 'Empty: the same as above' }}">
+        </div>
+      </div>
+    </details>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" type="submit" name="action" value="save">{{ m.icon("check", 14) }}Save and check inbox</button>
+      <a class="btn btn-ghost" href="{{ EMAIL_DOCS_URL }}" target="_blank" rel="noopener noreferrer">How email sending works{{ m.icon("external", 12) }}</a>
+    </div>
+  </form>
+  <p class="small muted keys-terms">{{ m.icon("info", 14) }}<span>OpenBerry connects only to these servers, always encrypted, with their certificates checked. Sending happens only while OpenBerry is open on this computer.</span></p>
+</section>
+
+<section class="card keys-card" id="never-email" aria-labelledby="never-title">
+  <header class="keys-head">
+    <span class="keys-icon" aria-hidden="true">{{ m.icon("ban", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="never-title" class="title-row">Never email <span class="count">{{ suppressions|length }}</span></h2>
+      <p class="keys-intro">Addresses that opted out or bounced. OpenBerry never emails them again, for any company, even if the lead is found again.</p>
+    </div>
+  </header>
+  {% if suppressions %}
+  <ul class="list suppression-list">
+    {% for s in suppressions %}
+    <li class="list-item">
+      <div class="min0 grow"><span class="lead-name break">{{ s.email }}</span><span class="sub">{{ {"opt_out": "Opted out", "bounce": "Bounced", "manual": "Marked by you"}[s.reason] }} · {{ m.when(s.created_at) }}{% if s.detail %} · {{ s.detail }}{% endif %}</span></div>
+      <form method="post" action="/mailbox">{{ m.csrf() }}<input type="hidden" name="suppression_id" value="{{ s.id }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="unsuppress" data-confirm="{{ 'Only remove it if this person asked to hear from you again. Remove ' ~ s.email ~ '?' if s.reason == 'opt_out' else 'Remove ' ~ s.email ~ ' from this list? OpenBerry may email it again.' }}">Remove</button></form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="small muted">Nobody yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

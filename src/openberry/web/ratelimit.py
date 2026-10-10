@@ -105,6 +105,10 @@ class Limits:
     # Anonymous registrations and the website look-ups their form makes.
     register: RateLimit = field(default_factory=lambda: RateLimit(per_client=5, window=60, total=30))
     site_summary: RateLimit = field(default_factory=lambda: RateLimit(per_client=5, window=60, total=30))
+    # The Mailbox page's Send test email (to the user's own address only) and Check inbox: 5 tests and 10 checks in
+    # 10 minutes, for everyone together.
+    test_email: RateLimit = field(default_factory=lambda: RateLimit(per_client=5, window=600, total=5))
+    inbox_check: RateLimit = field(default_factory=lambda: RateLimit(per_client=10, window=600, total=10))
 
 
 def limits(request: Request) -> Limits:

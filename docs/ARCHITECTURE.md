@@ -18,8 +18,11 @@ A Python app stores everything, collects free public signals, scores leads, and 
 │  collectors/     HN, Reddit, GitHub, Greenhouse/Lever/Ashby, News/RSS, SEC EDGAR, Google Maps  │
 │  scoring.py      ICP fit + time-decayed intent + signal stacking + optional Claude score       │
 │  outreach.py     template / Ollama drafting, outreach context for Claude                       │
+│  mailer.py       email from the user's own mailbox: SMTP (TLS) to send, IMAP (read-only)       │
+│  scheduler.py    scans, alerts, auto-approve; email_loop sends approved emails, reads inbox   │
 │  repo.py + db.py SQLite (WAL) – companies, leads, lead_keys, signals, messages, scan_runs,     │
-│                  api_usage, place_searches, place_ids                                          │
+│                  api_usage, place_searches, place_ids, email_suppressions, email_events,       │
+│                  email_mailbox                                                                 │
 └───────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,9 +41,13 @@ A Python app stores everything, collects free public signals, scores leads, and 
     (free | premium, default free: the connection-note limits, see `outreach.connect_note_limit`), AI agent
     sending: agent_sending (off by default), agent_daily_limit (1-50, default 15), agent_paused_until, agent_pause_reason,
     and auto-approve: auto_approve (off by default), auto_approve_hours (the review window, 1-72, default 2) and
-    auto_approve_since (when the user turned it on, made the window shorter, or activated the paused company). The
-    profile form shows neither the pause nor auto-approve, and `repo.update_company` keeps both as stored when it is
-    given a whole profile.
+    auto_approve_since (when the user turned it on, made the window shorter, or activated the paused company), and
+    email sending (`EMAIL_SETTINGS`): email_sending (off by default), email_daily_limit (1-100, default 30),
+    email_gap_minutes (default 5), email_days / email_start_hour / email_end_hour (the sending hours on the computer's
+    clock, default Monday to Friday 09:00-18:00), email_footer (added under every email when it is sent),
+    email_send_auto_approved (off) and the pause OpenBerry sets (email_paused_until, email_pause_reason). The
+    profile form shows none of the pauses, auto-approve or email sending, and `repo.update_company` keeps them as
+    stored when it is given a whole profile.
   - `notify: NotifyConfig`: Slack and Discord webhooks, min_score (alerts need a hot lead, so values below 70 act as 70)
 - **Lead**: a person (`kind="person"`) or an account (`kind="account"`, company-level intent such as
   hiring or funding, with no contact found yet). People inherit 60% of their company's account-level intent.
@@ -55,6 +62,16 @@ A Python app stores everything, collects free public signals, scores leads, and 
   or a lead leaving the pipeline, for its LinkedIn drafts and lapsed approvals), `approved_via` (`"auto"` = auto-approve
   approved it, `""` = a person did; cleared whenever it becomes a draft or a person approves it) and `auto_blocked`
   (1 = auto-approve found a reason to leave this draft alone; once the reason goes away its window starts again).
+  Schema version 5 added email sending: `email_state` (`""`, `claimed`, `data` = the mail server is receiving it,
+  `sent`, `failed`, `unknown` = may have been sent, never retried automatically, `bounced`), `email_message_id` (the
+  Message-ID header, set at the first claim and kept), `email_to`, `email_claim` and `email_claimed_at` (the sending
+  worker's token and time), `email_attempts` and `send_error`. `sent_via = "smtp"`: OpenBerry sent it from the user's
+  mailbox. Replies found in the inbox are inbound messages with `generated_by = "inbox"`.
+- **email_suppressions**: addresses never emailed again, for every company (`opt_out`, `bounce`, `manual`). They
+  outlive the lead. **email_events**: what the sender and the inbox check did (reply, opt_out, bounce, soft_bounce,
+  policy_reject, auto_reply, send_failed, unknown, resolved); `inbound_key` (the inbox message's Message-ID, else its
+  folder and UID) handles each inbox message once. **email_mailbox**: one row per From address: its pause, failures
+  in a row, the last inbox check and the last UID read in each folder. Never a password.
 - **api_usage**: paid API calls per service and calendar month (UTC), the monthly cap on Google Maps searches.
 - **place_searches**: when each company last read every page of each Google Maps search (a search runs at most once a
   week). **place_ids**: the Google Place IDs a company already handled (`added = 1`: became a lead, never added again,
@@ -106,6 +123,19 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   Collectors must be polite (cap requests and honour `ctx.max_items`). One bad item never fails the whole collector. Use `ctx.warn()` for soft problems,
   and `ctx.count(name)` for what happened (stored as `stats.collectors.<name>.counts`). `Collector.timeout_seconds` overrides the shared
   120-second limit, and `Collector.usage()` reports paid-API usage for the dashboard and `get_company_profile`.
+- Email sending (`docs/EMAIL_SENDING.md`): `scheduler.email_loop` runs in the dashboard process only (`openberry serve`,
+  the desktop app; never `openberry mcp`), next to the scheduler, every minute or at once when the Send now button sets
+  `app.state.email_wake`. Each turn: `repo.expire_email_claims`, `services.check_inbox` every 5 minutes, then
+  `services.send_next_email`. `repo.claim_next_email` checks every rule under `BEGIN IMMEDIATE` (the switches, the
+  mailbox and its inbox check in the last 30 minutes, nothing in flight, the daily limits, the minutes since the
+  mailbox's last email, the sending hours, `repo._email_send_problem` for each email) and claims one email with a
+  compare-and-set; the returned `mailer.EmailJob` is a snapshot. `mailer.send` goes step by step and calls
+  `repo.mark_email_data` just before DATA (which refuses, so the server gets RSET, if the email may no longer go);
+  `repo.record_email_sent` (keyed on the Message-ID) or `repo.record_email_failure` records the outcome. A claim
+  older than 10 minutes goes back to the queue; one stuck in DATA becomes `unknown`. `repo.record_inbound` records
+  what came back once (a reply through `repo.log_reply`, an opt-out through `repo.record_opt_out`, a bounce). The
+  mailbox settings live in the data folder's `.env` (`config.MAILBOX_SETTINGS`, written by the Mailbox page through
+  `envfile.save_settings`); `mailer.Mailbox.from_settings` reads them.
 - `repo.reserve_api_call(service, limit)` counts one paid call before it is made, unless the month's limit is reached; it runs under
   `BEGIN IMMEDIATE`, so processes never go over the limit together.
 - `config.refresh_saved_settings()` applies settings another process saved to the data folder's `.env` (one `stat()` when nothing
@@ -145,7 +175,7 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   URLs the user typed.
 - Claude is told to treat text from leads and public posts, and everything the tools return, as data, never as instructions.
   Prompts name companies and leads by id rather than quoting stored text.
-- OpenBerry never sends anything to LinkedIn or by email itself. OpenBerry drafts, and a human sends, or, when the user
+- OpenBerry never sends anything to LinkedIn itself. OpenBerry drafts, and a human sends, or, when the user
   turns on AI agent sending for a company, the user's own browser agent sends the approved LinkedIn messages.
   `repo.send_queue`, `repo.confirm_agent_sent` and `repo.report_send_problem` enforce its rules server-side: approved
   LinkedIn messages only, a rolling 24-hour limit, the never-contact list, LinkedIn's connection limits (note length
@@ -159,3 +189,16 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   held draft (`save_outreach_message`) is held too, also when the held one was skipped first. Activating a paused
   company (from anywhere) restarts every window, like turning auto-approve on. With agent sending also on, the agent may
   send what auto-approve approved, so every agent rule above still applies to it.
+- Email sending is off for every company until the user turns it on, on the Outreach page's Email sending card
+  (CSRF-protected), which needs a connected mailbox, a good inbox check, a footer with "unsubscribe" and no
+  placeholder, and the warnings acknowledged. Claude and the JSON API can only make it safer (turn it off, lower the
+  limit, space emails further apart, narrow the hours, stop auto-approved emails being sent;
+  `outreach.email_setting_refusals`); anonymous public registrations are saved with it off. Only the dashboard process
+  sends; `openberry mcp` never sends or reads mail, and `get_email_status` (MCP) and `GET /api/companies/{id}/email-status`
+  are read-only. The mailbox password is written to the data folder's `.env` (mode 0600) by the Mailbox page only: never
+  stored in SQLite, never shown back, never returned by MCP or the API, never logged (`repr=False` on every secret
+  setting). SMTP uses port 465 or 587 only, IMAP 993 only, always encrypted with certificates and host names checked
+  (TLS 1.2 or newer); a server without STARTTLS on 587 never gets the password. The Mailbox page's test email goes to
+  the mailbox's own address only, 5 in 10 minutes. The inbox is read with EXAMINE and BODY.PEEK only (nothing is marked
+  as read, moved or deleted), only new mail, and mail about no lead is never stored. Inbox mail is written by strangers:
+  stored escaped, shown as text, never followed, and passed to Claude as data.

@@ -14,16 +14,18 @@ import unicodedata
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
+from . import mailer
 from .db import connect
 from .models import (
     AGENT_CHANNELS,
     AGENT_PAUSE_REASON_MAX,
     APPROVED_VIA_AUTO,
     AUTO_APPROVE_SETTINGS,
+    EMAIL_SETTINGS,
     LEAD_STATUSES,
     MESSAGE_CHANNELS,
     MESSAGE_STATUSES,
@@ -34,6 +36,7 @@ from .models import (
     Lead,
     LeadIn,
     Message,
+    OutreachConfig,
     ScanRun,
     Signal,
     SignalIn,
@@ -43,6 +46,7 @@ from .outreach import (
     LINKEDIN_CONNECT_LIMIT_FREE,
     account_label,
     connect_note_limit,
+    footer_problems,
     monthly_note_limit,
     unfilled_placeholder,
 )
@@ -297,20 +301,22 @@ def update_company(company_id: int, data: CompanyIn | dict[str, Any],
     under the write lock, so a save racing a problem report (e.g. a profile form read before the report)
     can't lift the pause.
     A whole profile (a CompanyIn: the dashboard's profile form, which doesn't show them) also keeps the
-    auto-approve settings as stored, read under the same lock, so a profile save never turns auto-approve
-    back on after the user turned it off. They change through a partial dict (the Outreach page's card).
+    auto-approve and email sending settings as stored, read under the same lock, so a profile save never turns
+    them back on after the user turned them off. They change through a partial dict (the Outreach page's cards).
+    The email pause (outreach.email_paused_until / email_pause_reason) is kept like the agent's: OpenBerry sets it
+    (bounces, the mail provider refusing) and resume_email_sending lifts it.
     Activating a paused company with auto-approve on works like turning auto-approve on (auto_approve_since =
     now): the drafts that waited while it was paused get a full review window, never approved all at once.
     """
     with _write_locked(conn) as c:
         current = get_company(company_id, conn=c)
-        kept = {"agent_paused_until": current.outreach.agent_paused_until,
-                "agent_pause_reason": current.outreach.agent_pause_reason}
+        kept = {key: getattr(current.outreach, key) for key in ("agent_paused_until", "agent_pause_reason",
+                                                                 "email_paused_until", "email_pause_reason")}
         if isinstance(data, dict):
             merged = _deep_merge(current.model_dump(mode="json"), data)
             data = CompanyIn.model_validate(merged)
         else:
-            kept.update({key: getattr(current.outreach, key) for key in AUTO_APPROVE_SETTINGS})
+            kept.update({key: getattr(current.outreach, key) for key in (*AUTO_APPROVE_SETTINGS, *EMAIL_SETTINGS)})
         if current.status != "active" and data.status == "active" and kept.get("auto_approve",
                                                                               data.outreach.auto_approve):
             kept["auto_approve_since"] = utcnow()
@@ -507,6 +513,8 @@ def upsert_lead(company_id: int, data: LeadIn, conn: sqlite3.Connection | None =
                 keys = keys + lead_identity_keys(get_lead(lead_id, conn=c), row["kind"])
                 if linkedin_profile_url(updates.get("linkedin_url", "")):
                     _unapprove_for_new_profile(c, lead_id)  # the lead had no LinkedIn profile when approved
+                if updates.get("email"):
+                    _unapprove_emails(c, lead_id)  # the lead had no email address when approved
             if row["kind"] == "account" and row["company_key"] and "company_key" in updates:
                 _rescore_people_at(c, company_id, row["company_key"])  # they no longer inherit its intent
         _add_keys(c, company_id, lead_id, keys)
@@ -560,6 +568,9 @@ def update_lead(lead_id: int, fields: dict[str, Any], conn: sqlite3.Connection |
                 # LinkedIn approvals lapse and its LinkedIn drafts are held, so setting the status back later doesn't
                 # put old messages in the agent's queue (nor let auto-approve approve them at once).
                 _unapprove_for_new_profile(c, lead_id)
+            if (normalize_email(merged.email) != normalize_email(lead.email)
+                    or (merged.status in NO_AGENT_LEAD_STATUSES and lead.status not in NO_AGENT_LEAD_STATUSES)):
+                _unapprove_emails(c, lead_id)  # an approval covers the address too, as it covers a LinkedIn profile
             if kind != lead.kind:
                 # Keys of the old kind would keep routing its signals here (company-level ones to a person).
                 op = "NOT LIKE" if kind == "account" else "LIKE"
@@ -861,12 +872,13 @@ def create_message(lead_id: int, body: str, *, channel: str = "linkedin_dm", sub
         return get_message(cur.lastrowid, conn=c)
 
 
-def log_reply(lead_id: int, body: str, *, channel: str = "linkedin_dm",
+def log_reply(lead_id: int, body: str, *, channel: str = "linkedin_dm", generated_by: str = "lead",
               conn: sqlite3.Connection | None = None) -> Message:
-    """Record a reply the lead sent us (pasted from LinkedIn/email). Moves the lead to 'replied'."""
+    """Record a reply the lead sent us (pasted from LinkedIn or email by the user or Claude, or found in the inbox:
+    generated_by "inbox"). Moves the lead to 'replied' and skips its drafts and approved messages."""
     with _conn(conn) as c:
         msg = create_message(lead_id, body, channel=channel, status="received", direction="inbound",
-                             generated_by="lead", conn=c)
+                             generated_by=generated_by, conn=c)
         lead = get_lead(lead_id, conn=c)
         order = list(LEAD_STATUSES)
         if lead.status in ("new", "qualified", "contacted") or order.index(lead.status) < order.index("replied"):
@@ -938,6 +950,7 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
             updates["body"] = message_text(body)
         if subject is not None:
             updates["subject"] = subject.strip()
+        edits = dict(updates)  # the text changes, before the status ones are added
         if status is not None:
             if status not in MESSAGE_STATUSES:
                 raise ValueError(f"status must be one of {', '.join(MESSAGE_STATUSES)}")
@@ -957,6 +970,8 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
             # It isn't held: like any edited draft, it waits a full window before auto-approve (if on) approves it.
             updates["status"] = "draft"
             updates["approved_via"] = ""
+        if msg.channel == "email" and msg.direction == "outbound":
+            _email_edit_check(msg, edits, status, updates)
         if updates:
             sets = ", ".join(f"{k} = ?" for k in updates)
             c.execute(f"UPDATE messages SET {sets}, updated_at = ? WHERE id = ?", [*updates.values(), iso(), message_id])
@@ -972,8 +987,28 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
         return get_message(message_id, conn=c)
 
 
+def _email_edit_check(msg: Message, edits: dict[str, Any], status: str | None, updates: dict[str, Any]) -> None:
+    """The email sending rules for an edit (update_message): nothing changes while the email is being sent, and the
+    text of an email sent (or maybe sent) from the mailbox stays as it went out. A failed email that is edited or
+    set back to draft starts afresh."""
+    if msg.email_state in EMAIL_IN_FLIGHT:
+        raise ValueError(EMAIL_BUSY)
+    changed = (edits.get("body", msg.body), edits.get("subject", msg.subject)) != (msg.body, msg.subject)
+    if changed and (msg.sent_via == "smtp" or msg.email_state in ("sent", "unknown", "bounced")):
+        raise ValueError("This email was sent from your mailbox, or may have been, so its text can't be changed.")
+    if msg.email_state == "failed" and (changed or status == "draft"):
+        updates.update(email_state="", send_error="", email_attempts=0)
+    if status == "sent" and msg.email_state == "unknown":  # the user saw it in their Sent folder
+        updates.update(email_state="sent", sent_via="smtp")
+        if msg.email_claimed_at and not msg.sent_at:
+            updates["sent_at"] = iso(msg.email_claimed_at)
+
+
 def delete_message(message_id: int, conn: sqlite3.Connection | None = None) -> None:
-    with _conn(conn) as c:
+    with _write_locked(conn) as c:
+        row = c.execute("SELECT email_state FROM messages WHERE id = ?", (message_id,)).fetchone()
+        if row is not None and row["email_state"] in EMAIL_IN_FLIGHT:
+            raise ValueError(EMAIL_BUSY)
         c.execute("DELETE FROM messages WHERE id = ?", (message_id,))
 
 
@@ -983,6 +1018,7 @@ BULK_NOT_FOUND = "not found"
 BULK_NOT_DRAFT = "no longer a draft"
 BULK_CHANGED = "edited since the page opened"
 BULK_NOTE_TOO_LONG = "connection note too long"
+BULK_NO_SUBJECT = "email without a subject"
 
 
 def message_version(msg: Message) -> str:
@@ -998,7 +1034,7 @@ def bulk_update_drafts(company_id: int, selected: list[tuple[int, str]], action:
 
     `selected` holds (message id, message_version) pairs. A message is changed only while it is still an outbound
     draft of this company with the same text; an approval also needs a connection note that fits the company's
-    LinkedIn account. Returns {"done": [ids], "problems": {reason: count}}.
+    LinkedIn account, and an email with a subject. Returns {"done": [ids], "problems": {reason: count}}.
     """
     if action not in BULK_ACTIONS:
         raise ValueError(f"action must be one of {', '.join(BULK_ACTIONS)}")
@@ -1026,6 +1062,8 @@ def bulk_update_drafts(company_id: int, selected: list[tuple[int, str]], action:
             elif (action == "approve" and msg.channel == "linkedin_connect"
                   and len(msg.body) > connect_note_limit(company)):
                 problem = BULK_NOTE_TOO_LONG
+            elif action == "approve" and msg.channel == "email" and not msg.subject.strip():
+                problem = BULK_NO_SUBJECT
             else:
                 c.execute("UPDATE messages SET status = ?, approved_via = '', updated_at = ? "
                           "WHERE id = ? AND status = 'draft'", (BULK_ACTIONS[action], now, message_id))
@@ -2105,3 +2143,941 @@ def set_auto_hold(message_id: int, hold: bool = True, now: datetime | None = Non
             c.execute("UPDATE messages SET auto_hold = 0, auto_blocked = 0, updated_at = ? WHERE id = ? "
                       "AND auto_hold = 1", (stamp, message_id))
         return get_message(message_id, conn=c)
+
+
+# --------------------------------------------------------------------------------------
+# Email sending: OpenBerry sends the approved emails from the user's own mailbox (docs/EMAIL_SENDING.md)
+# --------------------------------------------------------------------------------------
+#
+# Off unless the user connects a mailbox (the Mailbox page) and turns it on for the company (the Outreach page). Only
+# the dashboard process sends (services.send_next_email): it claims one email here, sends it with mailer.send and
+# records what happened. Every rule lives in this module and is checked under the write lock: approved emails only,
+# exactly as approved plus the company's footer; auto-approved ones only with their own switch; the daily limit, the
+# minutes between two emails, the sending hours and the mailbox's own cap; one email per lead at a time and
+# follow-ups only when due; never a lead who replied or left the pipeline, the never-contact list, or an opted-out,
+# bounced or no-reply address; never while the inbox check is stale; and never twice. An email is claimed, then marked
+# "data" just before the server receives it, then recorded as sent: a connection lost during DATA leaves it
+# "unknown", which is never sent again automatically (the user checks their Sent folder and decides). The inbox check
+# (services.check_inbox) records replies, opt-outs and bounces through record_inbound.
+
+EMAIL_WINDOW = timedelta(hours=24)
+MAILBOX_DAILY_MAX = 100              # emails from the mailbox in any 24 hours, every company together
+EMAIL_QUEUE_MAX = 100
+EMAIL_CLAIM_STALE = timedelta(minutes=10)   # far longer than any SMTP step (mailer.TIMEOUT)
+EMAIL_MAX_ATTEMPTS = 5
+INBOX_FRESH = timedelta(minutes=30)  # nothing is sent unless the inbox was checked successfully this recently
+EMAIL_PAUSE = timedelta(hours=24)
+RETRY_PAUSES = (timedelta(minutes=5), timedelta(minutes=15), timedelta(minutes=60))
+BOUNCES_BEFORE_PAUSE = 3             # hard bounces for a company in 24 hours
+POLICY_REJECTS_BEFORE_PAUSE = 2      # spam or policy rejections for a company in 24 hours
+BOUNCE_LOOKBACK = timedelta(days=14)
+REPLY_LOOKBACK = timedelta(days=180)
+SEND_ERROR_MAX = 500
+EMAIL_IN_FLIGHT = ("claimed", "data")
+SUPPRESSION_REASONS = ("opt_out", "bounce", "manual")
+# The time zone of the sending hours: None = the computer's own (tests set one).
+EMAIL_LOCAL_TZ: tzinfo | None = None
+# Counted toward the daily limits: emails OpenBerry sent, and emails being sent or that may have been sent.
+_EMAIL_COUNTED = ("direction = 'outbound' AND channel = 'email' AND ((sent_via = 'smtp' AND sent_at > ?) "
+                  "OR (email_state IN ('claimed', 'data', 'unknown') AND email_claimed_at > ?))")
+EMAIL_BUSY = "This email is being sent right now. Try again in a minute."
+EMAIL_ONE_AT_A_TIME = "another email to this lead goes first (one email per lead at a time)"
+STOPPED_BEFORE_DATA = "OpenBerry stopped before sending it. It will try again."
+
+
+def normalize_email(address: str) -> str:
+    return (address or "").strip().lower()
+
+
+def _when(value: Any) -> datetime | None:
+    if not value:
+        return None
+    return _utc(value) if isinstance(value, datetime) else _utc(datetime.fromisoformat(str(value)))
+
+
+def local_time(now: datetime) -> datetime:
+    """`now` in the time zone of the sending hours: this computer's own (EMAIL_LOCAL_TZ in tests)."""
+    return now.astimezone(EMAIL_LOCAL_TZ) if EMAIL_LOCAL_TZ is not None else now.astimezone()
+
+
+def in_sending_hours(cfg: OutreachConfig, now: datetime) -> bool:
+    """Inside the company's sending hours (outreach.email_days, email_start_hour to email_end_hour, local time)."""
+    local = local_time(_utc(now))
+    return local.weekday() in cfg.email_days and cfg.email_start_hour <= local.hour < cfg.email_end_hour
+
+
+def next_sending_time(cfg: OutreachConfig, now: datetime) -> datetime | None:
+    """`now` when inside the sending hours, else when they next start (None when no day is chosen)."""
+    now = _utc(now)
+    if in_sending_hours(cfg, now):
+        return now
+    start = local_time(now).replace(minute=0, second=0, microsecond=0)
+    for hours in range(1, 24 * 8):
+        candidate = (start + timedelta(hours=hours)).astimezone(timezone.utc)
+        if in_sending_hours(cfg, candidate):
+            return candidate
+    return None
+
+
+def _mailbox_address(address: str | None) -> str:
+    """The connected mailbox's From address: the one given, else the settings' ("" when none is connected)."""
+    if address is not None:
+        return normalize_email(address)
+    from .config import get_settings
+
+    return get_settings().mailbox_address()
+
+
+_MAILBOX_DEFAULTS: dict[str, Any] = {"paused_until": None, "pause_reason": "", "auth_failed": 0, "failures": 0,
+                                     "imap_state": "{}", "imap_checked_at": None, "imap_error": "",
+                                     "imap_tried_at": None}
+
+
+def _mailbox_row(c: sqlite3.Connection, address: str) -> dict[str, Any]:
+    row = c.execute("SELECT * FROM email_mailbox WHERE address = ?", (address,)).fetchone()
+    return dict(row) if row is not None else {"address": address, **_MAILBOX_DEFAULTS}
+
+
+def _save_mailbox(c: sqlite3.Connection, address: str, now: datetime, **fields: Any) -> None:
+    if not address:
+        return
+    row = {**_mailbox_row(c, address), **fields, "address": address, "updated_at": iso(now)}
+    cols = ("address", *_MAILBOX_DEFAULTS, "updated_at")
+    c.execute(f"INSERT INTO email_mailbox ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
+              f"ON CONFLICT(address) DO UPDATE SET {', '.join(f'{k} = excluded.{k}' for k in cols[1:])}",
+              [row[k] for k in cols])
+
+
+def _mailbox_info(c: sqlite3.Connection, address: str, now: datetime) -> dict[str, Any]:
+    """The mailbox's state for the queue's header and the dashboard. Never the server, username or password."""
+    if not address:
+        return {"connected": False, "address": "", "paused": False, "paused_until": None, "pause_reason": "",
+                "auth_failed": False, "failures": 0, "inbox_checked_at": None, "inbox_ok": False, "inbox_error": "",
+                "inbox_tried_at": None}
+    row = _mailbox_row(c, address)
+    until = _when(row["paused_until"])
+    until = until if until is not None and until > now else None
+    checked = _when(row["imap_checked_at"])
+    return {
+        "connected": True, "address": address,
+        "paused": bool(row["auth_failed"]) or until is not None, "paused_until": iso(until) if until else None,
+        "pause_reason": row["pause_reason"] if (row["auth_failed"] or until) else "",
+        "auth_failed": bool(row["auth_failed"]), "failures": row["failures"],
+        "inbox_checked_at": iso(checked) if checked else None,
+        "inbox_ok": checked is not None and now - checked <= INBOX_FRESH and not row["imap_error"],
+        "inbox_error": row["imap_error"], "inbox_tried_at": row["imap_tried_at"],
+    }
+
+
+def mailbox_state(address: str | None = None, now: datetime | None = None,
+                  conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """The connected mailbox's pause, failures and inbox check (address: the From address; default the settings')."""
+    with _conn(conn) as c:
+        return _mailbox_info(c, _mailbox_address(address), _utc(now or utcnow()))
+
+
+def imap_positions(address: str, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Where the inbox check stopped in each folder: {"INBOX": {"uidvalidity", "last_uid"}, ...}."""
+    with _conn(conn) as c:
+        state = _loads(_mailbox_row(c, normalize_email(address))["imap_state"], {})
+    return state if isinstance(state, dict) else {}
+
+
+def save_inbox_check(address: str, ok: bool, error: str = "", positions: dict[str, Any] | None = None,
+                     now: datetime | None = None, conn: sqlite3.Connection | None = None) -> None:
+    """Record an inbox check: when it worked (sending needs one in the last INBOX_FRESH), or why it failed."""
+    now = _utc(now or utcnow())
+    fields: dict[str, Any] = {"imap_tried_at": iso(now),
+                              "imap_error": "" if ok else (error or "failed")[:SEND_ERROR_MAX]}
+    if ok:
+        fields["imap_checked_at"] = iso(now)
+    if positions is not None:
+        fields["imap_state"] = json.dumps(positions)
+    with _write_locked(conn) as c:
+        _save_mailbox(c, normalize_email(address), now, **fields)
+
+
+def retry_mailbox(address: str | None = None, now: datetime | None = None,
+                  conn: sqlite3.Connection | None = None) -> None:
+    """Lift the mailbox's pause (the dashboard's Try again, or saving new mailbox settings)."""
+    now = _utc(now or utcnow())
+    with _write_locked(conn) as c:
+        _save_mailbox(c, _mailbox_address(address), now, paused_until=None, pause_reason="", auth_failed=0, failures=0)
+
+
+def _email_times(c: sqlite3.Connection, company_id: int | None, since: datetime) -> list[str]:
+    where = _EMAIL_COUNTED + (" AND company_id = ?" if company_id is not None else "")
+    args: list[Any] = [iso(since), iso(since)] + ([company_id] if company_id is not None else [])
+    return [r["t"] for r in c.execute(f"SELECT CASE WHEN sent_via = 'smtp' AND sent_at IS NOT NULL THEN sent_at "
+                                      f"ELSE email_claimed_at END AS t FROM messages WHERE {where} ORDER BY t", args)]
+
+
+def _last_email_attempt(c: sqlite3.Connection) -> datetime | None:
+    """When the mailbox last started an email (any company, whatever happened): the minutes between two emails count
+    from it."""
+    return _when(c.execute("SELECT MAX(email_claimed_at) FROM messages "
+                           "WHERE email_claimed_at IS NOT NULL").fetchone()[0])
+
+
+def _email_state(c: sqlite3.Connection, company: Company, now: datetime, address: str) -> dict[str, Any]:
+    """Whether OpenBerry may email for this company now, and why not: the email queue's header."""
+    cfg = company.outreach
+    mailbox = _mailbox_info(c, address, now)
+    paused_until = _when(cfg.email_paused_until)
+    paused_until = paused_until if paused_until is not None and paused_until > now else None
+    times = _email_times(c, company.id, now - EMAIL_WINDOW)
+    mailbox_count = len(_email_times(c, None, now - EMAIL_WINDOW)) if address else 0
+    remaining = max(0, cfg.email_daily_limit - len(times))
+    problems = footer_problems(company)
+    in_hours = in_sending_hours(cfg, now)
+    if not cfg.email_sending:
+        blocked = "disabled"
+    elif not mailbox["connected"]:
+        blocked = "not_connected"
+    elif mailbox["paused"]:
+        blocked = "mailbox_paused"
+    elif not mailbox["inbox_ok"]:
+        blocked = "inbox_unchecked"
+    elif problems:
+        blocked = "footer"
+    elif company.status != "active":
+        blocked = "company_paused"
+    elif paused_until is not None:
+        blocked = "paused"
+    elif remaining == 0:
+        blocked = "daily_limit"
+    elif mailbox_count >= MAILBOX_DAILY_MAX:
+        blocked = "mailbox_limit"
+    elif not in_hours:
+        blocked = "outside_hours"
+    else:
+        blocked = ""
+    frees_at = _when(times[len(times) - cfg.email_daily_limit]) + EMAIL_WINDOW if remaining == 0 and times else None
+    last = _last_email_attempt(c)
+    after_gap = last + timedelta(minutes=cfg.email_gap_minutes) if last is not None else None
+    next_at: datetime | None = None
+    if blocked in ("", "outside_hours"):
+        next_at = next_sending_time(cfg, max(now, after_gap) if after_gap else now)
+    elif blocked == "daily_limit" and frees_at is not None:
+        next_at = next_sending_time(cfg, frees_at)
+    return {
+        "enabled": cfg.email_sending,
+        "blocked_reason": blocked,
+        "daily_limit": cfg.email_daily_limit,
+        "sent_last_24h": len(times),
+        "remaining": remaining,
+        "limit_frees_at": iso(frees_at) if frees_at else None,
+        "gap_minutes": cfg.email_gap_minutes,
+        "next_send_at": iso(next_at) if next_at else None,
+        "in_sending_hours": in_hours,
+        "sending_days": list(cfg.email_days),
+        "sending_hours": [cfg.email_start_hour, cfg.email_end_hour],
+        "paused_until": iso(paused_until) if paused_until else None,
+        "pause_reason": cfg.email_pause_reason if paused_until else "",
+        "send_auto_approved": cfg.email_send_auto_approved,
+        "footer": cfg.email_footer,
+        "footer_problems": problems,
+        "mailbox": mailbox,
+        "mailbox_sent_24h": mailbox_count,
+        "mailbox_daily_max": MAILBOX_DAILY_MAX,
+    }
+
+
+def email_blocked_message(state: dict[str, Any]) -> str:
+    """Why OpenBerry sends no email for the company now, in plain words ("" when it may)."""
+    reason = state.get("blocked_reason") or ""
+    mailbox = state.get("mailbox") or {}
+    if reason == "disabled":
+        return ("Email sending is off for this company. Only the user can turn it on, on the dashboard's Outreach page "
+                "(Email sending)")
+    if reason == "not_connected":
+        return "No mailbox is connected. The user connects one on the dashboard's Mailbox page"
+    if reason == "mailbox_paused":
+        return f"The mailbox is paused: {mailbox.get('pause_reason') or 'no details'}"
+    if reason == "inbox_unchecked":
+        error = mailbox.get("inbox_error")
+        return ("Nothing is sent until OpenBerry has checked the inbox for replies and opt-outs in the last 30 minutes"
+                + (f" (the last check failed: {error})" if error else ""))
+    if reason == "footer":
+        return "The email footer needs fixing: " + "; ".join(state.get("footer_problems") or [])
+    if reason == "company_paused":
+        return "The company is paused"
+    if reason == "paused":
+        return (f"Email sending is paused until {state['paused_until']} ({state['pause_reason'] or 'no details'}). "
+                "Only the user can resume it early, on the dashboard")
+    if reason == "daily_limit":
+        when = f"; the next one can go out at {state['limit_frees_at']}" if state.get("limit_frees_at") else ""
+        return f"The daily limit of {state['daily_limit']} emails in 24 hours is reached{when}"
+    if reason == "mailbox_limit":
+        return f"The mailbox sent {MAILBOX_DAILY_MAX} emails in the last 24 hours, the most OpenBerry sends from it"
+    if reason == "outside_hours":
+        when = f"; they start again at {state['next_send_at']}" if state.get("next_send_at") else ""
+        return f"Outside the sending hours{when}"
+    return ""
+
+
+def _suppressions(c: sqlite3.Connection, addresses: Iterable[str]) -> dict[str, sqlite3.Row]:
+    wanted = [a for a in dict.fromkeys(normalize_email(a) for a in addresses) if a]
+    if not wanted:
+        return {}
+    rows = c.execute(f"SELECT * FROM email_suppressions WHERE email IN ({', '.join('?' * len(wanted))}) "
+                     f"ORDER BY CASE reason WHEN 'opt_out' THEN 0 WHEN 'bounce' THEN 1 ELSE 2 END, id", wanted)
+    out: dict[str, sqlite3.Row] = {}
+    for row in rows:
+        out.setdefault(row["email"], row)
+    return out
+
+
+def suppression_message(row: Any) -> str:
+    when = str(row["created_at"])[:10]
+    if row["reason"] == "opt_out":
+        return f"{row['email']} asked not to be emailed ({when})"
+    if row["reason"] == "bounce":
+        return f"{row['email']} bounced on {when}: fix the address on the lead's page"
+    return f"you marked {row['email']} as not to email ({when})"
+
+
+def _never_contact_domain(company: Company, address: str) -> str:
+    """The never-contact entry that names the address's domain (an entry that looks like a domain), or ""."""
+    domain = mailer.domain_of(address)
+    for entry in company.icp.exclude_companies:
+        listed = normalize_domain(entry) if " " not in entry.strip() else ""
+        if listed and (domain == listed or domain.endswith("." + listed)):
+            return entry
+    return ""
+
+
+def _email_send_problem(company: Company, msg: Message, lead: Lead, thread: list[Message],
+                        suppressed: dict[str, sqlite3.Row], now: datetime) -> str:
+    """Why OpenBerry must not send this email now ("" if it may), the company-wide switches and limits aside."""
+    if msg.direction != "outbound" or msg.channel != "email" or msg.status != "approved":
+        return "it is not an approved email"
+    if msg.sent_at is not None:
+        return f"it was already recorded as sent on {iso(msg.sent_at)}: an email is never sent twice"
+    if msg.email_state in EMAIL_IN_FLIGHT:
+        return "it is being sent right now"
+    if msg.email_state == "unknown":
+        return ("it may have been sent already: check your mailbox's Sent folder, then choose Mark sent or Send "
+                "again")
+    if msg.email_state == "failed":
+        return f"sending failed: {msg.send_error or 'no details'} Choose Try again once it is fixed"
+    if msg.email_state == "bounced":
+        return "it bounced"
+    if msg.approved_via == APPROVED_VIA_AUTO and not company.outreach.email_send_auto_approved:
+        return ("auto-approve approved it, and auto-approved emails aren't sent: approve it yourself, or allow them on "
+                "the Email sending card")
+    if not msg.subject.strip():
+        return "it has no subject"
+    if "\n" in msg.subject or "\r" in msg.subject:
+        return "the subject has a line break"
+    if lead.company_id != company.id:
+        return "the lead belongs to another company"
+    if problem := _lead_status_problem(lead):
+        return problem
+    if any(m.direction == "inbound" for m in thread):
+        return LEAD_REPLIED
+    if problem := _excluded_problem(company, lead):
+        return problem
+    address = normalize_email(lead.email)
+    if not mailer.valid_address(address):
+        return "the lead has no valid email address"
+    if entry := _never_contact_domain(company, address):
+        return f"the address's domain is on your never-contact list ({entry})"
+    if mailer.no_reply_address(address):
+        return "it is a no-reply or system address"
+    if address in suppressed:
+        return suppression_message(suppressed[address])
+    sent = [m for m in thread if m.id != msg.id and m.direction == "outbound"
+            and (m.status in ("sent", "replied") or m.sent_at is not None)]
+    if any(m.channel == "email" and m.step == msg.step for m in sent):
+        return f"step {msg.step} was already emailed to this lead"
+    sent_times = [_utc(m.sent_at) for m in sent if m.sent_at]
+    if sent_times:  # every message sent to the lead counts, on any channel
+        due = max(sent_times) + timedelta(days=_followup_wait_days(company, max(m.step for m in sent)))
+        if due > now:
+            return f"the next message to this lead is not due before {iso(due)} (follow-up wait)"
+    return ""
+
+
+def _email_queue(c: sqlite3.Connection, company: Company, now: datetime, address: str,
+                 limit: int = EMAIL_QUEUE_MAX) -> dict[str, Any]:
+    state = _email_state(c, company, now, address)
+    out: dict[str, Any] = {**state, "items": [], "skipped": [], "eligible_total": 0}
+    rows = [_message_from_row(r) for r in c.execute(
+        "SELECT * FROM messages WHERE company_id = ? AND direction = 'outbound' AND channel = 'email' "
+        "AND status = 'approved' ORDER BY step, created_at, id", (company.id,))]
+    if not rows:
+        return out
+    lead_ids = sorted({m.lead_id for m in rows})
+    marks = ", ".join("?" * len(lead_ids))
+    leads = {r["id"]: _lead_from_row(r) for r in c.execute(f"SELECT * FROM leads WHERE id IN ({marks})", lead_ids)}
+    threads: dict[int, list[Message]] = {}
+    for r in c.execute(f"SELECT * FROM messages WHERE lead_id IN ({marks}) ORDER BY id", lead_ids):
+        threads.setdefault(r["lead_id"], []).append(_message_from_row(r))
+    suppressed = _suppressions(c, [lead.email for lead in leads.values()])
+    waiting: set[int] = set()  # leads with an earlier approved email not sent yet: theirs go one at a time
+    eligible: list[tuple[Message, Lead]] = []
+    for msg in rows:
+        lead = leads.get(msg.lead_id)
+        if lead is None:
+            continue
+        problem = _email_send_problem(company, msg, lead, threads.get(lead.id, []), suppressed, now)
+        if not problem and lead.id in waiting:
+            problem = EMAIL_ONE_AT_A_TIME
+        if msg.sent_at is None:
+            waiting.add(lead.id)
+        if problem:
+            out["skipped"].append({"message_id": msg.id, "lead_id": lead.id, "reason": problem,
+                                   "state": msg.email_state})
+            continue
+        eligible.append((msg, lead))
+    eligible.sort(key=lambda pair: (pair[0].created_at, pair[0].id))  # the oldest approved email first
+    out["eligible_total"] = len(eligible)
+    for msg, lead in eligible[:max(0, limit)]:
+        out["items"].append({
+            # A company lead's email goes to the company's own address (a hotel's reservations@): its name, as is.
+            "message_id": msg.id, "lead_id": lead.id, "to": lead.email.strip(),
+            "lead_name": lead.display_name if lead.kind == "person" else (lead.lead_company or lead.display_name),
+            "subject": msg.subject, "step": msg.step, "auto_approved": msg.approved_via == APPROVED_VIA_AUTO,
+        })
+    return out
+
+
+def email_queue(company_id: int, limit: int = 10, now: datetime | None = None, address: str | None = None,
+                conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """The approved emails OpenBerry may send for the company, oldest first, with the header (on/off, limits, pauses,
+    the mailbox and its inbox check, blocked_reason) and `skipped`: approved emails held back, each with the reason.
+    `items` lists what may go out once nothing blocks it (blocked_reason ""), at most `limit`. Reading it changes
+    nothing."""
+    now = _utc(now or utcnow())
+    with _conn(conn) as c:
+        return _email_queue(c, get_company(company_id, conn=c), now, _mailbox_address(address), limit)
+
+
+def email_sending_status(company_id: int, now: datetime | None = None, address: str | None = None,
+                         conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """email_queue's header without the items."""
+    now = _utc(now or utcnow())
+    with _conn(conn) as c:
+        return _email_state(c, get_company(company_id, conn=c), now, _mailbox_address(address))
+
+
+def _expire_email_claims(c: sqlite3.Connection, now: datetime) -> None:
+    """Crash recovery. A claim older than EMAIL_CLAIM_STALE never reached DATA, so the email goes back to the queue
+    (an attempt counted). One stuck in DATA may have been accepted by the server: it becomes "unknown"."""
+    stale = iso(now - EMAIL_CLAIM_STALE)
+    for row in c.execute("SELECT id, company_id, lead_id, email_state, email_attempts FROM messages "
+                         "WHERE email_state IN ('claimed', 'data') AND email_claimed_at < ?", (stale,)).fetchall():
+        if row["email_state"] == "claimed":
+            attempts = row["email_attempts"] + 1
+            failed = attempts >= EMAIL_MAX_ATTEMPTS
+            c.execute("UPDATE messages SET email_state = ?, email_claim = '', email_attempts = ?, send_error = ? "
+                      "WHERE id = ? AND email_state = 'claimed'",
+                      ("failed" if failed else "", attempts,
+                       f"Tried {attempts} times: {STOPPED_BEFORE_DATA}" if failed else STOPPED_BEFORE_DATA, row["id"]))
+        else:
+            text = mailer.UNKNOWN_TEXT.format(detail="OpenBerry closed or lost the connection")
+            c.execute("UPDATE messages SET email_state = 'unknown', email_claim = '', send_error = ? WHERE id = ? "
+                      "AND email_state = 'data'", (text, row["id"]))
+            _email_event(c, row["company_id"], row["lead_id"], row["id"], "unknown", text, now=now)
+
+
+def expire_email_claims(now: datetime | None = None, conn: sqlite3.Connection | None = None) -> None:
+    """_expire_email_claims on its own (the email loop, a page that shows emails). The write lock is taken only when
+    a claim is stale: a page view must not wait for a scan that holds it."""
+    now = _utc(now or utcnow())
+    if conn is None:
+        with _conn(None) as c:
+            if c.execute("SELECT 1 FROM messages WHERE email_state IN ('claimed', 'data') AND email_claimed_at < ? "
+                         "LIMIT 1", (iso(now - EMAIL_CLAIM_STALE),)).fetchone() is None:
+                return
+    with _write_locked(conn) as c:
+        _expire_email_claims(c, now)
+
+
+def _company_last_email(c: sqlite3.Connection, company_id: int) -> str:
+    return c.execute("SELECT MAX(email_claimed_at) FROM messages WHERE company_id = ?", (company_id,)).fetchone()[0] \
+        or ""
+
+
+def claim_next_email(claim: str, from_email: str, from_name: str = "", now: datetime | None = None,
+                     conn: sqlite3.Connection | None = None) -> mailer.EmailJob | None:
+    """Claim the next email the mailbox may send (any company), or None.
+
+    One write-locked transaction: stale claims expire, then the mailbox (not paused, inbox checked in the last 30
+    minutes, nothing in flight, under its own cap) and each company with email sending on (the one whose last email
+    is oldest first: its switches, limits, sending hours and the minutes since the mailbox's last email) are checked,
+    and the first email of its queue is claimed with a compare-and-set that repeats the limits and the never-twice
+    checks. The returned EmailJob is everything the sending thread needs: it never reads the database again.
+    """
+    now = _utc(now or utcnow())
+    address = normalize_email(from_email)
+    with _write_locked(conn) as c:
+        _expire_email_claims(c, now)
+        mailbox = _mailbox_info(c, address, now)
+        if not address or mailbox["paused"] or not mailbox["inbox_ok"]:
+            return None
+        if c.execute("SELECT 1 FROM messages WHERE email_state IN ('claimed', 'data') LIMIT 1").fetchone():
+            return None
+        last = _last_email_attempt(c)
+        companies = [co for co in list_companies(conn=c) if co.outreach.email_sending and co.status == "active"]
+        companies.sort(key=lambda co: (_company_last_email(c, co.id), co.id))
+        for company in companies:
+            if last is not None and now < last + timedelta(minutes=company.outreach.email_gap_minutes):
+                continue
+            queue = _email_queue(c, company, now, address)
+            if queue["blocked_reason"]:
+                continue
+            for item in queue["items"]:
+                job = _claim_email(c, company, item["message_id"], claim, from_email.strip(), from_name, now)
+                if job is not None:
+                    return job
+        return None
+
+
+def _claim_email(c: sqlite3.Connection, company: Company, message_id: int, claim: str, from_email: str,
+                 from_name: str, now: datetime) -> mailer.EmailJob | None:
+    msg = get_message(message_id, conn=c)
+    lead = get_lead(msg.lead_id, conn=c)
+    to = lead.email.strip()
+    header_id = msg.email_message_id or mailer.new_header_id(from_email)
+    since = iso(now - EMAIL_WINDOW)
+    stamp = iso(now)
+    cur = c.execute(
+        f"UPDATE messages SET email_state = 'claimed', email_claim = ?, email_claimed_at = ?, email_to = ?, "
+        f"email_message_id = ?, send_error = '' "
+        f"WHERE id = ? AND direction = 'outbound' AND channel = 'email' AND status = 'approved' AND sent_at IS NULL "
+        f"AND email_state = '' "
+        f"AND NOT EXISTS (SELECT 1 FROM messages WHERE email_state IN ('claimed', 'data')) "
+        f"AND (SELECT COUNT(*) FROM messages WHERE company_id = ? AND {_EMAIL_COUNTED}) < ? "
+        f"AND (SELECT COUNT(*) FROM messages WHERE {_EMAIL_COUNTED}) < ? "
+        f"AND NOT EXISTS (SELECT 1 FROM messages o WHERE o.lead_id = ? AND o.id != ? AND o.direction = 'outbound' "
+        f"AND o.channel = 'email' AND o.step = ? AND (o.status IN ('sent', 'replied') OR o.sent_at IS NOT NULL)) "
+        f"AND NOT EXISTS (SELECT 1 FROM messages i WHERE i.lead_id = ? AND i.direction = 'inbound') "
+        f"AND NOT EXISTS (SELECT 1 FROM email_suppressions WHERE email = ?)",
+        (claim, stamp, to, header_id, message_id, company.id, since, since, company.outreach.email_daily_limit,
+         since, since, MAILBOX_DAILY_MAX, lead.id, message_id, msg.step, lead.id, normalize_email(to)))
+    if cur.rowcount != 1:
+        return None
+    references = tuple(r["email_message_id"] for r in c.execute(
+        "SELECT email_message_id FROM messages WHERE lead_id = ? AND id != ? AND sent_via = 'smtp' "
+        "AND sent_at IS NOT NULL AND email_message_id IS NOT NULL ORDER BY sent_at, id", (lead.id, message_id)))
+    return mailer.EmailJob(message_id=message_id, claim=claim, header_id=header_id, from_email=from_email,
+                           from_name=from_name, to_email=to, to_name=lead.full_name if lead.kind == "person" else "",
+                           subject=msg.subject, body=msg.body, footer=company.outreach.email_footer,
+                           references=references)
+
+
+def mark_email_data(message_id: int, claim: str, now: datetime | None = None,
+                    conn: sqlite3.Connection | None = None) -> bool:
+    """Just before DATA: record that the server is about to receive the email (state "data"), if it may still go.
+
+    False (and the claim is released, nothing counted) when the claim isn't this worker's any more, or the email
+    may no longer go: no longer approved (skipped, edited, the lead replied), email sending turned off or paused, the
+    company paused, the address suppressed. The worker then sends RSET instead of DATA: nothing is sent.
+    """
+    now = _utc(now or utcnow())
+    with _write_locked(conn) as c:
+        row = c.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        if row is None or row["email_claim"] != claim or row["email_state"] != "claimed":
+            return False
+        msg = _message_from_row(row)
+        company = get_company(msg.company_id, conn=c)
+        cfg = company.outreach
+        paused = cfg.email_paused_until is not None and _utc(cfg.email_paused_until) > now
+        stop = (msg.status != "approved" or msg.sent_at is not None or not cfg.email_sending or paused
+                or company.status != "active" or bool(_suppressions(c, [msg.email_to]))
+                or c.execute("SELECT 1 FROM messages WHERE lead_id = ? AND direction = 'inbound' LIMIT 1",
+                             (msg.lead_id,)).fetchone() is not None)
+        if stop:
+            c.execute("UPDATE messages SET email_state = '', email_claim = '' WHERE id = ? AND email_claim = ?",
+                      (message_id, claim))
+            return False
+        cur = c.execute("UPDATE messages SET email_state = 'data' WHERE id = ? AND email_claim = ? "
+                        "AND email_state = 'claimed'", (message_id, claim))
+        return cur.rowcount == 1
+
+
+def record_email_sent(message_id: int, header_id: str, address: str = "", now: datetime | None = None,
+                      conn: sqlite3.Connection | None = None) -> Message:
+    """The server accepted the email (250 after DATA): it is sent, sent_via "smtp".
+
+    Keyed on its Message-ID, not on its status or the claim, so the truth is recorded even if the lead's reply
+    skipped it meanwhile or the claim expired. Moves a new or qualified lead to contacted, and resets the mailbox's
+    failures in a row.
+    """
+    now = _utc(now or utcnow())
+    stamp = iso(now)
+    with _write_locked(conn) as c:
+        cur = c.execute("UPDATE messages SET status = 'sent', sent_at = ?, sent_via = 'smtp', email_state = 'sent', "
+                        "email_claim = '', send_error = '', updated_at = ? WHERE id = ? AND email_message_id = ? "
+                        "AND sent_at IS NULL", (stamp, stamp, message_id, header_id))
+        msg = get_message(message_id, conn=c)
+        if cur.rowcount == 1:
+            c.execute("UPDATE leads SET status = 'contacted', updated_at = ? WHERE id = ? "
+                      "AND status IN ('new', 'qualified')", (stamp, msg.lead_id))
+            if address:
+                _save_mailbox(c, normalize_email(address), now, failures=0)
+        return msg
+
+
+def record_email_failure(message_id: int, claim: str, kind: str, text: str, address: str = "",
+                         now: datetime | None = None, conn: sqlite3.Connection | None = None) -> None:
+    """What a failed send (mailer.Outcome.kind) does to the email, the mailbox and the company.
+
+    aborted: back to the queue. auth / config: back to the queue, the mailbox paused until its settings are saved or
+    the user clicks Try again. retry: back to the queue (failed after EMAIL_MAX_ATTEMPTS), the mailbox paused 5, 15,
+    then 60 minutes. bounce: failed, the address never emailed again. provider_block: failed, the mailbox paused 24
+    hours. failed: failed. unknown: never sent again automatically; the user decides. Bounces and policy rejections
+    can pause the company's email sending for 24 hours (BOUNCES_BEFORE_PAUSE, POLICY_REJECTS_BEFORE_PAUSE).
+    """
+    now = _utc(now or utcnow())
+    text = mailer.server_text(text)[:SEND_ERROR_MAX] if len(text) > SEND_ERROR_MAX else text
+    address = normalize_email(address)
+    with _write_locked(conn) as c:
+        row = c.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        owned = row is not None and row["email_claim"] == claim and row["email_state"] in EMAIL_IN_FLIGHT
+
+        def set_state(state: str, error: str, attempts: int | None = None) -> None:
+            if owned:
+                c.execute("UPDATE messages SET email_state = ?, email_claim = '', send_error = ?, "
+                          "email_attempts = COALESCE(?, email_attempts) WHERE id = ?",
+                          (state, error, attempts, message_id))
+
+        company_id = row["company_id"] if row is not None else None
+        lead_id = row["lead_id"] if row is not None else None
+        mailbox = _mailbox_row(c, address) if address else None
+        if kind == mailer.ABORTED:
+            set_state("", "")
+        elif kind in (mailer.AUTH, mailer.CONFIG):
+            set_state("", "")
+            _save_mailbox(c, address, now, auth_failed=1, paused_until=None, pause_reason=text)
+        elif kind in (mailer.RETRY, mailer.UNKNOWN):
+            if kind == mailer.RETRY:
+                attempts = (row["email_attempts"] if row is not None else 0) + 1
+                failed = attempts >= EMAIL_MAX_ATTEMPTS
+                set_state("failed" if failed else "", f"Tried {attempts} times: {text}" if failed else text, attempts)
+            else:
+                set_state("unknown", text)
+                if owned:
+                    _email_event(c, company_id, lead_id, message_id, "unknown", text, now=now)
+            if mailbox is not None:
+                failures = mailbox["failures"] + 1
+                pause = RETRY_PAUSES[min(failures, len(RETRY_PAUSES)) - 1]
+                reason = f"{failures} attempts failed in a row: {text}" if failures > 1 else text
+                _save_mailbox(c, address, now, failures=failures, paused_until=iso(now + pause), pause_reason=reason)
+        elif kind == mailer.BOUNCE:
+            set_state("failed", text)
+            if owned:
+                _add_suppression(c, row["email_to"], "bounce", company_id, lead_id, message_id, text, now)
+                _tag_lead(c, lead_id, "email-bounced")
+                _email_event(c, company_id, lead_id, message_id, "bounce", text, now=now)
+                _email_guard(c, company_id, "bounce", now)
+        elif kind == mailer.PROVIDER_BLOCK:
+            set_state("failed", text)
+            _save_mailbox(c, address, now, paused_until=iso(now + EMAIL_PAUSE), pause_reason=text)
+            if owned:
+                _email_event(c, company_id, lead_id, message_id, "policy_reject", text, now=now)
+                _email_guard(c, company_id, "policy_reject", now)
+        else:  # failed
+            set_state("failed", text)
+            if owned:
+                _email_event(c, company_id, lead_id, message_id, "send_failed", text, now=now)
+
+
+def resolve_email(message_id: int, action: str, now: datetime | None = None,
+                  conn: sqlite3.Connection | None = None) -> Message:
+    """The user's answer for an email that may have been sent ("unknown") or failed (the dashboard only).
+
+    mark_sent: it went out (seen in the Sent folder): sent, from the mailbox. send_again: it didn't, so it goes back to
+    the queue with the same Message-ID (it may arrive twice: the dashboard asks first). retry: a failed email goes back
+    to the queue.
+    """
+    now = _utc(now or utcnow())
+    with _write_locked(conn) as c:
+        msg = get_message(message_id, conn=c)
+        if msg.direction != "outbound" or msg.channel != "email":
+            raise ValueError("only emails can be resolved")
+        if action == "mark_sent" and msg.email_state == "unknown":
+            stamp = iso(_utc(msg.email_claimed_at) if msg.email_claimed_at else now)
+            c.execute("UPDATE messages SET status = 'sent', sent_at = COALESCE(sent_at, ?), sent_via = 'smtp', "
+                      "email_state = 'sent', send_error = '', updated_at = ? WHERE id = ?",
+                      (stamp, iso(now), message_id))
+            c.execute("UPDATE leads SET status = 'contacted', updated_at = ? WHERE id = ? "
+                      "AND status IN ('new', 'qualified')", (iso(now), msg.lead_id))
+            _email_event(c, msg.company_id, msg.lead_id, message_id, "resolved", "You marked it sent", now=now)
+        elif action == "send_again" and msg.email_state == "unknown" and msg.sent_at is None:
+            c.execute("UPDATE messages SET email_state = '', send_error = '' WHERE id = ?", (message_id,))
+            _email_event(c, msg.company_id, msg.lead_id, message_id, "resolved", "You chose Send again", now=now)
+        elif action == "retry" and msg.email_state == "failed" and msg.sent_at is None:
+            c.execute("UPDATE messages SET email_state = '', send_error = '', email_attempts = 0 WHERE id = ?",
+                      (message_id,))
+        else:
+            raise ValueError("This email can't be changed that way any more. Reload the page.")
+        return get_message(message_id, conn=c)
+
+
+def _save_email_pause(c: sqlite3.Connection, company_id: int, until: datetime | None, reason: str) -> None:
+    """Write only the email pause of a company's outreach settings, under the caller's write lock (as
+    _save_agent_pause does), so a profile save at the same moment can't undo it."""
+    row = c.execute("SELECT outreach FROM companies WHERE id = ?", (company_id,)).fetchone()
+    if row is None:
+        raise NotFound(f"company {company_id} not found")
+    current = _loads(row["outreach"], {})
+    outreach = {**(current if isinstance(current, dict) else {}),
+                "email_paused_until": iso(until) if until is not None else None,
+                "email_pause_reason": reason[:AGENT_PAUSE_REASON_MAX]}
+    c.execute("UPDATE companies SET outreach = ?, updated_at = ? WHERE id = ?",
+              (json.dumps(outreach), iso(), company_id))
+
+
+def resume_email_sending(company_id: int, conn: sqlite3.Connection | None = None) -> Company:
+    """Lift the company's email pause (the dashboard's Resume). Email sending stays on or off as it was."""
+    with _write_locked(conn) as c:
+        _save_email_pause(c, company_id, None, "")
+        return get_company(company_id, conn=c)
+
+
+def _email_guard(c: sqlite3.Connection, company_id: int | None, kind: str, now: datetime) -> None:
+    """Too many hard bounces or policy rejections for a company in 24 hours pause its email sending for 24 hours."""
+    if company_id is None:
+        return
+    limit = BOUNCES_BEFORE_PAUSE if kind == "bounce" else POLICY_REJECTS_BEFORE_PAUSE
+    count = c.execute("SELECT COUNT(*) FROM email_events WHERE company_id = ? AND kind = ? AND created_at > ?",
+                      (company_id, kind, iso(now - EMAIL_WINDOW))).fetchone()[0]
+    if count >= limit:
+        what = "hard bounces" if kind == "bounce" else "spam or policy rejections"
+        _save_email_pause(c, company_id, now + EMAIL_PAUSE,
+                          f"{count} {what} in 24 hours. Check the addresses you approve, and your domain's SPF, DKIM "
+                          "and DMARC, before you resume.")
+
+
+def _email_event(c: sqlite3.Connection, company_id: int | None, lead_id: int | None, message_id: int | None,
+                 kind: str, detail: str = "", inbound_key: str | None = None, now: datetime | None = None) -> None:
+    c.execute("INSERT OR IGNORE INTO email_events (company_id, lead_id, message_id, kind, detail, inbound_key, "
+              "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (company_id, lead_id, message_id, kind, (detail or "")[:SEND_ERROR_MAX], inbound_key, iso(now)))
+
+
+def list_email_events(company_id: int | None = None, lead_id: int | None = None, kinds: Iterable[str] = (),
+                      since: datetime | None = None, limit: int = 50,
+                      conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    """What the email sender and the inbox check did, newest first."""
+    where, args = ["1 = 1"], []
+    if company_id is not None:
+        where.append("company_id = ?")
+        args.append(company_id)
+    if lead_id is not None:
+        where.append("lead_id = ?")
+        args.append(lead_id)
+    if kinds := list(kinds):
+        where.append(f"kind IN ({', '.join('?' * len(kinds))})")
+        args.extend(kinds)
+    if since is not None:
+        where.append("created_at > ?")
+        args.append(iso(since))
+    with _conn(conn) as c:
+        rows = c.execute(f"SELECT * FROM email_events WHERE {' AND '.join(where)} ORDER BY created_at DESC, id DESC "
+                         "LIMIT ?", [*args, max(1, min(int(limit), 500))]).fetchall()
+    return [{**dict(r), "created_at": _when(r["created_at"])} for r in rows]
+
+
+def _tag_lead(c: sqlite3.Connection, lead_id: int | None, tag: str) -> None:
+    if lead_id is None:
+        return
+    row = c.execute("SELECT tags FROM leads WHERE id = ?", (lead_id,)).fetchone()
+    if row is None:
+        return
+    tags = _loads(row["tags"], [])
+    if tag not in tags:
+        c.execute("UPDATE leads SET tags = ? WHERE id = ?", (json.dumps([*tags, tag]), lead_id))
+
+
+def _add_suppression(c: sqlite3.Connection, address: str, reason: str, company_id: int | None = None,
+                     lead_id: int | None = None, message_id: int | None = None, detail: str = "",
+                     now: datetime | None = None) -> bool:
+    address = normalize_email(address)
+    if not address or "@" not in address:
+        return False
+    cur = c.execute("INSERT OR IGNORE INTO email_suppressions (email, reason, company_id, lead_id, message_id, detail, "
+                    "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (address, reason, company_id, lead_id, message_id, (detail or "")[:300], iso(now)))
+    return cur.rowcount == 1
+
+
+def add_suppression(address: str, reason: str = "manual", detail: str = "", company_id: int | None = None,
+                    lead_id: int | None = None, conn: sqlite3.Connection | None = None) -> bool:
+    """Never email this address again, for any company. True when it wasn't suppressed for that reason yet."""
+    if reason not in SUPPRESSION_REASONS:
+        raise ValueError(f"reason must be one of {', '.join(SUPPRESSION_REASONS)}")
+    if not mailer.valid_address(normalize_email(address)):
+        raise ValueError("enter a valid email address")
+    with _write_locked(conn) as c:
+        return _add_suppression(c, address, reason, company_id, lead_id, None, detail)
+
+
+def remove_suppression(suppression_id: int, conn: sqlite3.Connection | None = None) -> None:
+    with _write_locked(conn) as c:
+        c.execute("DELETE FROM email_suppressions WHERE id = ?", (suppression_id,))
+
+
+def list_suppressions(limit: int = 200, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    with _conn(conn) as c:
+        rows = c.execute("SELECT * FROM email_suppressions ORDER BY created_at DESC, id DESC LIMIT ?",
+                         (max(1, min(int(limit), 1000)),)).fetchall()
+    return [{**dict(r), "created_at": _when(r["created_at"])} for r in rows]
+
+
+def suppressed_addresses(addresses: Iterable[str], conn: sqlite3.Connection | None = None) -> dict[str, dict[str, Any]]:
+    """address (lower case) -> its suppression, for the addresses that have one."""
+    with _conn(conn) as c:
+        return {k: {**dict(v), "message": suppression_message(v)} for k, v in _suppressions(c, addresses).items()}
+
+
+def _unapprove_emails(c: sqlite3.Connection, lead_id: int) -> int:
+    """The lead's address changed, or the lead left the pipeline: its approved emails go back to draft, held, and its
+    email drafts are held, so nothing goes to an address nobody approved (emails being sent right now aside)."""
+    cur = c.execute("UPDATE messages SET status = 'draft', approved_via = '', auto_hold = 1, updated_at = ? "
+                    "WHERE lead_id = ? AND direction = 'outbound' AND channel = 'email' AND status = 'approved' "
+                    "AND sent_at IS NULL AND email_state NOT IN ('claimed', 'data')", (iso(), lead_id))
+    c.execute("UPDATE messages SET auto_hold = 1 WHERE lead_id = ? AND direction = 'outbound' AND channel = 'email' "
+              "AND status = 'draft'", (lead_id,))
+    return cur.rowcount
+
+
+def record_opt_out(lead_id: int, source: str, detail: str = "", message_id: int | None = None,
+                   addresses: Iterable[str] = (), now: datetime | None = None, event: bool = True,
+                   conn: sqlite3.Connection | None = None) -> Lead:
+    """The lead asked not to be contacted: their address (and `addresses`) is never emailed again, for any company;
+    the lead is disqualified, tagged "unsubscribed" and gets a dated note. A company lead (the address is the
+    company's own) also puts the company on the never-contact list. Only restricts, so Claude may record one."""
+    now = _utc(now or utcnow())
+    with _write_locked(conn) as c:
+        lead = get_lead(lead_id, conn=c)
+        for address in {normalize_email(lead.email), *(normalize_email(a) for a in addresses)}:
+            if address:
+                _add_suppression(c, address, "opt_out", lead.company_id, lead.id, message_id, detail, now)
+        tags = lead.tags + ["unsubscribed"] if "unsubscribed" not in lead.tags else lead.tags
+        note = f"{now:%Y-%m-%d}: Asked not to be contacted ({source})."
+        notes = lead.notes if note in lead.notes else f"{lead.notes}\n{note}".strip()
+        if lead.kind == "account" and lead.lead_company.strip():
+            company = get_company(lead.company_id, conn=c)
+            listed = {e.casefold() for e in company.icp.exclude_companies}
+            if lead.lead_company.casefold() not in listed:
+                update_company(lead.company_id, {"icp": {"exclude_companies": [*company.icp.exclude_companies,
+                                                                               lead.lead_company]}}, conn=c)
+        updated = update_lead(lead_id, {"status": "disqualified", "tags": tags, "notes": notes}, conn=c)
+        _unapprove_emails(c, lead_id)
+        if event:
+            _email_event(c, lead.company_id, lead.id, message_id, "opt_out", detail or source, now=now)
+        return updated
+
+
+def inbound_index(now: datetime | None = None, conn: sqlite3.Connection | None = None) -> dict[str, set[str]]:
+    """What the inbox check looks for: the Message-IDs OpenBerry gave its emails, and the addresses of leads that got
+    an email marked sent in the last REPLY_LOOKBACK (also by hand), so other mail is never read in full."""
+    now = _utc(now or utcnow())
+    with _conn(conn) as c:
+        ours = {r[0] for r in c.execute("SELECT email_message_id FROM messages WHERE email_message_id IS NOT NULL "
+                                        "AND email_state != ''")}
+        leads = {normalize_email(r[0]) for r in c.execute(
+            "SELECT DISTINCT l.email FROM leads l JOIN messages m ON m.lead_id = l.id WHERE m.direction = 'outbound' "
+            "AND m.channel = 'email' AND m.sent_at > ? AND l.email != ''", (iso(now - REPLY_LOOKBACK),))}
+    return {"ours": ours, "leads": leads}
+
+
+def _match_inbound(c: sqlite3.Connection, inbound: mailer.Inbound, now: datetime) -> tuple[Message | None, Lead | None]:
+    """The email and lead an inbox message is about: by the Message-IDs it refers to (a bounce: the email that
+    bounced, else its failed address), the List-Unsubscribe token, or the sender being a lead we emailed."""
+    bounce = inbound.kind in (mailer.BOUNCE, mailer.SOFT_BOUNCE, mailer.POLICY_REJECT)
+    ids = list(dict.fromkeys([*inbound.references, *(inbound.original_ids if bounce else ())]))
+    row = None
+    if ids:
+        row = c.execute(f"SELECT * FROM messages WHERE email_message_id IN ({', '.join('?' * len(ids))}) "
+                        "ORDER BY COALESCE(sent_at, email_claimed_at) DESC, id DESC LIMIT 1", ids).fetchone()
+    if row is None and bounce and inbound.failed_recipients:
+        wanted = [normalize_email(a) for a in inbound.failed_recipients]
+        row = c.execute(f"SELECT * FROM messages WHERE lower(email_to) IN ({', '.join('?' * len(wanted))}) "
+                        "AND direction = 'outbound' AND email_state IN ('sent', 'unknown', 'bounced') "
+                        "AND COALESCE(sent_at, email_claimed_at) > ? ORDER BY COALESCE(sent_at, email_claimed_at) DESC "
+                        "LIMIT 1", [*wanted, iso(now - BOUNCE_LOOKBACK)]).fetchone()
+    if row is None and inbound.token:
+        row = c.execute("SELECT * FROM messages WHERE email_message_id = ? OR email_message_id LIKE ? LIMIT 1",
+                        (f"<{inbound.token}>", f"<{inbound.token}@%")).fetchone()
+    if row is not None:
+        msg = _message_from_row(row)
+        return msg, get_lead(msg.lead_id, conn=c)
+    if bounce or not inbound.from_email:
+        return None, None
+    lead_row = c.execute(
+        "SELECT l.* FROM leads l JOIN messages m ON m.lead_id = l.id WHERE lower(trim(l.email)) = ? "
+        "AND m.direction = 'outbound' AND m.channel = 'email' AND m.sent_at > ? ORDER BY m.sent_at DESC LIMIT 1",
+        (normalize_email(inbound.from_email), iso(now - REPLY_LOOKBACK))).fetchone()
+    return None, (_lead_from_row(lead_row) if lead_row is not None else None)
+
+
+NO_REPLY_TEXT = "(The reply had no text of its own.)"
+
+
+def record_inbound(inbound: mailer.Inbound, key: str, now: datetime | None = None,
+                   conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Record what an inbox message means, once (its Message-ID, else `key`): a reply is logged (log_reply stops the
+    sequence), an opt-out also suppresses the address and disqualifies the lead, a hard bounce suppresses the address
+    and marks the email, auto-replies and soft bounces are only noted. A message about no lead is not stored.
+
+    Returns {"status": "recorded" | "duplicate" | "unmatched", "kind", "lead_id", "message_id"}.
+    """
+    now = _utc(now or utcnow())
+    key = (inbound.message_id or key)[:300]
+    with _write_locked(conn) as c:
+        if c.execute("SELECT 1 FROM email_events WHERE inbound_key = ?", (key,)).fetchone():
+            return {"status": "duplicate", "kind": inbound.kind, "lead_id": None, "message_id": None}
+        msg, lead = _match_inbound(c, inbound, now)
+        if lead is None:
+            return {"status": "unmatched", "kind": inbound.kind, "lead_id": None, "message_id": None}
+        message_id = msg.id if msg is not None else None
+        if msg is not None and msg.email_state == "unknown":  # something came back for it: it went out
+            stamp = iso(_utc(msg.email_claimed_at) if msg.email_claimed_at else now)
+            c.execute("UPDATE messages SET status = CASE WHEN status = 'approved' THEN 'sent' ELSE status END, "
+                      "sent_at = COALESCE(sent_at, ?), sent_via = 'smtp', email_state = 'sent', send_error = '' "
+                      "WHERE id = ?", (stamp, msg.id))
+            _email_event(c, lead.company_id, lead.id, msg.id, "resolved", "It went out: something came back for it",
+                         now=now)
+        kind = inbound.kind
+        detail = inbound.subject
+        if kind == mailer.BOUNCE:
+            if msg is None:
+                return {"status": "unmatched", "kind": kind, "lead_id": None, "message_id": None}
+            bounced = next((a for a in inbound.failed_recipients
+                            if normalize_email(a) == normalize_email(msg.email_to)), msg.email_to)
+            detail = f"Bounced: {inbound.status} {inbound.diagnostic}".strip()
+            c.execute("UPDATE messages SET email_state = 'bounced', send_error = ? WHERE id = ? "
+                      "AND sent_at IS NOT NULL", (detail[:SEND_ERROR_MAX], msg.id))
+            _add_suppression(c, bounced or lead.email, "bounce", lead.company_id, lead.id, msg.id, detail, now)
+            _tag_lead(c, lead.id, "email-bounced")
+        elif kind in (mailer.SOFT_BOUNCE, mailer.POLICY_REJECT):
+            detail = f"{inbound.status} {inbound.diagnostic}".strip() or inbound.subject
+        elif kind in (mailer.OPT_OUT, mailer.REPLY):
+            log_reply(lead.id, inbound.text or NO_REPLY_TEXT, channel="email", generated_by="inbox", conn=c)
+            if kind == mailer.OPT_OUT:
+                detail = f"Opt-out: {inbound.opt_out}"
+                record_opt_out(lead.id, "email reply", detail, message_id=message_id, now=now, event=False,
+                               addresses=[inbound.from_email, msg.email_to if msg is not None else ""], conn=c)
+        _email_event(c, lead.company_id, lead.id, message_id, kind, detail, inbound_key=key, now=now)
+        if kind in ("bounce", "policy_reject"):
+            _email_guard(c, lead.company_id, kind, now)
+        return {"status": "recorded", "kind": kind, "lead_id": lead.id, "message_id": message_id}
+
+
+def email_attention(company_id: int, now: datetime | None = None,
+                    conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """What needs the user on the Email sending card: emails that may have been sent ("unknown") or failed, and the
+    bounces and opt-outs of the last 7 days."""
+    now = _utc(now or utcnow())
+    with _conn(conn) as c:
+        rows = c.execute("SELECT * FROM messages WHERE company_id = ? AND direction = 'outbound' AND channel = 'email' "
+                         "AND email_state IN ('unknown', 'failed') AND sent_at IS NULL AND status = 'approved' "
+                         "ORDER BY email_claimed_at DESC, id DESC LIMIT 50", (company_id,)).fetchall()
+        events = list_email_events(company_id, kinds=("bounce", "opt_out"), since=now - timedelta(days=7), limit=20,
+                                   conn=c)
+    return {"messages": [_message_from_row(r) for r in rows], "events": events}

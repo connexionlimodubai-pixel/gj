@@ -126,7 +126,15 @@ CREATE TABLE IF NOT EXISTS messages (
     sent_via TEXT NOT NULL DEFAULT '',  -- who recorded the send: '' the user, 'agent' the AI agent, 'claude' Claude
     auto_hold INTEGER NOT NULL DEFAULT 0,  -- 1: the user held this draft, so auto-approve never approves it
     approved_via TEXT NOT NULL DEFAULT '',  -- 'auto': auto-approve approved it after its review window
-    auto_blocked INTEGER NOT NULL DEFAULT 0  -- 1: auto-approve found a reason not to approve this draft (yet)
+    auto_blocked INTEGER NOT NULL DEFAULT 0,  -- 1: auto-approve found a reason not to approve this draft (yet)
+    -- Email sending (version 5), outbound emails only: '' | claimed | data | sent | failed | unknown | bounced
+    email_state TEXT NOT NULL DEFAULT '',
+    email_message_id TEXT,  -- the Message-ID header OpenBerry gave it, at its first claim; never changed
+    email_to TEXT NOT NULL DEFAULT '',  -- the address it was sent to (the lead's email may change later)
+    email_claim TEXT NOT NULL DEFAULT '',  -- the sending worker's random token while it is claimed
+    email_claimed_at TEXT,
+    email_attempts INTEGER NOT NULL DEFAULT 0,
+    send_error TEXT NOT NULL DEFAULT ''  -- why sending failed, in plain words
 );
 CREATE INDEX IF NOT EXISTS ix_messages_company_status ON messages(company_id, status);
 
@@ -172,9 +180,64 @@ CREATE TABLE IF NOT EXISTS place_ids (
     checked_at TEXT NOT NULL,
     PRIMARY KEY (company_id, place_id)
 );
+
+-- Email sending (schema version 5). Addresses OpenBerry never emails again: an opt-out, a hard bounce, or the user's
+-- own choice. For every company (one mailbox per install), and they outlive the lead, so a business found again on
+-- Google Maps stays suppressed.
+CREATE TABLE IF NOT EXISTS email_suppressions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,                 -- lower case, trimmed
+    reason TEXT NOT NULL,                -- 'opt_out' | 'bounce' | 'manual'
+    company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+    lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+    message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    detail TEXT NOT NULL DEFAULT '',     -- the bounce's status and the server's words, or the opt-out's words (short)
+    created_at TEXT NOT NULL,
+    UNIQUE (email, reason)
+);
+
+-- What the email sender and the inbox check did: replies, opt-outs, bounces, auto-replies, failures. inbound_key (the
+-- inbox message's Message-ID, else its folder and UID) makes sure an inbox message is handled once.
+CREATE TABLE IF NOT EXISTS email_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+    lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+    message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    inbound_key TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_email_events_inbound ON email_events(inbound_key) WHERE inbound_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_email_events_company ON email_events(company_id, created_at);
+
+-- The mailbox's own state, one row per From address (changing mailboxes starts fresh): its pause, failures in a row,
+-- the inbox check (when it last worked, its last error, and the last UID read in each folder).
+CREATE TABLE IF NOT EXISTS email_mailbox (
+    address TEXT PRIMARY KEY,
+    paused_until TEXT,
+    pause_reason TEXT NOT NULL DEFAULT '',
+    auth_failed INTEGER NOT NULL DEFAULT 0,   -- 1: login or security refused; nothing is tried until settings change
+    failures INTEGER NOT NULL DEFAULT 0,      -- temporary sending failures in a row
+    imap_state TEXT NOT NULL DEFAULT '{}',    -- {"INBOX": {"uidvalidity": n, "last_uid": n}, ...}
+    imap_checked_at TEXT,                     -- the last inbox check that worked
+    imap_error TEXT NOT NULL DEFAULT '',      -- why the last inbox check failed ('' when it worked)
+    imap_tried_at TEXT,                       -- the last inbox check, whatever happened
+    updated_at TEXT NOT NULL
+);
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+# Columns schema version 5 added to messages: outbound emails OpenBerry sends from the user's mailbox.
+EMAIL_MESSAGE_COLUMNS = {
+    "email_state": "TEXT NOT NULL DEFAULT ''",
+    "email_message_id": "TEXT",
+    "email_to": "TEXT NOT NULL DEFAULT ''",
+    "email_claim": "TEXT NOT NULL DEFAULT ''",
+    "email_claimed_at": "TEXT",
+    "email_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "send_error": "TEXT NOT NULL DEFAULT ''",
+}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -196,6 +259,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN approved_via TEXT NOT NULL DEFAULT ''")
         if "auto_blocked" not in message_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN auto_blocked INTEGER NOT NULL DEFAULT 0")
+        for column, kind in EMAIL_MESSAGE_COLUMNS.items():  # version 5: email sending
+            if column not in message_columns:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {column} {kind}")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_messages_email_mid ON messages(email_message_id) "
+                     "WHERE email_message_id IS NOT NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_messages_email_state ON messages(email_state) "
+                     "WHERE email_state != ''")
         # After the column exists (an old database gets it just above): the agent's rolling 24-hour count.
         conn.execute("CREATE INDEX IF NOT EXISTS ix_messages_company_sent ON messages(company_id, sent_via, sent_at)")
         # Older versions left sent_at empty on an outbound message recorded straight away as 'replied' (sent, then

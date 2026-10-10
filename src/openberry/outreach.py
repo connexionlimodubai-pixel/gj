@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
-from .models import Company, CompanyIn, Lead, Message, OutreachConfig, Signal
+from .models import EMAIL_FOOTER_MAX, Company, CompanyIn, Lead, Message, OutreachConfig, Signal
 
 # LinkedIn's limits on the personal note of a connection request (LinkedIn help a563153, a6239760): free (Basic)
 # accounts can add a note to at most 5 invitations a month, each at most 200 characters; Premium accounts can add
@@ -88,6 +88,62 @@ def unfilled_placeholder(text: str) -> str:
     Claude's drafts are refused with one (save_outreach_message), and auto-approve never approves one."""
     found = PLACEHOLDER.search(text)
     return found.group(0) if found else ""
+
+
+# The email footer (outreach.email_footer), added under every email OpenBerry sends from the user's mailbox: who is
+# writing, the business address and how to opt out. It must name the opt-out ("unsubscribe", English or Arabic) and
+# have no unfilled [placeholder] such as the default's "[your business address]".
+FOOTER_EXAMPLE = '{name} · [your business address]\nNot interested? Reply "unsubscribe" and we won\'t email you again.'
+FOOTER_OPT_OUT_WORDS = ("unsubscribe", "الغاء الاشتراك", "إلغاء الاشتراك")
+_BRACKETED = re.compile(r"\[[^\[\]\n]{1,80}\](?!\()|\{[^{}\n]{1,80}\}")
+
+
+def default_footer(company: CompanyIn) -> str:
+    return FOOTER_EXAMPLE.format(name=company.name)
+
+
+def footer_problems(company: CompanyIn, footer: str | None = None) -> list[str]:
+    """What keeps the email footer from being used ([] when it is fine): it is required to turn email sending on."""
+    from .collectors.base import find_terms  # the collectors import repo, which imports this module
+
+    text = company.outreach.email_footer if footer is None else footer.replace("\r\n", "\n").strip()
+    if not text:
+        return ["write a footer that says who you are, gives your business address and says how to opt out"]
+    problems = []
+    if len(text) > EMAIL_FOOTER_MAX:
+        problems.append(f"keep the footer under {EMAIL_FOOTER_MAX} characters (it has {len(text)})")
+    if not any(word in text.lower() for word in FOOTER_OPT_OUT_WORDS):
+        problems.append('say how to opt out with the word "unsubscribe", e.g. Reply "unsubscribe" and we won\'t email '
+                        "you again")
+    if placeholder := (unfilled_placeholder(text) or (m.group(0) if (m := _BRACKETED.search(text)) else "")):
+        problems.append(f"replace {placeholder} with your own details")
+    if banned := find_terms(text, company.outreach.banned_words):
+        problems.append(f"the footer uses a banned word or phrase ({', '.join(banned)})")
+    return problems
+
+
+def email_setting_refusals(current: OutreachConfig, wanted: OutreachConfig) -> list[str]:
+    """What a change of the email sending settings would do that only the user may do, on the dashboard's Email
+    sending card ([] when nothing). Claude (MCP) and the JSON API may only make sending safer: turn it off, lower the
+    daily limit, space emails further apart, narrow the sending hours, or stop auto-approved emails being sent."""
+    refused = []
+    if wanted.email_sending and not current.email_sending:
+        refused.append("turn email sending on")
+    if wanted.email_daily_limit > current.email_daily_limit:
+        refused.append("raise the daily email limit")
+    if wanted.email_gap_minutes < current.email_gap_minutes:
+        refused.append("send emails closer together")
+    if (not set(wanted.email_days) <= set(current.email_days) or wanted.email_start_hour < current.email_start_hour
+            or wanted.email_end_hour > current.email_end_hour):
+        refused.append("widen the sending hours")
+    if wanted.email_footer != current.email_footer:
+        refused.append("change the email footer")
+    if wanted.email_send_auto_approved and not current.email_send_auto_approved:
+        refused.append("let auto-approved emails be sent")
+    if (wanted.email_paused_until != current.email_paused_until
+            or wanted.email_pause_reason != current.email_pause_reason):
+        refused.append("pause or resume email sending")
+    return refused
 
 
 def first_name(lead: Lead) -> str:

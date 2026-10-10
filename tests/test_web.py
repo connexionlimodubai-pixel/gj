@@ -1456,7 +1456,7 @@ def test_agent_queue_lists_approved_linkedin_messages_with_escaped_names(client,
     assert ("It isn't in your AI agent's queue right now (another message to this lead is ahead in the queue"
             in html_lib.unescape(client.get(resp.headers["location"]).text))
     resp = post(client, f"{base}/messages/{email.id}", {"action": "approve", "next": f"{base}/outreach"})
-    assert "Approved. Copy it and send it from LinkedIn or your inbox." in client.get(resp.headers["location"]).text
+    assert "Approved. Copy it and send it from your inbox." in client.get(resp.headers["location"]).text
 
 
 def test_agent_prompts_name_the_company_by_id_only(client, company):

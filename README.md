@@ -30,7 +30,8 @@ The app isn't code-signed, which is why Windows and macOS ask you to confirm onc
    Every point is explained ("Title matches 'Travel Manager'", "Hiring for a relevant role, 3d ago").
 4. **Draft outreach** with Claude (or a free local Ollama model, or templates): LinkedIn notes, DMs, emails and follow-ups.
    **Nothing is sent before it is approved.** You review, copy, send and mark as sent, or, if you choose, let your own
-   AI agent send the approved LinkedIn messages ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)).
+   AI agent send the approved LinkedIn messages ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)),
+   or let OpenBerry email the approved emails from your own mailbox ([email sending](#email-sending-optional)).
    Approve drafts one at a time, or tick several on the Outreach page and approve them together. If you can't keep up,
    turn on **auto-approve** (off by default): drafts you don't approve, hold or skip are approved after a review window
    you choose (2 hours by default, counted from the last edit), and never for leads who replied or are on your
@@ -100,7 +101,7 @@ Then ask Claude things like:
 - *"Find the decision-makers at the companies that are hiring, and add them."*
 - *"Draft LinkedIn connection notes for every hot lead that has no message yet."*
 
-Claude gets 24 tools (scan, prospecting plan, add leads, assess, outreach context, save draft, log reply, pipeline report…),
+Claude gets 25 tools (scan, prospecting plan, add leads, assess, outreach context, save draft, log reply, pipeline report…),
 plus prompts such as `daily_lead_hunt`. See [docs/CLAUDE_MCP.md](docs/CLAUDE_MCP.md).
 To let Claude browse LinkedIn and the web too, add free open-source MCP servers next to OpenBerry
 (Playwright, fetch, SearXNG, and optionally a LinkedIn MCP server at your own risk). See [docs/OPEN_SOURCE_STACK.md](docs/OPEN_SOURCE_STACK.md).
@@ -125,6 +126,24 @@ placeholder. Claude and the JSON API can turn agent sending and auto-approve off
 There are no tricks to hide automation. LinkedIn's User Agreement forbids automated messaging, so your account can be
 restricted. Read [docs/AI_AGENT_SENDING.md](docs/AI_AGENT_SENDING.md) before you turn it on.
 
+## Email sending (optional)
+
+Connect your own mailbox on the **Mailbox** page (Zoho Mail, Hostinger, Gmail with an app password, or any provider with
+SMTP and IMAP), then turn on **Email sending** for a company on its Outreach page (off by default). While the dashboard
+or the desktop app is open, OpenBerry emails the emails you approved, one at a time, from your mailbox:
+- approved emails only, exactly as approved, plain text, with your footer (who you are, your address, how to opt out)
+- a daily limit (default 30, at most 100), at least 5 minutes between two emails, and sending hours (default Monday to
+  Friday, 09:00 to 18:00)
+- one email per person at a time, follow-ups only when due, never twice, never leads who replied or are on your
+  never-contact list
+- it reads your inbox (read-only) every 5 minutes: a reply stops the sequence, an opt-out ("unsubscribe", "stop",
+  also in Arabic) puts the address on a never-email list, a bounce marks the address as not working
+
+Your password stays in the data folder's `.env` file, never in the database, never shown to Claude or the API. Claude
+and the API can turn email sending off, never on. **Hostinger forbids email to people who did not opt in**, and Zoho
+Mail allows one-to-one business email only: use a separate mailbox (ideally a separate domain) for outreach, set up
+SPF, DKIM and DMARC, and start with 5 to 10 a day. Read [docs/EMAIL_SENDING.md](docs/EMAIL_SENDING.md) first.
+
 ## Configuration
 
 Everything is optional for local use. Put settings in `.env` (read from the current folder and `~/.openberry/.env`)
@@ -140,6 +159,7 @@ or in the environment. See [`.env.example`](.env.example) for the other settings
 | `OPENBERRY_CONTACT_EMAIL` | Contact e-mail for SEC EDGAR's required User-Agent |
 | `OPENBERRY_GOOGLE_PLACES_KEY` | Google Maps API key for the Google Maps businesses source. Desktop users can paste it on the **API keys** page instead |
 | `OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT` | Most Google Maps searches a month (default 900; Google's free tier is 1,000) |
+| `OPENBERRY_SMTP_HOST`, `_PORT` (465 or 587), `_USERNAME`, `_PASSWORD`, `_FROM_EMAIL`, `_FROM_NAME`; `OPENBERRY_IMAP_HOST`, `_USERNAME`, `_PASSWORD`, `_SAVE_SENT` | Your mailbox for [email sending](docs/EMAIL_SENDING.md). Usually saved from the dashboard's **Mailbox** page instead |
 | `GITHUB_TOKEN` | Higher GitHub limits; stargazers of repos you admin |
 | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME` | Optional Reddit source (see its terms) |
 | `OPENBERRY_OLLAMA_URL`, `OPENBERRY_OLLAMA_MODEL` | Free local LLM: the "Local AI (Ollama)" writer in a lead's *Draft a message* card |
@@ -174,7 +194,7 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ## Responsible use
 
-- OpenBerry never sends messages or automates LinkedIn itself. LinkedIn's User Agreement prohibits automation. If you add a
+- OpenBerry never automates LinkedIn itself. LinkedIn's User Agreement prohibits automation. If you add a
   LinkedIn MCP server or turn on [AI agent sending](docs/AI_AGENT_SENDING.md), that is your decision and your account's risk.
 - Each data source has terms. They are summarised in [docs/SIGNALS.md](docs/SIGNALS.md). Google News RSS is for personal,
   non-commercial use, and Reddit requires an agreement for commercial use.
@@ -182,15 +202,16 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
   honour opt-outs.
 - Google Maps: OpenBerry keeps only each business's Place ID, as Google's terms require. Contact details come from the
   business's own website. Read the [Google Maps Platform Terms](https://cloud.google.com/maps-platform/terms) before you use it.
-- Bulk email: these are business contact addresses. Email providers block mailboxes that send to people who didn't opt
+- Email: these are business contact addresses. Email providers block mailboxes that send to people who didn't opt
   in (Hostinger's rules say so), and anti-spam laws apply. Send few, personal, relevant emails and honour opt-outs.
-  OpenBerry never sends email itself.
+  OpenBerry sends email only if you turn on [email sending](docs/EMAIL_SENDING.md), only the emails you approved, and
+  stops for anyone who replies, opts out or bounces.
 
 ## Development
 
 ```bash
 uv sync --extra dev
-uv run pytest            # ~1,180 tests, no network needed
+uv run pytest            # ~1,380 tests, no network needed
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

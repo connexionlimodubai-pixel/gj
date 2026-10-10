@@ -38,6 +38,8 @@ EXPECTED_TOOLS = {
     "get_prospecting_plan", "export_leads_csv", "delete_lead",
     # AI agent sending (tests/test_agent_sending.py)
     "get_send_queue", "confirm_message_sent", "report_send_problem",
+    # Email sending from the user's mailbox, read-only (tests/test_email_sending.py)
+    "get_email_status",
 }
 
 INIT_REQUEST = {
@@ -95,7 +97,7 @@ async def test_lists_all_tools_with_annotations():
     assert tools["run_signal_scan"].annotations.open_world_hint is True
     assert tools["add_leads"].annotations.read_only_hint is False
     assert tools["add_leads"].annotations.destructive_hint is False
-    assert len(tools) == 24
+    assert len(tools) == 25
     assert tools["get_send_queue"].annotations.read_only_hint is True
     for name in ("confirm_message_sent", "report_send_problem"):
         assert tools[name].annotations.read_only_hint is False and tools[name].annotations.destructive_hint is False
@@ -498,7 +500,7 @@ async def test_connection_note_limits_follow_the_linkedin_account(company):
         assert "limited to 200" in await error_text(c, "update_message", message_id=saved["message_id"],
                                                     body="z" * 250)
         email = await ok(c, "get_outreach_context", lead_id=lead.id, channel="email")
-        assert email["limits"] == {} and "Hard limit" not in email["channel_guidance"]
+        assert email["limits"] == {"email_sending": False} and "Hard limit" not in email["channel_guidance"]
 
         # Five notes sent this month (by anyone): Claude is told before writing a sixth.
         other, _ = repo.upsert_lead(company.id, LeadIn(full_name="Earlier Lead",

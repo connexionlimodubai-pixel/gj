@@ -327,6 +327,56 @@
     });
   }
 
+  /* ---------------------------------------------------------------- email sending */
+  // The Mailbox page: a provider preset fills the servers and port (the user can still change them), shows its
+  // help and warning, and the Zoho data centre picks the host ending. Without this file the fields are typed.
+  function initMailbox() {
+    const form = $("form[data-mailbox-form]");
+    if (!form) return;
+    let presets = {};
+    try { presets = JSON.parse(form.getAttribute("data-presets") || "{}"); } catch (_) { return; }
+    const provider = $("[data-mail-provider]", form);
+    const region = $("[data-mail-region]", form);
+    const smtp = $("[data-mail-smtp]", form);
+    const imap = $("[data-mail-imap]", form);
+    const port = $("[data-mail-port]", form);
+    const saveSent = $("[data-mail-save-sent]", form);
+    if (!provider) return;
+    const apply = (fill) => {
+      const key = provider.value;
+      $$("[data-provider-help]", form).forEach((el) => { el.hidden = el.getAttribute("data-provider-help") !== key; });
+      $$("[data-provider-only]", form).forEach((el) => {
+        el.hidden = !el.getAttribute("data-provider-only").split(" ").includes(key);
+      });
+      const preset = presets[key];
+      if (!fill || !preset || !preset.smtp) return;
+      const ending = region && !region.closest("[hidden]") ? region.value : "com";
+      if (smtp && !smtp.readOnly) smtp.value = preset.smtp.replace("{region}", ending);
+      if (imap && !imap.readOnly) imap.value = preset.imap.replace("{region}", ending);
+      if (port && !port.disabled) port.value = String(preset.port);
+      if (saveSent && !saveSent.disabled) saveSent.checked = !!preset.save_sent;
+    };
+    provider.addEventListener("change", () => apply(true));
+    if (region) region.addEventListener("change", () => apply(true));
+    apply(false);
+  }
+
+  // The Email sending card: the preview shows the footer as it is typed. A checkbox with data-confirm-check asks
+  // before it is ticked (unticking never asks).
+  function initEmailCard() {
+    $$("[data-footer-input]").forEach((area) => {
+      const card = area.closest(".email-card");
+      const out = card ? $("[data-footer-preview]", card) : null;
+      if (!out) return;
+      area.addEventListener("input", () => { out.textContent = area.value; });
+    });
+    $$("input[type=checkbox][data-confirm-check]").forEach((box) => {
+      box.addEventListener("change", () => {
+        if (box.checked && !window.confirm(box.getAttribute("data-confirm-check"))) box.checked = false;
+      });
+    });
+  }
+
   /* ---------------------------------------------------------------- scan status polling */
   function initScanPoll() {
     const el = $("[data-scan-poll]");
@@ -577,6 +627,8 @@
     initDetailsLinks();
     initCopy();
     initCounters();
+    initMailbox();
+    initEmailCard();
     initScanPoll();
     initAutofill();
     $$("form[data-wizard]").forEach(initWizard);

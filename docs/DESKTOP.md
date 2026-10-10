@@ -167,6 +167,12 @@ Then close OpenBerry and open it again. The [README](../README.md#configuration)
 Some settings can be entered in the app: open **API keys** in the menu to add your Google Maps key. It is saved in the
 same `.env` file, which only your user account can read, and you don't need to restart.
 
+To let OpenBerry email the emails you approve from your own mailbox, open **Mailbox** in the menu, choose your
+provider (Zoho Mail, Hostinger or Gmail), and type your address and password (or app password). The password is saved
+in the same `.env` file and never shown again. Then turn on **Email sending** on a company's Outreach page. Emails go
+out only while the app is open; close it and sending waits. Read [EMAIL_SENDING.md](EMAIL_SENDING.md) first: some
+providers, Hostinger for example, forbid email to people who did not opt in.
+
 ## Updating
 
 1. Close OpenBerry.
@@ -183,7 +189,7 @@ Claude Desktop settings again ([Connect Claude Desktop](#connect-claude-desktop)
 ## Closing the app
 
 Closing the window stops OpenBerry (on a Mac, **OpenBerry → Quit OpenBerry** or Cmd+Q also works). Its
-scheduled scans and hot-lead alerts only run while it is open. When you open it again, any scans that have
+scheduled scans, hot-lead alerts and [email sending](EMAIL_SENDING.md) only run while it is open. When you open it again, any scans that have
 fallen due run straight away. Claude Desktop can still use OpenBerry's tools while the app is closed.
 
 If OpenBerry opened in your web browser instead of its own window (see below), closing the browser tab does
@@ -258,7 +264,7 @@ How it fits together:
   1. `--version`
   2. `demo`
   3. `serve`: health check, the demo dashboard, the Connect Claude page and a static file.
-  4. An MCP handshake over stdio with `tools/list` (24 tools) and a tool call.
+  4. An MCP handshake over stdio with `tools/list` (25 tools) and a tool call.
   5. `OpenBerry --smoke`: the app starts its server, checks it and stops, without a window.
 
   It exits with an error and says what broke.

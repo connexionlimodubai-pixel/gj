@@ -28,6 +28,7 @@ from ..models import (
     SIGNAL_TYPES,
     TIERS,
     TONES,
+    WEEKDAYS,
     Company,
     Lead,
 )
@@ -38,7 +39,7 @@ from ..outreach import (
     account_label,
     connect_note_limit,
 )
-from .forms import AGENT_LIMIT_RANGE, AUTO_APPROVE_HOURS_RANGE
+from .forms import AGENT_LIMIT_RANGE, AUTO_APPROVE_HOURS_RANGE, EMAIL_GAP_RANGE, EMAIL_LIMIT_RANGE
 from .icons import ICONS, LOGO
 from .session import csrf_token, is_logged_in, pop_flashes
 
@@ -48,6 +49,7 @@ STATIC_DIR = WEB_DIR / "static"
 REPO_URL = "https://github.com/connexionlimodubai-pixel/gj"
 DOCS_URL = REPO_URL + "#readme"
 AGENT_DOCS_URL = REPO_URL + "/blob/main/docs/AI_AGENT_SENDING.md"
+EMAIL_DOCS_URL = REPO_URL + "/blob/main/docs/EMAIL_SENDING.md"
 
 CHANNEL_LABELS = {
     "linkedin_connect": "LinkedIn connection note",
@@ -114,6 +116,25 @@ def ago(dt: datetime | None, now: datetime | None = None) -> str:
 def abs_dt(dt: datetime | None) -> str:
     dt = as_utc(dt)
     return f"{dt.day} {dt:%b %Y, %H:%M} UTC" if dt else ""
+
+
+def local_dt(dt: datetime | None) -> str:
+    """A time on this computer's clock, as the email sending hours are: "Mon 13 Oct, 09:00"."""
+    dt = as_utc(dt)
+    if not dt:
+        return ""
+    local = repo.local_time(dt)
+    return f"{local:%a} {local.day} {local:%b, %H:%M}"
+
+
+def to_datetime(value: Any) -> datetime | None:
+    """An ISO 8601 string (as repo returns them) or a datetime, as an aware datetime; None for anything else."""
+    if isinstance(value, str) and value:
+        try:
+            return as_utc(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+    return as_utc(value) if isinstance(value, datetime) else None
 
 
 def iso_dt(dt: datetime | None) -> str:
@@ -202,7 +223,14 @@ def scan_status_label(status: str) -> str:
 
 
 # Message.sent_via -> who recorded the send, shown next to sent messages ("" = the user, shown as nothing).
-SENT_VIA_LABELS = {"agent": "Sent by AI agent", "claude": "Marked sent by Claude"}
+SENT_VIA_LABELS = {"agent": "Sent by AI agent", "claude": "Marked sent by Claude", "smtp": "Sent from your mailbox"}
+# email_events.kind -> what the lead page's timeline says (repo.record_inbound, record_email_failure, resolve_email).
+EMAIL_EVENT_LABELS = {
+    "reply": "Replied", "auto_reply": "Automatic reply (out of office)", "bounce": "Bounced: the address doesn't work",
+    "soft_bounce": "Delivery delayed", "policy_reject": "Refused by their mail server",
+    "opt_out": "Asked not to be emailed", "send_failed": "Sending failed", "unknown": "May have been sent",
+    "resolved": "Resolved",
+}
 
 
 def sent_via_label(message: Any) -> str:
@@ -274,7 +302,8 @@ def _build_env() -> jinja2.Environment:
         lstrip_blocks=True,
     )
     env.filters.update(
-        ago=ago, abs_dt=abs_dt, iso_dt=iso_dt, compact=compact, safe_url=safe_url, mailto=mailto, host=host,
+        ago=ago, abs_dt=abs_dt, local_dt=local_dt, iso_dt=iso_dt, todatetime=to_datetime, compact=compact,
+        safe_url=safe_url, mailto=mailto, host=host,
         reason_parts=reason_parts, top_reason=top_reason, initials=initials, plural=plural,
         signal_label=signal_label,
         channel_label=lambda c: CHANNEL_LABELS.get(c, c),
@@ -297,8 +326,10 @@ def _build_env() -> jinja2.Environment:
         query_with=query_with, version=__version__,
         select_options=select_options, check_options=check_options, pending_review=pending_review,
         SCAN_STATUS_LABELS=SCAN_STATUS_LABELS,
-        DOCS_URL=DOCS_URL, AGENT_DOCS_URL=AGENT_DOCS_URL, ICONS=ICONS, LOGO=LOGO,
+        DOCS_URL=DOCS_URL, AGENT_DOCS_URL=AGENT_DOCS_URL, EMAIL_DOCS_URL=EMAIL_DOCS_URL, ICONS=ICONS, LOGO=LOGO,
+        EMAIL_EVENT_LABELS=EMAIL_EVENT_LABELS,
         AGENT_LIMIT_RANGE=AGENT_LIMIT_RANGE, AUTO_APPROVE_HOURS_RANGE=AUTO_APPROVE_HOURS_RANGE,
+        EMAIL_LIMIT_RANGE=EMAIL_LIMIT_RANGE, EMAIL_GAP_RANGE=EMAIL_GAP_RANGE, WEEKDAYS=WEEKDAYS,
         message_version=repo.message_version, BULK_MESSAGES_MAX=repo.BULK_MESSAGES_MAX,
         SIZE_OPTIONS=[(s, f"{s} employees") for s in COMPANY_SIZES],
         SIZE_CHIPS=[(s, s) for s in COMPANY_SIZES],

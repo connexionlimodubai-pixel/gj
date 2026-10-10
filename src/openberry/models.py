@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 # --------------------------------------------------------------------------------------
 # Vocabularies
@@ -65,17 +65,32 @@ SCAN_STATUSES: dict[str, str] = {
     "nothing_configured": "No sources configured",
 }
 JOB_BOARD_PROVIDERS = ("greenhouse", "lever", "ashby")
-# Channels an AI agent may send through the send queue (email is always sent by the user).
+# Channels an AI agent may send through the send queue (never email: OpenBerry's own email sending does that).
 AGENT_CHANNELS = ("linkedin_connect", "linkedin_dm")
 # Message.sent_via: who recorded the send. "" = the user (dashboard, API, CSV), "agent" = confirm_message_sent,
-# "claude" = Claude marked it sent with update_message (counts toward the agent's daily limit too).
-SENT_VIA = ("", "agent", "claude")
+# "claude" = Claude marked it sent with update_message (counts toward the agent's daily limit too), "smtp" =
+# OpenBerry sent it from the user's own mailbox (email sending, repo.record_email_sent).
+SENT_VIA = ("", "agent", "claude", "smtp")
+SENT_VIA_SMTP = "smtp"
 AGENT_PAUSE_REASON_MAX = 500
 # OutreachConfig fields of auto-approve: changed on the dashboard's Outreach page only (repo.update_company keeps them
 # on a profile save; Claude and the JSON API may only turn it off or make the window longer).
 AUTO_APPROVE_SETTINGS = ("auto_approve", "auto_approve_hours", "auto_approve_since")
 # Message.approved_via: "auto" = auto-approve approved it (repo.auto_approve_due), "" = a person did.
 APPROVED_VIA_AUTO = "auto"
+# OutreachConfig fields of email sending: changed on the Outreach page's Email sending card only (repo.update_company
+# keeps them on a profile save; Claude and the JSON API may only turn it off, lower the daily limit, space emails
+# further apart or stop auto-approved emails being sent).
+EMAIL_SETTINGS = ("email_sending", "email_daily_limit", "email_gap_minutes", "email_days", "email_start_hour",
+                  "email_end_hour", "email_footer", "email_send_auto_approved", "email_paused_until",
+                  "email_pause_reason")
+EMAIL_FOOTER_MAX = 600
+# Message.email_state of an outbound email OpenBerry sends from the user's mailbox (repo.claim_next_email):
+# "" not tried (or back in the queue), "claimed" being prepared, "data" the mail server is receiving it, "sent",
+# "failed" (the reason in send_error), "unknown" (the connection broke while the server was receiving it: it may have
+# gone out, so it is never sent again automatically), "bounced" (sent, then a hard bounce came back).
+EMAIL_STATES = ("", "claimed", "data", "sent", "failed", "unknown", "bounced")
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 # Google Maps searches (SignalConfig.places_queries) a profile may hold, and their length.
 MAX_PLACES_QUERIES = 30
@@ -141,6 +156,24 @@ LineList = Annotated[list[str], BeforeValidator(split_lines)]
 
 def _blank_to_none(value: Any) -> Any:
     return None if isinstance(value, str) and not value.strip() else value
+
+
+def _weekdays(value: Any) -> Any:
+    """0 (Monday) to 6 (Sunday), sorted and deduplicated; also accepts "Mon, Tue" and "0,1"."""
+    if isinstance(value, str):
+        value = split_list(value)
+    if not isinstance(value, (list, tuple, set)):
+        return value
+    days: set[int] = set()
+    for item in value:
+        text = str(item).strip()
+        if text.isdecimal() and int(text) < len(WEEKDAYS):
+            days.add(int(text))
+        elif text[:3].title() in WEEKDAYS:
+            days.add(WEEKDAYS.index(text[:3].title()))
+        else:
+            raise ValueError(f"unknown weekday {text!r}: use 0 (Monday) to 6 (Sunday)")
+    return sorted(days)
 
 
 class _Model(BaseModel):
@@ -266,7 +299,8 @@ class OutreachConfig(_Model):
         default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot "
                                       "lead, however it turned hot (scan, Claude, import or edit). Drafts are never "
                                       "sent: a person approves them (or auto_approve does, if the user turned it on) "
-                                      "and sends them, or lets their own AI agent send approved LinkedIn messages.")
+                                      "and sends them, lets their own AI agent send approved LinkedIn messages, or "
+                                      "lets OpenBerry email approved emails from their mailbox (email_sending).")
     banned_words: StrList = Field(default_factory=list, description="Words/phrases messages must never use")
     extra_instructions: str = Field(default="", description="Anything Claude must respect when writing messages")
     # LinkedIn's own limits on connection-request notes depend on the account (LinkedIn help a563153, a6239760):
@@ -295,20 +329,54 @@ class OutreachConfig(_Model):
         default=None, description="When auto-approve was turned on: drafts written before get the full window from "
                                   "then")
 
+    # Email sending (repo.email_queue / repo.claim_next_email): OpenBerry sends the approved emails from the user's own
+    # mailbox (the Mailbox page), exactly as approved plus the footer. Off by default, and only the dashboard turns it
+    # on, raises the limits, widens the sending hours, changes the footer or resumes a pause.
+    email_sending: bool = Field(
+        default=False, description="Send approved emails from the user's own mailbox (the dashboard's Mailbox page)")
+    email_daily_limit: int = Field(
+        default=30, ge=1, le=100, description="Most emails sent from the mailbox for this company in any 24 hours")
+    email_gap_minutes: int = Field(
+        default=5, ge=1, le=240, description="At least this many minutes between two emails from the mailbox")
+    email_days: Annotated[list[int], BeforeValidator(lambda v: _weekdays(v))] = Field(
+        default_factory=lambda: [0, 1, 2, 3, 4], description="Days emails may go out: 0 = Monday ... 6 = Sunday")
+    email_start_hour: int = Field(default=9, ge=0, le=23, description="Sending hours start (local time)")
+    email_end_hour: int = Field(default=18, ge=1, le=24, description="Sending hours end (local time)")
+    email_footer: str = Field(
+        default="", max_length=EMAIL_FOOTER_MAX, description="Added under every email when it is sent: who you are, "
+                                                             "your business address and how to opt out")
+    email_send_auto_approved: bool = Field(
+        default=False, description="Also send emails that auto-approve approved (nobody read them)")
+    email_paused_until: datetime | None = Field(
+        default=None, description="Email sending is paused until then (bounces or the mail provider refusing)")
+    email_pause_reason: str = Field(default="", description="Why email sending paused")
+
     @field_validator("linkedin_account", mode="before")
     @classmethod
     def _account_word(cls, v: Any) -> Any:
         return v.strip().lower() if isinstance(v, str) else v
 
-    @field_validator("agent_paused_until", "auto_approve_since")
+    @field_validator("agent_paused_until", "auto_approve_since", "email_paused_until")
     @classmethod
     def _utc_times(cls, v: datetime | None) -> datetime | None:
         return v.replace(tzinfo=timezone.utc) if v is not None and v.tzinfo is None else v
 
-    @field_validator("agent_pause_reason")
+    @field_validator("agent_pause_reason", "email_pause_reason")
     @classmethod
     def _short_reason(cls, v: str) -> str:
         return v[:AGENT_PAUSE_REASON_MAX]
+
+    @field_validator("email_footer", mode="before")
+    @classmethod
+    def _footer_lines(cls, v: Any) -> Any:
+        # As message bodies are stored (repo.message_text): LF line breaks, the ends trimmed.
+        return v.replace("\r\n", "\n").replace("\r", "\n").strip() if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _hours_in_order(self) -> "OutreachConfig":
+        if self.email_end_hour <= self.email_start_hour:
+            raise ValueError("email sending hours must end after they start")
+        return self
 
 
 class NotifyConfig(_Model):
@@ -488,12 +556,21 @@ class Message(_Model):
     updated_at: datetime
     sent_at: datetime | None = None
     sent_via: str = Field(default="", description="'' = marked sent by the user, 'agent' = the AI agent sent it, "
-                                                   "'claude' = Claude marked it sent")
+                                                   "'claude' = Claude marked it sent, 'smtp' = OpenBerry sent it from "
+                                                   "the user's mailbox")
     auto_hold: bool = Field(default=False, description="The user held this draft: auto-approve never approves it")
     approved_via: str = Field(default="", description="'auto' = auto-approve approved it after its review window, "
                                                        "'' = a person did (or it isn't approved)")
     auto_blocked: bool = Field(default=False, description="Auto-approve found a reason not to approve this draft: once "
                                                           "the reason goes away, it waits a full review window again")
+    # Email sending (schema version 5): outbound emails OpenBerry sends from the user's mailbox.
+    email_state: str = Field(default="", description="'' | claimed | data | sent | failed | unknown | bounced")
+    email_message_id: str | None = Field(default=None, description="The Message-ID header OpenBerry gave the email")
+    email_to: str = Field(default="", description="The address it was sent to (the lead's email may change later)")
+    email_claim: str = ""
+    email_claimed_at: datetime | None = None
+    email_attempts: int = 0
+    send_error: str = Field(default="", description="Why sending it failed, in plain words")
 
 
 class ScanRun(_Model):

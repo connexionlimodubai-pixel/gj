@@ -646,6 +646,54 @@ a.lead-name:hover { color: var(--accent-text); }
 .keys-howto .steps-list { list-style: decimal; padding-left: 20px; display: grid; gap: 4px; color: var(--text-2); }
 .keys-terms { display: flex; gap: 6px; align-items: flex-start; }
 .keys-terms .icon { flex: none; margin-top: 2px; }
+/* Email sending (the Outreach page's card, the Mailbox page, the lines under each email) */
+.email-setup > summary { cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-weight: 600; color: var(--accent-text); }
+.email-setup > summary .icon { transition: transform 0.15s ease; }
+.email-setup[open] > summary { margin-bottom: var(--s4); }
+.email-setup[open] > summary .icon { transform: rotate(90deg); }
+.email-form { display: grid; gap: var(--s3); }
+.email-form .grid-2 .field { max-width: none; }
+.email-hours { border: 0; padding: 0; margin: 0; display: grid; gap: var(--s2); min-width: 0; }
+.day-chips { gap: 6px; }
+.day-chips .chip { padding: 6px 10px 6px 8px; }
+.hours-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.hours-row .input { width: auto; flex: 0 0 auto; }
+.check-line { display: flex; align-items: flex-start; gap: var(--s2); font-size: 13.5px; cursor: pointer; }
+.check-line input { flex: none; width: 16px; height: 16px; margin-top: 2px; accent-color: var(--accent); }
+.email-preview { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); overflow: hidden; font-size: 13px; }
+.email-preview-head { display: flex; gap: var(--s2); padding: 6px var(--s3); border-bottom: 1px solid var(--border); min-width: 0; }
+.email-preview-head .muted { flex: 0 0 56px; }
+.email-preview-body, .email-preview-footer { padding: var(--s3); white-space: pre-wrap; overflow-wrap: anywhere; }
+.email-preview-body { max-height: 220px; overflow-y: auto; }
+.email-preview-footer { color: var(--text-2); border-top: 1px dashed var(--border-strong); background: var(--surface-2); }
+.pill-email-queued { background: var(--good-bg); color: var(--good); font-weight: 500; }
+.pill-email-held { background: var(--warning-bg); color: var(--warning); font-weight: 500; }
+.pill-email-problem { background: var(--danger-bg); color: var(--danger); font-weight: 500; }
+.email-line { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 2px var(--s2); margin-top: var(--s2); font-size: 12.5px; color: var(--text-2); }
+.email-line > .icon { margin-top: 2px; }
+.email-line > span { overflow-wrap: anywhere; }
+.email-line-held > .icon { color: var(--warning); }
+.email-line-problem { padding: var(--s2) var(--s3); border-radius: var(--radius-sm); background: var(--warning-bg); color: var(--text); }
+.email-line-problem > .icon { color: var(--warning); }
+.email-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s1); }
+.email-attention .email-actions { margin-top: var(--s2); }
+.bubble-edit .email-actions form, .email-actions form { display: contents; }
+.email-footer-preview { display: grid; gap: 2px; margin-top: var(--s2); padding: var(--s2) var(--s3); border-left: 3px solid var(--border-strong); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--surface-2); }
+.email-footer-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; color: var(--text-2); }
+.email-events { margin-top: var(--s3); }
+.email-events .list { margin-top: var(--s2); }
+.agent-line-held { background: var(--warning-bg); }
+.agent-line-held > .icon { color: var(--warning); }
+.keys-card + .keys-card { margin-top: var(--s4); }
+.mailbox-form { display: grid; gap: var(--s3); }
+.mailbox-form .field { min-width: 0; }
+.provider-help { display: grid; gap: var(--s2); }
+.provider-help .callout { margin-top: 0; }
+.provider-help .icon { vertical-align: -2px; }
+.mailbox-http { margin-bottom: var(--s4); }
+.mailbox-status .btn-row form { display: contents; }
+.suppression-list .list-item form { flex: none; }
+.email-profile-line .icon { vertical-align: -2px; }
 .places-field { display: grid; gap: 6px; align-content: start; min-width: 0; }
 .places-usage .icon { vertical-align: -2px; }
 .break { overflow-wrap: anywhere; }

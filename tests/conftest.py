@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from email_fakes import offline_mail  # noqa: F401  (a fixture: fake mail servers, no network)
 from openberry import db
 from openberry.config import Settings, set_settings
 

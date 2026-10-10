@@ -134,11 +134,11 @@ class Settings:
     # session cookies when it is https://.
     base_url: str = DEFAULT_BASE_URL
     # Dashboard login. Empty = no login (fine on localhost, NOT for a public server).
-    password: str = ""
-    secret_key: str = ""
+    password: str = field(default="", repr=False)
+    secret_key: str = field(default="", repr=False)
     # Bearer token for the JSON API and the HTTP MCP endpoint. Empty = disabled when a
     # password is set, open when no password is set (local mode).
-    api_token: str = ""
+    api_token: str = field(default="", repr=False)
     # Let anyone open /register (agency mode: clients fill in their own details).
     public_registration: bool = False
     # Background scheduler: runs each company's signal scan on its interval and, every tick
@@ -151,11 +151,11 @@ class Settings:
     ollama_url: str = ""
     ollama_model: str = "llama3.1"
     # Optional GitHub token: raises the API limit from 60 to 5000 requests/hour.
-    github_token: str = ""
+    github_token: str = field(default="", repr=False)
     # Optional Reddit API app credentials (Reddit blocks unauthenticated access since 2026;
     # commercial use needs Reddit's agreement). The Reddit source stays off without them.
     reddit_client_id: str = ""
-    reddit_client_secret: str = ""
+    reddit_client_secret: str = field(default="", repr=False)
     reddit_username: str = ""  # used in the User-Agent Reddit requires: "... (by /u/<username>)"
     # Let RSS feeds point at private/loopback hosts (e.g. a local RSSHub). Keep off when public
     # registration is on or the dashboard is shared.
@@ -171,6 +171,21 @@ class Settings:
     # Why Google refused the saved key when the API keys page last checked it: "<last 4 characters of the key>
     # <reason>", "" when Google accepted it. Not secret; written by the API keys page only.
     google_places_key_status: str = ""
+    # The user's own mailbox for email sending (docs/EMAIL_SENDING.md), saved from the dashboard's Mailbox page. Only
+    # the dashboard process (openberry serve, the desktop app) sends or reads mail; the passwords are never shown,
+    # logged or given to Claude or the JSON API.
+    mail_provider: str = ""          # the Mailbox page's preset: zoho, zoho_personal, hostinger, gmail or other
+    smtp_host: str = ""
+    smtp_port: int = 465             # 465 (TLS from the start) or 587 (STARTTLS); nothing else is used
+    smtp_username: str = ""          # usually the full email address
+    smtp_password: str = field(default="", repr=False)
+    smtp_from_email: str = ""        # the From address; the username when empty
+    smtp_from_name: str = ""
+    imap_host: str = ""
+    imap_port: int = 993             # TLS only
+    imap_username: str = ""          # the SMTP username when empty
+    imap_password: str = field(default="", repr=False)  # the SMTP password when empty
+    imap_save_sent: bool = True      # put a copy of each sent email in the mailbox's Sent folder
     user_agent: str = "OpenBerry/0.1 (+https://github.com/connexionlimodubai-pixel/gj)"
     http_timeout: float = 20.0
     # Extra Host names accepted by the HTTP MCP endpoint (without an API token) and, in local
@@ -211,11 +226,21 @@ class Settings:
             google_places_key_status=os.environ.get("OPENBERRY_GOOGLE_PLACES_KEY_STATUS", "").strip(),
             allowed_hosts=[h.strip() for h in os.environ.get("OPENBERRY_ALLOWED_HOSTS", "").split(",") if h.strip()],
         )
+        for name in MAILBOX_SETTINGS:  # parsed as apply_setting parses them
+            spec = DASHBOARD_SETTINGS[name]
+            setattr(s, spec.attr, _parsed(spec, os.environ.get(name)))
         if not s.secret_key:
             # Sessions won't survive restarts without a fixed key; that's acceptable locally.
             s.secret_key = secrets.token_hex(32)
         _mark_settings_file_seen()
         return s
+
+    def mailbox_address(self) -> str:
+        """The From address of the connected mailbox (lower case), or "" while it isn't fully set up: email sending
+        needs the SMTP server, username and password, and the IMAP server for replies, opt-outs and bounces."""
+        if not (self.smtp_host and self.smtp_username and self.smtp_password and self.imap_host):
+            return ""
+        return (self.smtp_from_email or self.smtp_username).strip().lower()
 
 
 _settings: Settings | None = None
@@ -245,19 +270,66 @@ class DashboardSetting:
     default: Any
     secret: bool                    # never shown back; the dashboard says "ending in 1234" at most
     parse: Callable[[str], Any]     # raw .env text -> attribute value; ValueError -> default
+    strip: bool = True              # False: saved exactly as typed (a password may start or end with a space)
 
 
 def _limit(raw: str) -> int:
     return max(0, int(raw.strip()))
 
 
-# Only these names can be written from the dashboard. SMTP/IMAP credentials, for example, would be one entry each.
+def _port(*allowed: int) -> Callable[[str], int]:
+    def parse(raw: str) -> int:
+        port = int(raw.strip())
+        if port not in allowed:
+            raise ValueError(f"port {port} is not one of {allowed}")
+        return port
+    return parse
+
+
+def _flag(raw: str) -> bool:
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _host(raw: str) -> str:
+    return raw.strip().lower()
+
+
+def _exact(raw: str) -> str:
+    return raw
+
+
+def _parsed(spec: DashboardSetting, raw: str | None) -> Any:
+    if raw is None or not raw.strip():
+        return spec.default
+    try:
+        return spec.parse(raw)
+    except ValueError:
+        return spec.default
+
+
+# Only these names can be written from the dashboard: the Google Maps key (API keys page) and the mailbox (Mailbox
+# page).
 DASHBOARD_SETTINGS: dict[str, DashboardSetting] = {
     "OPENBERRY_GOOGLE_PLACES_KEY": DashboardSetting("google_places_key", "", True, str.strip),
     "OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT": DashboardSetting(
         "google_places_monthly_limit", DEFAULT_GOOGLE_PLACES_MONTHLY_LIMIT, False, _limit),
     "OPENBERRY_GOOGLE_PLACES_KEY_STATUS": DashboardSetting("google_places_key_status", "", False, str.strip),
+    "OPENBERRY_MAIL_PROVIDER": DashboardSetting("mail_provider", "", False, str.strip),
+    "OPENBERRY_SMTP_HOST": DashboardSetting("smtp_host", "", False, _host),
+    "OPENBERRY_SMTP_PORT": DashboardSetting("smtp_port", 465, False, _port(465, 587)),
+    "OPENBERRY_SMTP_USERNAME": DashboardSetting("smtp_username", "", False, str.strip),
+    "OPENBERRY_SMTP_PASSWORD": DashboardSetting("smtp_password", "", True, _exact, strip=False),
+    "OPENBERRY_SMTP_FROM_EMAIL": DashboardSetting("smtp_from_email", "", False, str.strip),
+    "OPENBERRY_SMTP_FROM_NAME": DashboardSetting("smtp_from_name", "", False, str.strip),
+    "OPENBERRY_IMAP_HOST": DashboardSetting("imap_host", "", False, _host),
+    "OPENBERRY_IMAP_PORT": DashboardSetting("imap_port", 993, False, _port(993)),
+    "OPENBERRY_IMAP_USERNAME": DashboardSetting("imap_username", "", False, str.strip),
+    "OPENBERRY_IMAP_PASSWORD": DashboardSetting("imap_password", "", True, _exact, strip=False),
+    "OPENBERRY_IMAP_SAVE_SENT": DashboardSetting("imap_save_sent", True, False, _flag),
 }
+# The mailbox's settings (the Mailbox page), read by Settings.from_env through the same parsers.
+MAILBOX_SETTINGS = tuple(name for name in DASHBOARD_SETTINGS
+                         if name.startswith(("OPENBERRY_SMTP_", "OPENBERRY_IMAP_", "OPENBERRY_MAIL_")))
 
 # What settings_file() looked like when this process last read it: (inode, mtime_ns, size), None before the first
 # look. os.replace gives every save a new inode, so two saves within one clock tick still differ.
@@ -315,11 +387,7 @@ def apply_setting(name: str, value: str | None, path: Path, settings: Settings |
         return
     os.environ[name] = value
     _FROM_FILE[name] = _resolved(path)
-    try:
-        parsed = spec.parse(value)
-    except ValueError:
-        parsed = spec.default
-    setattr(settings, spec.attr, parsed)
+    setattr(settings, spec.attr, _parsed(spec, value))
 
 
 def refresh_saved_settings(settings: Settings | None = None) -> bool:

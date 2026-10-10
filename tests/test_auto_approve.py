@@ -662,7 +662,7 @@ def test_a_version_3_database_gets_the_auto_approve_columns_even_when_opened_twi
     with db.connect() as c:
         columns = [r[1] for r in c.execute("PRAGMA table_info(messages)")]
         assert [columns.count(name) for name in ("auto_hold", "approved_via", "auto_blocked")] == [1, 1, 1]
-        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 4
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 5
     messages = sorted(repo.list_messages(1), key=lambda m: m.id)
     assert [(m.status, m.sent_via, m.auto_hold, m.approved_via, m.auto_blocked) for m in messages] == [
         ("sent", "agent", False, "", False), ("approved", "", False, "", False), ("draft", "", False, "", False)]

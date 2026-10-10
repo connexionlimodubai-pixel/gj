@@ -93,8 +93,15 @@ def int_bounds(model: Any, name: str, default: tuple[int, int]) -> tuple[int, in
     return int(low), int(high)
 
 
+def checked(form: FormData, name: str) -> bool:
+    """A single checkbox: ticked submits a truthy value, unticked submits nothing."""
+    return str(form.get(name) or "").strip().lower() in TRUTHY
+
+
 AGENT_LIMIT_RANGE = int_bounds(OutreachConfig, "agent_daily_limit", (1, 50))
 AUTO_APPROVE_HOURS_RANGE = int_bounds(OutreachConfig, "auto_approve_hours", (1, 72))
+EMAIL_LIMIT_RANGE = int_bounds(OutreachConfig, "email_daily_limit", (1, 100))
+EMAIL_GAP_RANGE = int_bounds(OutreachConfig, "email_gap_minutes", (1, 240))
 
 
 # --------------------------------------------------------------------------------------

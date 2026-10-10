@@ -38,6 +38,16 @@
 {% if agent.enabled and agent.paused %}
 <div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>AI agent sending is paused</strong> until {{ agent.paused_until|abs_dt }}. Your agent reported a problem on LinkedIn: <span class="agent-reason">{{ agent.pause_reason or "no details given" }}</span> <a href="{{ base }}/outreach#agent">Review it on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
 {% endif %}
+{% if email.enabled and email.paused_until %}
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>Email sending is paused</strong> until {{ email.paused_until|local_dt }}: <span class="agent-reason">{{ email.pause_reason or "no details given" }}</span> <a href="{{ base }}/outreach#email">Review it on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
+{% elif email.enabled and email.mailbox.paused %}
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>Your mailbox is paused</strong>: <span class="agent-reason">{{ email.mailbox.pause_reason or "no details given" }}</span> <a href="/mailbox#status">Mailbox settings{{ m.icon("chevron-right", 12) }}</a></p></div>
+{% elif email.enabled and email.mailbox.inbox_error %}
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>OpenBerry can't read your inbox</strong>, so it sends no email: <span class="agent-reason">{{ email.mailbox.inbox_error }}</span> <a href="/mailbox#status">Mailbox settings{{ m.icon("chevron-right", 12) }}</a></p></div>
+{% endif %}
+{% if email.attention %}
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>{{ email.attention|length|plural("email") }} from your mailbox need{{ "s" if email.attention|length == 1 }} you:</strong> it may have been sent, or sending failed. <a href="{{ base }}/outreach#email">Check them on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
+{% endif %}
 
 <section class="kpis" aria-label="Key numbers">
   {% for k in kpis %}
@@ -50,6 +60,9 @@
 </section>
 {% if agent.enabled and not agent.paused %}
 <p class="agent-line">{{ m.icon("bot", 15) }}<span>AI agent sending is on: <strong>{{ agent.sent_last_24h }} of {{ agent.daily_limit }}</strong> LinkedIn messages sent in the last 24 hours{% if agent.state == "limit" %}, daily limit reached{% else %} · {{ agent.eligible_total }} queued{% endif %}.</span> <a href="{{ base }}/outreach#agent">Outreach{{ m.icon("chevron-right", 12) }}</a></p>
+{% endif %}
+{% if email.enabled %}
+<p class="agent-line{% if email.state not in ('on', 'outside_hours') %} agent-line-held{% endif %}">{{ m.icon("mail", 15) }}<span>Email sending is {{ "on" if email.state in ("on", "outside_hours") else email.label|lower }}: <strong>{{ email.sent_last_24h }} of {{ email.daily_limit }}</strong> emails sent in the last 24 hours · {{ email.eligible_total }} queued.</span> <a href="{{ base }}/outreach#email">Outreach{{ m.icon("chevron-right", 12) }}</a></p>
 {% endif %}
 
 <div class="dash-grid">

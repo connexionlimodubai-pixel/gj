@@ -27,7 +27,7 @@
         {% if lead.linkedin_url|safe_url %}<a class="btn btn-sm" href="{{ lead.linkedin_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("linkedin", 14) }}LinkedIn</a>{% endif %}
         {% if lead.profile_url|safe_url %}<a class="btn btn-sm" href="{{ lead.profile_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{% if lead.profile_url|maps_link %}{{ m.icon("pin", 14) }}Google Maps{% else %}{{ m.icon("external", 14) }}Profile{% endif %}</a>{% endif %}
         {% if lead.website|safe_url %}<a class="btn btn-sm" href="{{ lead.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("globe", 14) }}Website</a>{% endif %}
-        {% if lead.email|mailto %}<a class="btn btn-sm" href="{{ lead.email|mailto }}" target="_blank" rel="noopener noreferrer">{{ m.icon("mail", 14) }}{{ lead.email }}</a>{% endif %}
+        {% if lead.email|mailto %}<a class="btn btn-sm" href="{{ lead.email|mailto }}" target="_blank" rel="noopener noreferrer">{{ m.icon("mail", 14) }}{{ lead.email }}</a>{% if suppression %}<span class="pill pill-email-problem" title="{{ suppression.message }}">{{ m.icon("ban", 12) }}{{ {"opt_out": "Unsubscribed", "bounce": "Bounced", "manual": "Never email"}[suppression.reason] }}</span>{% endif %}{% endif %}
         {% if lead.phone %}<span class="btn btn-sm btn-static">{{ m.icon("phone", 14) }}{{ lead.phone }}</span>{% endif %}
         {% if lead.github_username %}<a class="btn btn-sm" href="https://github.com/{{ lead.github_username|urlencode }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("github", 14) }}{{ lead.github_username }}</a>{% endif %}
       </p>
@@ -109,7 +109,7 @@
     </section>
 
     <section class="card" id="outreach" aria-labelledby="outreach-title">
-      <header class="card-head"><div><h2 id="outreach-title">Outreach</h2><p class="card-sub">Drafts are never sent. Approve, copy, send it yourself, then mark it sent{% if company.outreach.agent_sending %}, or let your AI agent send approved LinkedIn messages (<a href="{{ base }}/outreach#agent">agent sending</a>){% endif %}.{% if company.outreach.auto_approve %} Drafts you don't approve, hold or skip are approved automatically {{ company.outreach.auto_approve_hours|plural("hour") }} after they're written or last edited (<a href="{{ base }}/outreach#auto-approve">auto-approve</a>).{% endif %}</p></div></header>
+      <header class="card-head"><div><h2 id="outreach-title">Outreach</h2><p class="card-sub">Drafts are never sent. Approve, copy, send it yourself, then mark it sent{% if company.outreach.agent_sending %}, or let your AI agent send approved LinkedIn messages (<a href="{{ base }}/outreach#agent">agent sending</a>){% endif %}.{% if company.outreach.email_sending %} OpenBerry emails approved emails from your mailbox (<a href="{{ base }}/outreach#email">email sending</a>).{% endif %}{% if company.outreach.auto_approve %} Drafts you don't approve, hold or skip are approved automatically {{ company.outreach.auto_approve_hours|plural("hour") }} after they're written or last edited (<a href="{{ base }}/outreach#auto-approve">auto-approve</a>).{% endif %}</p></div></header>
       {% if messages %}
       {% set note_max = connect_note_limit(company) %}
       <div class="chat">
@@ -117,7 +117,7 @@
         {% set connect = msg.channel == "linkedin_connect" %}
         {% if msg.direction == "inbound" %}
         <article class="bubble bubble-in" id="msg-{{ msg.id }}">
-          <header class="bubble-head">{{ m.icon("reply", 14) }}<strong>{{ lead.full_name or "Lead" }} replied</strong><span class="muted">· {{ msg.channel|channel_label }} · {{ m.when(msg.sent_at or msg.created_at) }}</span></header>
+          <header class="bubble-head">{{ m.icon("reply", 14) }}<strong>{{ lead.full_name or "Lead" }} replied</strong><span class="muted">· {{ msg.channel|channel_label }}{% if msg.generated_by == "inbox" %} · found in your inbox{% endif %} · {{ m.when(msg.sent_at or msg.created_at) }}</span></header>
           <div class="bubble-body">{{ msg.body }}</div>
         </article>
         {% elif msg.status in ("draft", "approved") %}
@@ -125,10 +125,10 @@
           <form method="post" action="{{ base }}/messages/{{ msg.id }}" id="msg-{{ msg.id }}-form" data-keep-scroll>
             {{ m.csrf() }}
             <input type="hidden" name="next" value="{{ lead_url }}#msg-{{ msg.id }}">
-            <header class="bubble-head">{{ m.msg_pill(msg.status) }}{{ m.approved_via(msg) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ msg.generated_by }} · {{ m.when(msg.created_at) }}</span></header>
+            <header class="bubble-head">{{ m.msg_pill(msg.status) }}{{ m.approved_via(msg) }}{{ m.email_pill(email.info.get(msg.id)) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ msg.generated_by }} · {{ m.when(msg.created_at) }}</span></header>
             {% if msg.channel == "email" %}
             <label class="sr-only" for="msg-{{ msg.id }}-subject">Subject</label>
-            <input class="input" id="msg-{{ msg.id }}-subject" name="subject" value="{{ msg.subject }}" placeholder="Subject">
+            <input class="input" id="msg-{{ msg.id }}-subject" name="subject" value="{{ msg.subject }}" placeholder="Subject (needed to approve it)">
             {% endif %}
             <label class="sr-only" for="msg-{{ msg.id }}-body">Message</label>
             <textarea class="input" id="msg-{{ msg.id }}-body" name="body" rows="{{ 4 if connect else 7 }}"{% if connect %} data-maxlen="{{ note_max }}" data-counter="msg-{{ msg.id }}-count"{% endif %}>{{ msg.body }}</textarea>
@@ -146,12 +146,14 @@
             </div>
           </form>
           {{ m.auto_line(msg, auto_states.get(msg.id), lead_url ~ "#msg-" ~ msg.id, form_id="msg-" ~ msg.id ~ "-form") }}
+          {{ m.email_line(msg, email.info.get(msg.id), email.footer_added, lead_url ~ "#msg-" ~ msg.id) }}
         </article>
         {% else %}
         <article class="bubble bubble-out" id="msg-{{ msg.id }}">
-          <header class="bubble-head">{{ m.msg_pill(msg.status) }}{{ m.approved_via(msg) }}{{ m.sent_via(msg) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ m.when(msg.sent_at or msg.updated_at) }}</span></header>
+          <header class="bubble-head">{{ m.msg_pill(msg.status) }}{{ m.approved_via(msg) }}{{ m.sent_via(msg) }}{{ m.email_pill(email.info.get(msg.id)) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ m.when(msg.sent_at or msg.updated_at) }}</span></header>
           {% if msg.subject %}<p class="bubble-subject">{{ msg.subject }}</p>{% endif %}
           <div class="bubble-body" id="msg-{{ msg.id }}-text">{{ msg.body }}</div>
+          {{ m.email_line(msg, email.info.get(msg.id), "", lead_url ~ "#msg-" ~ msg.id) }}
           <div class="btn-row">
             {{ m.copy_button("#msg-" ~ msg.id ~ "-text", "Copy", "btn btn-sm btn-ghost") }}
             {% if msg.status == "skipped" %}
@@ -164,6 +166,16 @@
       </div>
       {% else %}
         {% call m.empty("message", "No messages yet") %}<p>Draft the first message below, or ask Claude to write it.</p>{% endcall %}
+      {% endif %}
+      {% if email_events %}
+      <details class="inline-details email-events"{% if email_events|selectattr("kind", "in", ["bounce", "opt_out", "unknown"])|list %} open{% endif %}>
+        <summary>{{ m.icon("chevron-right", 14) }}What came back to your mailbox ({{ email_events|length }})</summary>
+        <ul class="list">
+          {% for e in email_events %}
+          <li class="list-item"><div class="min0 grow"><span class="lead-name">{{ EMAIL_EVENT_LABELS.get(e.kind, e.kind) }}</span><span class="sub break">{{ m.when(e.created_at) }}{% if e.detail %} · {{ e.detail }}{% endif %}</span></div></li>
+          {% endfor %}
+        </ul>
+      </details>
       {% endif %}
 
       <div class="outreach-tools">
@@ -215,6 +227,21 @@
         <button class="btn btn-primary btn-block" type="submit">Save</button>
       </form>
     </section>
+
+    {% if lead.email %}
+    <section class="card" aria-labelledby="email-side-title">
+      <h2 id="email-side-title" class="card-title">Email address</h2>
+      {% if suppression %}
+      <p class="small">{{ m.icon("ban", 14) }} {{ suppression.message[:1]|upper }}{{ suppression.message[1:] }}. OpenBerry never emails it, for any company.</p>
+      {% if suppression.reason != "opt_out" %}<p class="small muted">Fixed the address, or want to email it again? Remove it from the list on the <a href="/mailbox#never-email">Mailbox page</a>.</p>{% endif %}
+      {% else %}
+      <form method="post" action="{{ lead_url }}/unsubscribe">{{ m.csrf() }}
+        <button class="btn btn-sm btn-block" type="submit" data-confirm="Never email {{ lead.email }} again? The lead is disqualified, and the address stays on your never-email list, for every company, even if the lead is deleted or found again.">{{ m.icon("ban", 14) }}Unsubscribed (never email again)</button>
+      </form>
+      <p class="help">When they ask not to be contacted. Replies asking to stop are found in your inbox automatically when your mailbox is connected.</p>
+      {% endif %}
+    </section>
+    {% endif %}
 
     {% if lead.kind == "account" %}
     <section class="card" aria-labelledby="contacts-title">

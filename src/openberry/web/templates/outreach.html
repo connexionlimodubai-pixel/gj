@@ -7,7 +7,7 @@
   <div>
     <p class="eyebrow">{{ company.name }}</p>
     <h1>Outreach</h1>
-    <p class="lede">Review, approve and send. OpenBerry never sends anything itself: copy each approved message into LinkedIn or your inbox and mark it sent, or let your own AI agent send your approved LinkedIn messages.</p>
+    <p class="lede">Review, approve and send. Copy each approved message into LinkedIn or your inbox and mark it sent, let your own AI agent send your approved LinkedIn messages, or turn on email sending so OpenBerry emails the ones you approve from your mailbox.</p>
   </div>
 </div>
 
@@ -144,6 +144,8 @@
   </div>
 </section>
 
+{% include "_email_card.html" %}
+
 {% set auto_low, auto_high = AUTO_APPROVE_HOURS_RANGE %}
 <section class="card agent-card auto-card" id="auto-approve" aria-labelledby="auto-title">
   <header class="agent-head">
@@ -227,12 +229,14 @@
       {{ m.msg_pill(msg.status) }}
       {{ m.approved_via(msg) }}
       {% if msg.id in agent_queued_ids %}<span class="pill pill-agent-on">{{ m.icon("bot", 12) }}Queued for your agent</span>{% endif %}
+      {{ m.email_pill(email.info.get(msg.id)) }}
       {{ m.sent_via(msg) }}
     </div>
     <p class="queue-meta">{{ msg.channel|channel_label }} · step {{ msg.step }} · {{ m.when(msg.sent_at or msg.created_at) }}</p>
     {{ m.auto_line(msg, auto_states.get(msg.id), base ~ "/outreach?tab=" ~ tab, keep_scroll=true) }}
-    {% if msg.subject %}<p class="queue-subject"><span class="muted">Subject:</span> {{ msg.subject }}</p>{% endif %}
+    {% if msg.subject %}<p class="queue-subject"><span class="muted">Subject:</span> {{ msg.subject }}</p>{% elif msg.channel == "email" and msg.direction == "outbound" and msg.status in ("draft", "approved") %}<p class="queue-subject field-error">{{ m.icon("alert", 14) }}<span>No subject yet: add one on the lead's page before you approve it.</span></p>{% endif %}
     <div class="queue-body" id="q-{{ msg.id }}-body">{{ msg.body }}</div>
+    {{ m.email_line(msg, email.info.get(msg.id), email.footer_added, base ~ "/outreach?tab=" ~ tab) }}
     {% if msg.channel == "linkedin_connect" %}
     <p class="counter{{ ' over' if too_long }}">{% if msg.status in ("draft", "approved") %}{{ msg.body|length }} / {{ note_max }} characters{% if too_long %}: too long for a connection note from your {{ linkedin_account_label(company) }} LinkedIn account, shorten it before sending{% endif %}{% else %}{{ msg.body|length }} characters{% endif %}</p>
     {% endif %}

@@ -105,8 +105,8 @@ To let Claude browse LinkedIn and the web too, add free open-source MCP servers 
 ## AI agent sending (optional, at your own risk)
 
 OpenBerry never opens LinkedIn or sends anything itself. If you turn on **AI agent sending** for a company (Outreach page,
-off by default), an AI agent running in your own browser, logged in to your LinkedIn, can send the LinkedIn messages you
-approved. Claude in Chrome and Playwright MCP's extension mode both work. OpenBerry enforces the rules itself:
+off by default), an AI agent running in your own browser, logged in to your LinkedIn, can send the approved LinkedIn
+messages. Claude in Chrome and Playwright MCP's extension mode both work. OpenBerry enforces the rules itself:
 - approved messages only, exactly as approved, and LinkedIn only (never email)
 - a daily limit (default 15 in any 24 hours), and LinkedIn's connection limits: notes of at most 200 characters on a
   free LinkedIn account (300 on Premium), a note on at most 5 connection requests a month on a free account, and at
@@ -115,8 +115,9 @@ approved. Claude in Chrome and Playwright MCP's extension mode both work. OpenBe
 - a 24-hour pause, with a Resume button, as soon as the agent reports a LinkedIn warning, check or limit
 
 If you also turn on **auto-approve**, your agent may send drafts you didn't read in time: they are approved once their
-review window has passed. Hold the ones you want to check first. Claude and the JSON API can turn agent sending and
-auto-approve off, never on.
+review window has passed. Hold the ones you want to check first. Auto-approve never approves the first LinkedIn message
+after a connection request (did they accept?), a step already sent, or a draft with a banned word or an unfilled
+placeholder. Claude and the JSON API can turn agent sending and auto-approve off, never on.
 
 There are no tricks to hide automation. LinkedIn's User Agreement forbids automated messaging, so your account can be
 restricted. Read [docs/AI_AGENT_SENDING.md](docs/AI_AGENT_SENDING.md) before you turn it on.

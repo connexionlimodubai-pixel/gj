@@ -159,7 +159,7 @@ def test_leads_who_replied_or_are_closed_are_never_queued(company):
         repo.update_lead(lead_id, {"status": status})
         assert repo.get_message(lapsed.id).status == "draft"  # leaving the pipeline lapses the approval
         message = approved(lead_id, "Approved after the status changed")  # and the live check still holds
-        assert f"'{status}'" in skip_reason(company, message.id)
+        assert skip_reason(company, message.id) == f"the lead is marked {status.capitalize()}"
         with pytest.raises(ValueError, match="not in the send queue"):
             repo.confirm_agent_sent(message.id)
     assert queued_ids(company) == []
@@ -396,7 +396,7 @@ def schema_without(*columns: str) -> str:
 
 
 def test_an_existing_database_gets_the_sent_via_column(settings):
-    old_schema = schema_without("sent_via", "auto_hold", "approved_via")  # version 2
+    old_schema = schema_without("sent_via", "auto_hold", "approved_via", "auto_blocked")  # version 2
     assert "sent_via" not in old_schema and "auto_hold" not in old_schema
     conn = sqlite3.connect(settings.db_path)
     conn.executescript(old_schema)

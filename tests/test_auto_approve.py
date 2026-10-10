@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -169,9 +170,18 @@ def test_a_held_draft_is_never_auto_approved_and_release_restarts_its_window(com
     assert repo.auto_approve_due(company.id)["approved"] == []
     assert repo.auto_approve_due(company.id, now=released.updated_at + 2 * HOUR)["approved"] == [msg.id]
 
-    # Only drafts are held or released; releasing a draft that isn't held changes nothing.
+    # Holding a message auto-approve approved, which nobody sent yet, takes that approval back: a held draft again.
+    taken_back = repo.set_auto_hold(msg.id, True)
+    assert (taken_back.status, taken_back.auto_hold, taken_back.approved_via) == ("draft", True, "")
+    # Otherwise only drafts are held or released; releasing a draft that isn't held changes nothing.
+    by_hand = repo.create_message(person(company), NOTE, status="approved")
     with pytest.raises(ValueError, match="only drafts can be held"):
-        repo.set_auto_hold(msg.id, True)
+        repo.set_auto_hold(by_hand.id, True)
+    went = draft(person(company), hours_ago=5)
+    repo.auto_approve_due(company.id)
+    repo.update_message(went.id, status="sent")
+    with pytest.raises(ValueError, match="only drafts can be held"):
+        repo.set_auto_hold(went.id, True)
     other = draft(person(company), hours_ago=1)
     assert repo.set_auto_hold(other.id, False).updated_at == other.updated_at
 
@@ -243,8 +253,19 @@ def test_one_message_per_lead_at_a_time(company):
     assert "another message to this lead is approved and not sent yet" in state(company, triplets[1].id)["reason"]
     assert repo.auto_approve_due(company.id)["approved"] == []
 
+    # Once the first went, the copies repeat a step already sent: never approved, and they hold up nothing.
     repo.update_message(triplets[0].id, status="sent")
-    assert repo.auto_approve_due(company.id)["approved"] == [triplets[1].id]  # the next one, once the first went
+    assert repo.auto_approve_due(company.id)["approved"] == []
+    assert state(company, triplets[1].id)["reason"] == "a connection request was already sent to this lead"
+    email = draft(lead_id, body="Hello, following up on my note.", channel="email", subject="Airport transfers",
+                  step=2, hours_ago=5)
+    assert repo.auto_approve_due(company.id)["approved"] == [email.id]
+    emails = [draft(person(company), body="Hello there.", channel="email", subject="Transfers", hours_ago=5)]
+    emails.append(draft(emails[0].lead_id, body="Hello there.", channel="email", subject="Transfers", hours_ago=5))
+    assert repo.auto_approve_due(company.id)["approved"] == [emails[0].id]
+    repo.update_message(emails[0].id, status="sent")
+    assert repo.auto_approve_due(company.id)["approved"] == []  # the same email twice: never
+    assert state(company, emails[1].id)["reason"] == "step 1 was already sent to this lead on email"
 
     # A newer draft never overtakes an older one, even when the older one isn't due yet (or is held).
     other = person(company)
@@ -284,8 +305,11 @@ def test_leads_a_person_handles_or_must_never_contact_are_never_auto_approved(co
     assert "never-contact" in state(company, blocked.id)["reason"]
     assert "student" in state(company, student.id)["reason"]
     for lead_status, msg in closed.items():
-        assert f"'{lead_status}'" in state(company, msg.id)["reason"] and status(msg.id) == "draft"
-    assert state(company, after_reply.id)["reason"] == repo.LEAD_REPLIED
+        assert state(company, msg.id)["reason"] == f"the lead is marked {lead_status.capitalize()}"
+        assert status(msg.id) == "draft"
+    assert state(company, after_reply.id)["reason"] == "the lead has replied, so answer them yourself"
+    assert state(company, student.id)["reason"] == (
+        "the lead is excluded by your ideal customer profile (excluded keyword 'student')")
 
 
 def test_notes_too_long_for_the_account_and_banned_words_are_never_auto_approved(company):
@@ -303,9 +327,12 @@ def test_notes_too_long_for_the_account_and_banned_words_are_never_auto_approved
         "reason"]
     assert state(company, banned.id)["reason"] == "it uses a banned word or phrase (synergy)"
     assert "game changer" in state(company, subject.id)["reason"]
-    # On Premium the same note fits (300 characters).
+    # On Premium the same note fits (300 characters): it waits a full window from then, not approved at once.
     repo.update_company(company.id, {"outreach": {"linkedin_account": "premium"}})
-    assert repo.auto_approve_due(company.id)["approved"] == [long_note.id]
+    switched = repo.utcnow()
+    assert repo.auto_approve_due(company.id, now=switched)["approved"] == []
+    assert state(company, long_note.id) == {"state": "waiting", "at": switched + 2 * HOUR, "reason": ""}
+    assert repo.auto_approve_due(company.id, now=switched + 2 * HOUR)["approved"] == [long_note.id]
 
 
 def test_nothing_is_approved_while_the_company_is_paused(company):
@@ -315,8 +342,123 @@ def test_nothing_is_approved_while_the_company_is_paused(company):
     assert repo.auto_approve_due(company.id) == {"approved": [], "waiting": 0, "held": 0, "blocked": 0,
                                                  "next_at": None}
     assert state(company, msg.id) == {"state": "blocked", "at": None, "reason": repo.AUTO_COMPANY_PAUSED}
-    repo.update_company(company.id, {"status": "active"})
-    assert repo.auto_approve_due(company.id)["approved"] == [msg.id]
+    # Activating it works like turning auto-approve on: what waited while it was paused gets a full window from now.
+    before = repo.utcnow()
+    activated = repo.update_company(company.id, {"status": "active"}).outreach.auto_approve_since
+    assert activated >= before
+    assert repo.auto_approve_due(company.id)["approved"] == []
+    assert state(company, msg.id)["at"] == activated + 2 * HOUR
+    assert repo.auto_approve_due(company.id, now=activated + 2 * HOUR)["approved"] == [msg.id]
+    # Every way of activating it does this (the dashboard's whole profile too); staying active, or with
+    # auto-approve off, changes nothing.
+    long_ago = repo.utcnow() - timedelta(days=3)
+    repo.update_company(company.id, {"status": "paused", "outreach": {"auto_approve_since": repo.iso(long_ago)}})
+    profile = CompanyIn.model_validate(repo.get_company(company.id).model_dump())
+    before = repo.utcnow()
+    since = repo.update_company(company.id, profile.model_copy(update={"status": "active"})).outreach.auto_approve_since
+    assert since >= before
+    assert repo.update_company(company.id, {"description": "Chauffeurs"}).outreach.auto_approve_since == since
+    repo.update_company(company.id, {"status": "paused", "outreach": {"auto_approve": False,
+                                                                      "auto_approve_since": repo.iso(long_ago)}})
+    assert repo.update_company(company.id, {"status": "active"}).outreach.auto_approve_since == long_ago
+
+
+def test_placeholders_and_emails_without_a_subject_are_never_auto_approved(company):
+    turn_on(company)
+    braces = draft(person(company), body="Hi {first_name}, saw your post. Happy to connect!", hours_ago=5)
+    # A local model's draft (the lead page's Ollama writer) never went through save_outreach_message's checks.
+    signed = repo.create_message(person(company), "Hi Sara, loved your talk.\n\nBest,\n[Your Name]",
+                                 channel="linkedin_dm", generated_by="ollama")
+    written_at(signed.id, repo.utcnow() - 5 * HOUR)
+    no_subject = draft(person(company), body="Hello there, a short note.", channel="email", hours_ago=5)
+    fine = draft(person(company), hours_ago=5)
+    assert repo.auto_approve_due(company.id)["approved"] == [fine.id]
+    assert state(company, braces.id)["reason"] == "it still contains the placeholder '{first_name}'"
+    assert state(company, signed.id)["reason"] == "it still contains the placeholder '[Your Name]'"
+    assert state(company, no_subject.id)["reason"] == repo.AUTO_NO_SUBJECT == "the email has no subject line"
+
+
+def test_the_first_linkedin_message_after_a_connection_request_waits_for_the_user(company):
+    turn_on(company)
+    lead_id = person(company)
+    repo.create_message(lead_id, NOTE, channel="linkedin_connect", status="sent")
+    thanks = draft(lead_id, body="Thanks for connecting!", channel="linkedin_dm", step=2, hours_ago=5)
+    assert repo.auto_approve_due(company.id)["approved"] == []
+    assert state(company, thanks.id)["reason"] == repo.AUTO_AFTER_CONNECT  # nothing records that they accepted
+    # Once the user sent a first message, the conversation is open: later ones are approved automatically.
+    repo.update_message(thanks.id, status="sent")
+    later = draft(lead_id, body="One more idea for your airport transfers.", channel="linkedin_dm", step=3,
+                  hours_ago=5)
+    # A message to someone with no connection request on record (already connected) isn't held up either.
+    direct = draft(person(company), body="Hi, quick question about transfers.", channel="linkedin_dm", hours_ago=5)
+    assert sorted(repo.auto_approve_due(company.id)["approved"]) == [later.id, direct.id]
+
+
+# --------------------------------------------------------------------------------------
+# When the reason goes away: a full review window again, never approved at once
+# --------------------------------------------------------------------------------------
+
+
+def test_a_draft_that_waited_behind_another_gets_a_full_window_once_it_is_free(company):
+    turn_on(company)
+    lead_id = person(company)
+    note = draft(lead_id, hours_ago=10)
+    thanks = draft(lead_id, body="Thanks for connecting!", channel="linkedin_dm", step=2, hours_ago=10)
+    repo.set_auto_hold(note.id, True)
+    assert repo.auto_approve_due(company.id)["approved"] == []
+    assert state(company, thanks.id)["reason"] == repo.AUTO_ONE_PER_LEAD_OLDER
+    assert repo.get_message(thanks.id).auto_blocked  # remembered: its window starts again once it is free
+
+    repo.update_message(note.id, status="skipped")  # the user skips the connection note
+    freed = repo.utcnow()
+    assert repo.auto_approve_due(company.id, now=freed)["approved"] == []  # 10 hours old, but never at once
+    after = repo.get_message(thanks.id)
+    assert (after.status, after.auto_blocked, after.updated_at) == ("draft", False, freed)
+    assert state(company, thanks.id, now=freed) == {"state": "waiting", "at": freed + 2 * HOUR, "reason": ""}
+    assert repo.auto_approve_due(company.id, now=freed + HOUR)["approved"] == []
+    assert repo.auto_approve_due(company.id, now=freed + 2 * HOUR)["approved"] == [thanks.id]
+
+
+def test_removing_a_banned_word_never_approves_a_draft_at_once(company, monkeypatch):
+    turn_on(company, banned_words=["synergy"])
+    msg = draft(person(company), body="Real synergy here. Happy to connect!", hours_ago=10)
+    assert repo.auto_approve_due(company.id)["blocked"] == 1
+    # Once flagged, a page view or a tick finds nothing new to write: it takes no write lock.
+    calls, real = [], repo._write_locked
+    monkeypatch.setattr(repo, "_write_locked", lambda conn: calls.append(conn) or real(conn))
+    assert repo.auto_approve_due(company.id)["blocked"] == 1 and calls == []
+    repo.update_company(company.id, {"outreach": {"banned_words": []}})  # the user, or Claude
+    calls.clear()
+    now = repo.utcnow()
+    assert repo.auto_approve_due(company.id, now=now) == {"approved": [], "waiting": 1, "held": 0, "blocked": 0,
+                                                          "next_at": repo.iso(now + 2 * HOUR)}
+    assert calls == [None] and repo.get_message(msg.id).updated_at == now
+    assert repo.auto_approve_due(company.id, now=now + 2 * HOUR)["approved"] == [msg.id]
+
+
+def test_a_lead_set_back_or_given_a_new_profile_holds_its_waiting_drafts(company):
+    turn_on(company)
+    lead_id = person(company)
+    msg = draft(lead_id, hours_ago=1)
+    repo.update_lead(lead_id, {"status": "lost"})
+    assert state(company, msg.id)["state"] == "held"
+    repo.update_lead(lead_id, {"status": "contacted"})  # set back a month later: the old draft doesn't go out
+    assert repo.auto_approve_due(company.id, now=repo.utcnow() + 24 * 30 * HOUR)["approved"] == []
+    assert state(company, msg.id)["state"] == "held"
+
+    # A new LinkedIn profile: the draft was written for someone else. Claude, a merge or an import can change it.
+    other = person(company)
+    waiting = draft(other, hours_ago=1.9)
+    at = state(company, waiting.id)["at"]
+    repo.update_lead(other, {"linkedin_url": "https://www.linkedin.com/in/someone-else"})
+    assert repo.get_message(waiting.id).auto_hold
+    assert repo.auto_approve_due(company.id, now=at + HOUR)["approved"] == []
+    found = repo.upsert_lead(company.id, LeadIn(full_name="Mia Chen", email="mia@example.com"))[0]
+    pending = draft(found.id, hours_ago=1)
+    email = draft(found.id, body="Hello Mia.", channel="email", subject="Transfers", step=2, hours_ago=1)
+    repo.upsert_lead(company.id, LeadIn(full_name="Mia Chen", email="mia@example.com",
+                                        linkedin_url="https://www.linkedin.com/in/mia-chen"))
+    assert repo.get_message(pending.id).auto_hold and not repo.get_message(email.id).auto_hold
 
 
 def test_public_registrations_wait_for_review_with_auto_approve_off(company):
@@ -357,6 +499,31 @@ def test_an_edit_hold_or_skip_at_the_same_moment_wins(company, monkeypatch, chan
     assert after.status == ("skipped" if change == "skip" else "draft") and after.approved_via == ""
 
 
+def test_an_edit_while_auto_approve_runs_is_never_approved_unread(company, monkeypatch):
+    turn_on(company)
+    msg = draft(person(company), hours_ago=5)
+    real_plan, planning = repo._auto_approve_plan, threading.Event()
+
+    def slow_plan(c, company, now, lead_id=None):
+        plan = real_plan(c, company, now, lead_id)
+        if c.in_transaction:  # the call under the write lock: an edit (Claude, another tab) starts meanwhile
+            planning.set()
+            time.sleep(0.5)
+        return plan
+
+    monkeypatch.setattr(repo, "_auto_approve_plan", slow_plan)
+    results: list[dict[str, Any]] = []
+    runner = threading.Thread(target=lambda: results.append(repo.auto_approve_due(company.id)))
+    runner.start()
+    assert planning.wait(5)
+    edited = repo.update_message(msg.id, body="Totally new text, never reviewed by anyone.")
+    runner.join(10)
+    assert results[0]["approved"] == [msg.id]  # it was due and approved first; the edit then made it a draft
+    assert (edited.status, edited.approved_via, edited.auto_hold, edited.body) == (
+        "draft", "", False, "Totally new text, never reviewed by anyone.")
+    assert repo.get_message(msg.id).status == "draft"
+
+
 def test_describing_drafts_costs_the_same_few_queries_for_any_number(company):
     turn_on(company)
 
@@ -371,7 +538,7 @@ def test_describing_drafts_costs_the_same_few_queries_for_any_number(company):
         return len(states), len(seen)
 
     few, many = statements(3), statements(30)
-    assert (few[0], many[0]) == (3, 33) and few[1] == many[1] <= 5
+    assert (few[0], many[0]) == (3, 33) and few[1] == many[1] <= 3
 
 
 # --------------------------------------------------------------------------------------
@@ -456,9 +623,10 @@ def schema_without(*columns: str) -> str:
 
 
 def test_a_version_3_database_gets_the_auto_approve_columns_even_when_opened_twice_at_once(settings):
-    v3 = schema_without("auto_hold", "approved_via")
-    assert "auto_hold" not in v3 and "sent_via" in v3
+    v3 = schema_without("auto_hold", "approved_via", "auto_blocked")
+    assert "auto_hold" not in v3 and "auto_blocked" not in v3 and "sent_via" in v3
     conn = sqlite3.connect(settings.db_path)
+    conn.execute("PRAGMA journal_mode=WAL")  # as every OpenBerry database already is
     conn.executescript(v3)
     now = repo.iso()
     outreach = json.dumps({"sender_name": "Sam", "agent_sending": True})  # a version 3 profile
@@ -493,11 +661,11 @@ def test_a_version_3_database_gets_the_auto_approve_columns_even_when_opened_twi
     assert errors == []
     with db.connect() as c:
         columns = [r[1] for r in c.execute("PRAGMA table_info(messages)")]
-        assert columns.count("auto_hold") == 1 and columns.count("approved_via") == 1
+        assert [columns.count(name) for name in ("auto_hold", "approved_via", "auto_blocked")] == [1, 1, 1]
         assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 4
     messages = sorted(repo.list_messages(1), key=lambda m: m.id)
-    assert [(m.status, m.sent_via, m.auto_hold, m.approved_via) for m in messages] == [
-        ("sent", "agent", False, ""), ("approved", "", False, ""), ("draft", "", False, "")]
+    assert [(m.status, m.sent_via, m.auto_hold, m.approved_via, m.auto_blocked) for m in messages] == [
+        ("sent", "agent", False, "", False), ("approved", "", False, "", False), ("draft", "", False, "", False)]
     company = repo.get_company(1)
     assert company.outreach.auto_approve is False and company.outreach.agent_sending is True  # off until turned on
     assert repo.auto_approve_due(1)["approved"] == []
@@ -647,3 +815,36 @@ async def test_saving_a_draft_tells_claude_when_it_is_approved_automatically(com
     assert "Auto-approve is on for this company" in saved["reminder"]
     flat = " ".join(server.instructions.split())
     assert "auto-approve" in flat and "auto_hold=true" in flat
+
+
+async def test_a_new_version_of_a_held_draft_is_held_too(company):
+    turn_on(company)
+    lead_id = person(company)
+    first = draft(lead_id, hours_ago=1)
+    repo.set_auto_hold(first.id, True)  # the user wants to approve this one themselves
+    async with mcp_client() as c:
+        saved = await ok(c, "save_outreach_message", lead_id=lead_id, body="Hi, rewritten. Happy to connect!",
+                         channel="linkedin_connect", step=1)
+        # A draft that wasn't held is replaced by one that isn't either.
+        other = person(company)
+        draft(other, hours_ago=1)
+        plain = await ok(c, "save_outreach_message", lead_id=other, body="Hi there. Happy to connect!",
+                         channel="linkedin_connect", step=1)
+    assert saved["superseded_draft_ids"] == [first.id] and status(first.id) == "skipped"
+    assert saved["auto_approve"] == "held" and "auto_approves_at" not in saved
+    assert "on hold, like the draft it replaces" in saved["reminder"]
+    assert repo.get_message(saved["message_id"]).auto_hold
+    assert repo.auto_approve_due(company.id, now=repo.utcnow() + 100 * HOUR)["approved"] == [plain["message_id"]]
+    assert status(saved["message_id"]) == "draft"
+
+
+async def test_claude_hears_when_an_edited_approved_message_is_approved_again_automatically(company):
+    turn_on(company)
+    msg = draft(person(company), hours_ago=5)
+    repo.auto_approve_due(company.id)
+    async with mcp_client() as c:
+        edited = await ok(c, "update_message", message_id=msg.id, body="Hi, a different note. Happy to connect!")
+    assert edited["message"]["status"] == "draft"
+    assert edited["auto_approves_at"] == (repo.get_message(msg.id).updated_at + 2 * HOUR).isoformat()
+    assert "Auto-approve is on: it is approved automatically at auto_approves_at" in edited["note"]
+    assert "the user approves it before it is sent" not in edited["note"]

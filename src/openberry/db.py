@@ -123,7 +123,8 @@ CREATE TABLE IF NOT EXISTS messages (
     sent_at TEXT,
     sent_via TEXT NOT NULL DEFAULT '',  -- who recorded the send: '' the user, 'agent' the AI agent, 'claude' Claude
     auto_hold INTEGER NOT NULL DEFAULT 0,  -- 1: the user held this draft, so auto-approve never approves it
-    approved_via TEXT NOT NULL DEFAULT ''  -- 'auto': auto-approve approved it after its review window
+    approved_via TEXT NOT NULL DEFAULT '',  -- 'auto': auto-approve approved it after its review window
+    auto_blocked INTEGER NOT NULL DEFAULT 0  -- 1: auto-approve found a reason not to approve this draft (yet)
 );
 CREATE INDEX IF NOT EXISTS ix_messages_company_status ON messages(company_id, status);
 
@@ -159,6 +160,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN auto_hold INTEGER NOT NULL DEFAULT 0")
         if "approved_via" not in message_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN approved_via TEXT NOT NULL DEFAULT ''")
+        if "auto_blocked" not in message_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN auto_blocked INTEGER NOT NULL DEFAULT 0")
         # After the column exists (an old database gets it just above): the agent's rolling 24-hour count.
         conn.execute("CREATE INDEX IF NOT EXISTS ix_messages_company_sent ON messages(company_id, sent_via, sent_at)")
         # Older versions left sent_at empty on an outbound message recorded straight away as 'replied' (sent, then

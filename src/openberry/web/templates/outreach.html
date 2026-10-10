@@ -159,7 +159,7 @@
           {% endif %}
         {% endif %}
       </p>
-      <p class="small muted auto-never">Never approved automatically: drafts you hold, leads who replied or are on your never-contact list, notes too long for your LinkedIn account, banned words, and a second message to the same person.</p>
+      <p class="small muted auto-never">Never approved automatically: drafts you hold, leads who replied or are on your never-contact list, notes too long for your LinkedIn account, banned words, unfilled placeholders, a step already sent, and the first LinkedIn message after a connection request. One message per person at a time. When the reason goes away, a draft waits a full review window again.</p>
     </div>
   </header>
   <form method="post" action="/c/{{ company.id }}/outreach/auto-approve" class="auto-form field">{{ m.csrf() }}

@@ -72,6 +72,18 @@ CHANNEL_GUIDANCE = {
 FOLLOWUP_GUIDANCE = ("This is follow-up #{n}. Do not repeat the first message; add one new angle "
                      "(a relevant result, a question, or a resource) and keep it shorter than the previous one.")
 
+# Unfilled template slots, including the ones in get_outreach_context's save_with example.
+PLACEHOLDER = re.compile(r"\{\{?\s*[\w ]+\s*\}?\}|\[(?:first ?name|name|company|your name)\]"
+                         r"|<(?:subject|your message|first ?name|name|company)>", re.I)
+
+
+def unfilled_placeholder(text: str) -> str:
+    """The first unfilled placeholder in a message ("{first_name}", "[Your Name]"...), or "" if there is none.
+
+    Claude's drafts are refused with one (save_outreach_message), and auto-approve never approves one."""
+    found = PLACEHOLDER.search(text)
+    return found.group(0) if found else ""
+
 
 def first_name(lead: Lead) -> str:
     name = (lead.full_name or "").strip()

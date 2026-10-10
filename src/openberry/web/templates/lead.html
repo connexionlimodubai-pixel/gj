@@ -120,7 +120,7 @@
         </article>
         {% elif msg.status in ("draft", "approved") %}
         <article class="bubble bubble-out bubble-edit" id="msg-{{ msg.id }}">
-          <form method="post" action="{{ base }}/messages/{{ msg.id }}">
+          <form method="post" action="{{ base }}/messages/{{ msg.id }}" id="msg-{{ msg.id }}-form">
             {{ m.csrf() }}
             <input type="hidden" name="next" value="{{ lead_url }}#msg-{{ msg.id }}">
             <header class="bubble-head">{{ m.msg_pill(msg.status) }}{{ m.approved_via(msg) }}<span>Step {{ msg.step }} · {{ msg.channel|channel_label }}</span><span class="muted">· {{ msg.generated_by }} · {{ m.when(msg.created_at) }}</span></header>
@@ -143,7 +143,7 @@
               <button class="btn btn-sm btn-ghost btn-danger-text" type="submit" name="action" value="delete" data-confirm="Delete this draft?">{{ m.icon("trash", 14) }}<span class="sr-only">Delete</span></button>
             </div>
           </form>
-          {{ m.auto_line(msg, auto_states.get(msg.id), lead_url ~ "#msg-" ~ msg.id) }}
+          {{ m.auto_line(msg, auto_states.get(msg.id), lead_url ~ "#msg-" ~ msg.id, form_id="msg-" ~ msg.id ~ "-form") }}
         </article>
         {% else %}
         <article class="bubble bubble-out" id="msg-{{ msg.id }}">

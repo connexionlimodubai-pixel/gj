@@ -538,7 +538,7 @@ def _auto_hours(raw: Any) -> int | None:
     """The submitted review window, or None when it isn't a whole number of hours in the allowed range."""
     text = raw.strip() if isinstance(raw, str) else ""
     low, high = forms.AUTO_APPROVE_HOURS_RANGE
-    return int(text) if text.isdigit() and low <= int(text) <= high else None
+    return int(text) if text.isdecimal() and low <= int(text) <= high else None
 
 
 def hours_text(hours: int) -> str:
@@ -549,8 +549,8 @@ def hours_text(hours: int) -> str:
 def auto_approve_settings(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
     """Turn auto-approve on or off and set its review window. Turning it off always works.
 
-    Turning it on starts every draft's window again from now (auto_approve_since): drafts already waiting are
-    never approved at once.
+    Turning it on, or making the window shorter, starts every draft's window again from now (auto_approve_since):
+    drafts already waiting are never approved at once.
     """
     company = repo.get_company(company_id)
     back = f"/c/{company_id}/outreach#auto-approve"
@@ -571,14 +571,16 @@ def auto_approve_settings(request: Request, company_id: int, form: FormData = De
         return redirect(back)
     hours = hours or company.outreach.auto_approve_hours
     was_on = company.outreach.auto_approve
+    shorter = was_on and hours < company.outreach.auto_approve_hours
     patch = {"auto_approve": True, "auto_approve_hours": hours}
-    if not was_on:
+    if not was_on or shorter:
         patch["auto_approve_since"] = repo.iso()
     repo.update_company(company_id, {"outreach": patch})
     paused = "" if company.status == "active" else " The company is paused: nothing is approved until you activate it."
     if was_on:
+        already = f" Drafts you already have get {hours_text(hours)} from now." if shorter else ""
         flash(request, f"Review window saved: drafts are approved {hours_text(hours)} after they're written or "
-                       f"last edited.{paused}")
+                       f"last edited.{already}{paused}")
     else:
         agent = " With AI agent sending on, your agent may then send the LinkedIn ones." if (
             company.outreach.agent_sending) else ""
@@ -592,7 +594,7 @@ def _agent_limit(raw: Any) -> int | None:
     """The submitted daily limit, or None when it isn't a whole number in the allowed range."""
     text = raw.strip() if isinstance(raw, str) else ""
     low, high = forms.AGENT_LIMIT_RANGE
-    return int(text) if text.isdigit() and low <= int(text) <= high else None
+    return int(text) if text.isdecimal() and low <= int(text) <= high else None
 
 
 @router.post("/c/{company_id}/outreach/agent")

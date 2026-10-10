@@ -36,8 +36,9 @@ A Python app stores everything, collects free public signals, scores leads, and 
     (free | premium, default free: the connection-note limits, see `outreach.connect_note_limit`), AI agent
     sending: agent_sending (off by default), agent_daily_limit (1-50, default 15), agent_paused_until, agent_pause_reason,
     and auto-approve: auto_approve (off by default), auto_approve_hours (the review window, 1-72, default 2) and
-    auto_approve_since (when the user turned it on). The profile form shows neither the pause nor auto-approve, and
-    `repo.update_company` keeps both as stored when it is given a whole profile.
+    auto_approve_since (when the user turned it on, made the window shorter, or activated the paused company). The
+    profile form shows neither the pause nor auto-approve, and `repo.update_company` keeps both as stored when it is
+    given a whole profile.
   - `notify: NotifyConfig`: Slack and Discord webhooks, min_score (alerts need a hot lead, so values below 70 act as 70)
 - **Lead**: a person (`kind="person"`) or an account (`kind="account"`, company-level intent such as
   hiring or funding, with no contact found yet). People inherit 60% of their company's account-level intent.
@@ -48,9 +49,10 @@ A Python app stores everything, collects free public signals, scores leads, and 
 - **Message**: an outbound draft/sent message or an inbound reply (`direction`), with sequence `step`. `sent_via` records who
   marked it sent: `""` the user, `"agent"` the user's AI agent (`confirm_message_sent`), `"claude"` Claude (`update_message`).
   Added in schema version 3. Schema version 4 added `auto_hold` (1 = the user, or Claude for them, held this draft: auto-approve
-  never approves it; setting an approved message back to draft on purpose, or an approval that lapses because the lead's
-  LinkedIn profile changed or it left the pipeline, holds it too) and `approved_via` (`"auto"` = auto-approve approved it,
-  `""` = a person did; cleared whenever it becomes a draft or a person approves it).
+  never approves it; setting an approved message back to draft on purpose holds it too, and so does a new LinkedIn profile
+  or a lead leaving the pipeline, for its LinkedIn drafts and lapsed approvals), `approved_via` (`"auto"` = auto-approve
+  approved it, `""` = a person did; cleared whenever it becomes a draft or a person approves it) and `auto_blocked`
+  (1 = auto-approve found a reason to leave this draft alone; once the reason goes away its window starts again).
 - **ScanRun**: one scan with per-collector stats. Status: `running`, `ok`, `failed` (it crashed, or every source failed or
   found nothing and only warned) or `nothing_configured`, with the reason in `stats["error"]`.
   The scheduler retries a failed scan after an hour.
@@ -77,13 +79,18 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   company is active and has auto-approve on: a draft is due at `max(updated_at, auto_approve_since) + auto_approve_hours`,
   so an edit restarts its window and turning auto-approve on never approves a backlog at once. It never approves a held
   draft, a lead whose status is replied/meeting/won/lost/disqualified or who replied, a lead on the never-contact list or
-  matching excluded keywords (the agent queue's own checks), a connection note too long for the LinkedIn account, a draft
-  with a banned word, or a second message to the same lead (one at a time, in the order written). The approvals are one
-  `BEGIN IMMEDIATE` transaction of compare-and-set UPDATEs (still a draft, not held, same `updated_at`), so an edit at the
-  same moment wins. It runs on every scheduler tick (`services.auto_approve_active_companies`, one company's error never
-  stops the others), at the end of `run_scan`, at the start of the MCP `get_send_queue`, and when the Outreach page or a lead
-  page opens (without the write lock unless a draft is due). `repo.auto_approve_states(company, messages)` describes each
-  draft (waiting with its time, held, blocked with the reason, or off) in a few queries for the dashboard and Claude.
+  matching excluded keywords (the agent queue's own checks), a step already sent to the lead (the agent's check too), a
+  connection note too long for the LinkedIn account, a draft with a banned word or an unfilled placeholder
+  (`outreach.unfilled_placeholder`), an email without a subject, the first `linkedin_dm` after a connection request (no one
+  knows whether it was accepted), or a second message to the same lead (one at a time, in the order written). A draft it
+  leaves alone is flagged (`auto_blocked`); when the reason goes away, its `updated_at` is set to now, so it waits a full
+  window again rather than being approved at once. The approvals are one `BEGIN IMMEDIATE` transaction of compare-and-set
+  UPDATEs (still a draft, not held, same `updated_at`), and `repo.update_message` takes the same lock, so an edit at the
+  same moment wins: it either lands first, or sees the approval and makes the message a draft again. It runs on every
+  scheduler tick (`services.auto_approve_active_companies`, one company's error never stops the others), at the end of
+  `run_scan`, at the start of the MCP `get_send_queue`, and when the Outreach page or a lead page opens (without the write
+  lock unless there is something to write). `repo.auto_approve_states(company, messages)` describes each draft (waiting
+  with its time, held, blocked with the reason, or off) in three queries for the dashboard and Claude.
 - `collectors.Collector`: `name`, `label`, `signal_types`, `requires`, `is_configured(company)`,
   `async collect(company, ctx) -> list[RawSignal]`. `RawSignal(signal=SignalIn, lead=LeadIn|None, account=str, account_domain=str, account_location=str)`.
   Collectors must be polite (cap requests and honour `ctx.max_items`). One bad item never fails the whole collector. Use `ctx.warn()` for soft problems.
@@ -125,5 +132,7 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
 - Auto-approve is off for every company until the user turns it on, on the dashboard's Outreach page (CSRF-protected).
   Claude (`update_company`, `register_company`) and the JSON API can only turn it off or make the review window longer:
   they can't turn it on, shorten the window or set `auto_approve_since`, and anonymous public registrations are saved with
-  it off. Claude can hold a draft (`update_message` with `auto_hold=true`) but never release a hold. With agent sending
-  also on, the agent may send what auto-approve approved, so every agent rule above still applies to it.
+  it off. Claude can hold a draft (`update_message` with `auto_hold=true`) but never release a hold: a new version of a
+  held draft (`save_outreach_message`) is held too. Activating a paused company (from anywhere) restarts every window,
+  like turning auto-approve on. With agent sending also on, the agent may send what auto-approve approved, so every agent
+  rule above still applies to it.

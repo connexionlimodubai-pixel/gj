@@ -439,6 +439,8 @@ class Message(_Model):
     auto_hold: bool = Field(default=False, description="The user held this draft: auto-approve never approves it")
     approved_via: str = Field(default="", description="'auto' = auto-approve approved it after its review window, "
                                                        "'' = a person did (or it isn't approved)")
+    auto_blocked: bool = Field(default=False, description="Auto-approve found a reason not to approve this draft: once "
+                                                          "the reason goes away, it waits a full review window again")
 
 
 class ScanRun(_Model):

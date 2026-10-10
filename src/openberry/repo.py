@@ -42,6 +42,7 @@ from .outreach import (
     account_label,
     connect_note_limit,
     monthly_note_limit,
+    unfilled_placeholder,
 )
 from .scoring import DISQUALIFIED_MAX_SCORE, LeadFacts, SignalPoint, icp_fit, score_lead
 
@@ -274,6 +275,8 @@ def update_company(company_id: int, data: CompanyIn | dict[str, Any],
     A whole profile (a CompanyIn: the dashboard's profile form, which doesn't show them) also keeps the
     auto-approve settings as stored, read under the same lock, so a profile save never turns auto-approve
     back on after the user turned it off. They change through a partial dict (the Outreach page's card).
+    Activating a paused company with auto-approve on works like turning auto-approve on (auto_approve_since =
+    now): the drafts that waited while it was paused get a full review window, never approved all at once.
     """
     with _write_locked(conn) as c:
         current = get_company(company_id, conn=c)
@@ -284,6 +287,9 @@ def update_company(company_id: int, data: CompanyIn | dict[str, Any],
             data = CompanyIn.model_validate(merged)
         else:
             kept.update({key: getattr(current.outreach, key) for key in AUTO_APPROVE_SETTINGS})
+        if current.status != "active" and data.status == "active" and kept.get("auto_approve",
+                                                                              data.outreach.auto_approve):
+            kept["auto_approve_since"] = utcnow()
         data = data.model_copy(update={"outreach": data.outreach.model_copy(update=kept)})
         values = _company_values(data)
         sets = ", ".join(f"{col} = ?" for col in values)
@@ -513,7 +519,8 @@ def update_lead(lead_id: int, fields: dict[str, Any], conn: sqlite3.Connection |
             if (linkedin_profile_url(merged.linkedin_url) != linkedin_profile_url(lead.linkedin_url)
                     or (merged.status in NO_AGENT_LEAD_STATUSES and lead.status not in NO_AGENT_LEAD_STATUSES)):
                 # A new recipient, or a lead that left the pipeline (replied, won, lost, disqualified...): its
-                # approvals lapse, so setting the status back later doesn't put old messages in the agent's queue.
+                # LinkedIn approvals lapse and its LinkedIn drafts are held, so setting the status back later doesn't
+                # put old messages in the agent's queue (nor let auto-approve approve them at once).
                 _unapprove_for_new_profile(c, lead_id)
             if kind != lead.kind:
                 # Keys of the old kind would keep routing its signals here (company-level ones to a person).
@@ -878,8 +885,10 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
     Approving it here is a person's approval (or Claude's, for the user), so approved_via is cleared: only
     auto_approve_due records 'auto'. Setting an approved message back to 'draft' on purpose also holds it, so
     auto-approve never approves it again behind the user's back; a text edit that makes it a draft doesn't.
+    The read and the write hold SQLite's write lock (BEGIN IMMEDIATE), like auto_approve_due: an edit made while
+    auto-approve approves the draft sees the approval, so the new text is a draft again, never approved unread.
     """
-    with _conn(conn) as c:
+    with _write_locked(conn) as c:
         msg = get_message(message_id, conn=c)
         updates: dict[str, Any] = {}
         if body is not None:
@@ -1241,12 +1250,16 @@ def _unapprove_for_new_profile(c: sqlite3.Connection, lead_id: int) -> int:
 
     An approval covers the recipient too. Without this, changing a lead's linkedin_url (Claude, a merge, an
     import, a script) would make the agent send an approved text to a different person than the one approved.
-    They are held as well, so auto-approve doesn't approve them again on its own: the user decides.
+    They are held as well, so auto-approve doesn't approve them again on its own: the user decides. So are the
+    lead's LinkedIn drafts: they were written for the old profile too, or waited while the lead was out of the
+    pipeline, and auto-approve would otherwise approve them at once, without a new review window.
     """
     marks = ", ".join("?" * len(AGENT_CHANNELS))
     cur = c.execute(f"UPDATE messages SET status = 'draft', approved_via = '', auto_hold = 1, updated_at = ? "
                     f"WHERE lead_id = ? AND direction = 'outbound' AND status = 'approved' AND channel IN ({marks})",
                     (iso(), lead_id, *AGENT_CHANNELS))
+    c.execute(f"UPDATE messages SET auto_hold = 1 WHERE lead_id = ? AND direction = 'outbound' AND status = 'draft' "
+              f"AND channel IN ({marks})", (lead_id, *AGENT_CHANNELS))
     return cur.rowcount
 
 
@@ -1384,15 +1397,14 @@ def _followup_wait_days(company: Company, step: int) -> int:
     return days[max(0, min(step - 1, len(days) - 1))]
 
 
-LEAD_REPLIED = "the lead has replied: answer them yourself"
+LEAD_REPLIED = "the lead has replied, so answer them yourself"
 
 
 def _lead_status_problem(lead: Lead) -> str:
-    """Why nothing goes to this lead without a person: its status says a person handles the conversation ("" if not).
-
-    Shared by the agent's send queue and auto-approve."""
+    """Why nothing goes to this lead without a person: its status says a person handles the conversation, or that
+    it was ruled out ("" if not). Shared by the agent's send queue and auto-approve."""
     if lead.status in NO_AGENT_LEAD_STATUSES:
-        return f"the lead's status is '{lead.status}': a person handles this conversation"
+        return f"the lead is marked {lead.status.capitalize()}"
     return ""
 
 
@@ -1402,8 +1414,18 @@ def _excluded_problem(company: Company, lead: Lead) -> str:
     Shared by the agent's send queue and auto-approve."""
     _, reasons, excluded = icp_fit(LeadFacts.from_obj(lead), company.icp)
     if excluded:
-        return (f"the lead is excluded by your ideal customer profile "
-                f"({reasons[0].removeprefix('! ') if reasons else 'never contact'})")
+        reason = reasons[0].removeprefix("! ") if reasons else "never contact"
+        return f"the lead is excluded by your ideal customer profile ({reason[:1].lower()}{reason[1:]})"
+    return ""
+
+
+def _sent_before_problem(msg: Message, sent: set[tuple[str, int]]) -> str:
+    """Why this message would repeat one already sent to its lead ("" if not). `sent` holds the (channel, step) of the
+    lead's other outbound messages that were sent. Shared by the agent's send queue and auto-approve."""
+    if msg.channel == "linkedin_connect" and any(channel == "linkedin_connect" for channel, _ in sent):
+        return "a connection request was already sent to this lead"
+    if (msg.channel, msg.step) in sent:
+        return f"step {msg.step} was already sent to this lead on {msg.channel}"
     return ""
 
 
@@ -1434,10 +1456,8 @@ def _agent_send_problem(c: sqlite3.Connection, company: Company, msg: Message, l
     # Sent = marked sent or replied, or sent once and set back to another status later (sent_at stays).
     sent = [m for m in thread if m.id != msg.id and m.direction == "outbound"
             and (m.status in ("sent", "replied") or m.sent_at is not None)]
-    if msg.channel == "linkedin_connect" and any(m.channel == "linkedin_connect" for m in sent):
-        return "a connection request was already sent to this lead"
-    if any(m.channel == msg.channel and m.step == msg.step for m in sent):
-        return f"step {msg.step} was already sent to this lead on {msg.channel}"
+    if problem := _sent_before_problem(msg, {(m.channel, m.step) for m in sent}):
+        return problem
     sent_times = [_utc(m.sent_at) for m in sent if m.sent_at]
     if sent_times:
         due = max(sent_times) + timedelta(days=_followup_wait_days(company, max(m.step for m in sent)))
@@ -1603,7 +1623,7 @@ def update_message_as(message_id: int, via: str, *, status: str | None = None, b
     """
     if via not in ("agent", "claude"):
         raise ValueError("via must be 'agent' or 'claude'")
-    with _conn(conn) as c:
+    with _write_locked(conn) as c:
         before = get_message(message_id, conn=c)
         updated = update_message(message_id, status=status, body=body, subject=subject, conn=c)
         if ((status == "sent" and before.status != "sent")
@@ -1689,13 +1709,20 @@ def resume_agent_sending(company_id: int, conn: sqlite3.Connection | None = None
 # turned on (auto_approve_since), so turning it on never approves a backlog at once. With AI agent sending on,
 # the user's browser agent may then send the approved LinkedIn messages, so auto-approve leaves alone whatever a
 # person should look at first: drafts the user held, leads a person handles or must never contact, a connection
-# note too long for the account, banned words, and a second message to the same lead. send_queue and
-# confirm_agent_sent still check every one of the agent's own rules afterwards.
+# note too long for the account, banned words, unfilled placeholders, an email without a subject, a step already
+# sent, the first LinkedIn message after a connection request (did they accept?), and a second message to the same
+# lead. A draft it leaves alone is flagged (messages.auto_blocked): once the reason goes away (the earlier message
+# was sent or skipped, the lead set back, a banned word removed...), it waits a full review window from then, so
+# nothing is approved the moment the reason goes away. send_queue and confirm_agent_sent still check every one of
+# the agent's own rules afterwards.
 
 AUTO_ONE_PER_LEAD_APPROVED = ("another message to this lead is approved and not sent yet (one message per lead at a "
                               "time)")
 AUTO_ONE_PER_LEAD_OLDER = "an older draft to this lead goes first (one message per lead at a time)"
 AUTO_COMPANY_PAUSED = "the company is paused"
+AUTO_AFTER_CONNECT = ("it is the first LinkedIn message after your connection request: approve it yourself once they "
+                      "accept")
+AUTO_NO_SUBJECT = "the email has no subject line"
 
 
 def _banned_words_used(company: Company, msg: Message) -> list[str]:
@@ -1710,9 +1737,12 @@ def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
     """What auto-approve does with each outbound draft of the company (or of one lead), oldest first.
 
     Each item: {"message", "version" (its stored updated_at), "state": "due" | "waiting" | "held" | "blocked",
-    "at" (when its window ends), "reason" (why it is blocked)}. Four queries, whatever the number of drafts.
+    "at" (when its window ends), "reason" (why it is blocked), "write": what auto_approve_due stores, "block" (flag
+    a newly blocked draft), "restart" (a flagged draft is clear now: its window starts again from `now`) or None}.
+    Three queries, whatever the number of drafts.
     A lead's drafts are approved one at a time, in the order they were written: a newer draft waits while an
     older one is still a draft (waiting, held or blocked) or another message to the lead is approved and unsent.
+    A draft repeating a step already sent doesn't hold up the lead's other drafts: it is stale.
     """
     where, params = "company_id = ? AND direction = 'outbound' AND status = 'draft'", [company.id]
     if lead_id is not None:
@@ -1723,10 +1753,18 @@ def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
         return []
     leads = {r["id"]: _lead_from_row(r) for r in c.execute(
         f"SELECT * FROM leads WHERE id IN (SELECT lead_id FROM messages WHERE {where})", params)}
-    approved = {r[0] for r in c.execute("SELECT DISTINCT lead_id FROM messages WHERE company_id = ? "
-                                        "AND direction = 'outbound' AND status = 'approved'", (company.id,))}
-    replied = {r[0] for r in c.execute("SELECT DISTINCT lead_id FROM messages WHERE company_id = ? "
-                                       "AND direction = 'inbound'", (company.id,))}
+    approved: set[int] = set()  # leads with a message approved and not sent yet
+    replied: set[int] = set()
+    sent: dict[int, list[tuple[int, str, int]]] = {}  # lead: (id, channel, step) of each outbound message sent
+    for r in c.execute(f"SELECT id, lead_id, direction, channel, step, status, sent_at FROM messages "
+                       f"WHERE lead_id IN (SELECT lead_id FROM messages WHERE {where}) AND (direction = 'inbound' "
+                       f"OR status IN ('approved', 'sent', 'replied') OR sent_at IS NOT NULL)", params):
+        if r["direction"] == "inbound":
+            replied.add(r["lead_id"])
+        elif r["status"] in ("sent", "replied") or r["sent_at"] is not None:
+            sent.setdefault(r["lead_id"], []).append((r["id"], r["channel"], r["step"]))
+        else:
+            approved.add(r["lead_id"])
     cfg = company.outreach
     window = timedelta(hours=cfg.auto_approve_hours)
     since = _utc(cfg.auto_approve_since) if cfg.auto_approve_since else None
@@ -1737,12 +1775,16 @@ def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
     for row in rows:
         msg = _message_from_row(row)
         start = _utc(msg.updated_at) if since is None else max(_utc(msg.updated_at), since)
-        item: dict[str, Any] = {"message": msg, "version": row["updated_at"], "at": start + window, "reason": ""}
+        item: dict[str, Any] = {"message": msg, "version": row["updated_at"], "at": start + window, "reason": "",
+                                "write": None}
         item["state"] = "due" if item["at"] <= now else "waiting"
         lead = leads.get(msg.lead_id)
         if lead is not None and lead.id not in lead_problems:
             lead_problems[lead.id] = (_lead_status_problem(lead) or (LEAD_REPLIED if lead.id in replied else "")
                                       or _excluded_problem(company, lead))
+        sent_before = {(channel, step) for mid, channel, step in sent.get(msg.lead_id, []) if mid != msg.id}
+        sent_channels = {channel for channel, _ in sent_before}
+        repeat = _sent_before_problem(msg, sent_before)
         reason = ""
         if msg.auto_hold:
             item["state"] = "held"
@@ -1750,18 +1792,30 @@ def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
             reason = AUTO_COMPANY_PAUSED
         elif lead_problems.get(msg.lead_id):
             reason = lead_problems[msg.lead_id]
+        elif repeat:
+            reason = repeat
         elif msg.channel == "linkedin_connect" and len(msg.body) > note_max:
             reason = (f"the connection note has {len(msg.body)} characters, more than the {note_max} your "
                       f"{account_label(company)} LinkedIn account allows")
         elif banned := _banned_words_used(company, msg):
             reason = f"it uses a banned word or phrase ({', '.join(banned)})"
+        elif placeholder := unfilled_placeholder(f"{msg.subject}\n{msg.body}"):
+            reason = f"it still contains the placeholder '{placeholder}'"
+        elif msg.channel == "email" and not msg.subject.strip():
+            reason = AUTO_NO_SUBJECT
+        elif msg.channel == "linkedin_dm" and sent_channels & set(AGENT_CHANNELS) == {"linkedin_connect"}:
+            reason = AUTO_AFTER_CONNECT  # nothing records whether they accepted: the user checks
         elif msg.lead_id in approved:
             reason = AUTO_ONE_PER_LEAD_APPROVED
         elif msg.lead_id in older:
             reason = AUTO_ONE_PER_LEAD_OLDER
         if reason:
-            item.update(state="blocked", reason=reason)
-        older.add(msg.lead_id)
+            item.update(state="blocked", reason=reason, write=None if msg.auto_blocked else "block")
+        elif msg.auto_blocked and item["state"] in ("due", "waiting"):
+            # The reason it was left alone went away: it waits a full window from now, like a draft just written.
+            item.update(state="waiting", at=now + window, write="restart")
+        if not repeat:
+            older.add(msg.lead_id)
         plan.append(item)
     return plan
 
@@ -1773,9 +1827,11 @@ def auto_approve_due(company_id: int, now: datetime | None = None,
 
     The approvals are one write-locked transaction (BEGIN IMMEDIATE) that reads the drafts again. Each is a
     compare-and-set on the draft as it was read (still a draft, not held, the same updated_at), so an edit, a
-    hold or a skip made at the same moment wins. It sets status 'approved' and approved_via 'auto'. Without a
-    caller's connection it looks first without the write lock, and takes it only when a draft is due: it runs
-    on every page view of the Outreach page and lead pages, which mustn't wait for a scan's writes for nothing.
+    hold or a skip made at the same moment wins. It sets status 'approved' and approved_via 'auto'. The same
+    transaction flags the drafts it newly leaves alone (auto_blocked) and starts a new window for flagged drafts
+    whose reason went away. Without a caller's connection it looks first without the write lock, and takes it
+    only when there is something to write: it runs on every page view of the Outreach page and lead pages, which
+    mustn't wait for a scan's writes for nothing.
     It also runs on every scheduler tick, after each scan and before the agent's get_send_queue.
     Returns {"approved": [ids], "waiting": n, "held": n, "blocked": n, "next_at": when the next waiting draft
     is approved (iso), or None}.
@@ -1796,7 +1852,7 @@ def auto_approve_due(company_id: int, now: datetime | None = None,
             if not company.outreach.auto_approve or company.status != "active":
                 return out
             plan = _auto_approve_plan(c, company, now)
-        if not any(item["state"] == "due" for item in plan):
+        if not any(item["state"] == "due" or item["write"] for item in plan):
             return tally(plan)
     with _write_locked(conn) as c:
         company = get_company(company_id, conn=c)
@@ -1805,6 +1861,12 @@ def auto_approve_due(company_id: int, now: datetime | None = None,
         stamp = iso(now)
         plan = _auto_approve_plan(c, company, now)
         for item in plan:
+            if item["write"] == "block":
+                c.execute("UPDATE messages SET auto_blocked = 1 WHERE id = ? AND updated_at = ?",
+                          (item["message"].id, item["version"]))
+            elif item["write"] == "restart":
+                c.execute("UPDATE messages SET auto_blocked = 0, updated_at = ? WHERE id = ? AND updated_at = ?",
+                          (stamp, item["message"].id, item["version"]))
             if item["state"] != "due":
                 continue
             cur = c.execute("UPDATE messages SET status = 'approved', approved_via = ?, updated_at = ? "
@@ -1846,15 +1908,25 @@ def auto_approve_states(company: Company, messages: list[Message], now: datetime
 def set_auto_hold(message_id: int, hold: bool = True, now: datetime | None = None,
                   conn: sqlite3.Connection | None = None) -> Message:
     """Hold an outbound draft, so auto-approve never approves it (the user approves it, or not, themselves), or
-    release the hold (the dashboard only): the draft then waits a full review window again, from now."""
+    release the hold (the dashboard only): the draft then waits a full review window again, from now.
+
+    Holding a message auto-approve approved and nobody sent yet takes that approval back (a held draft again):
+    the user clicked Hold on a page opened before the window ran out, and must not find it in the agent's queue.
+    """
     with _write_locked(conn) as c:
         msg = get_message(message_id, conn=c)
+        stamp = iso(_utc(now or utcnow()))
+        if (hold and msg.direction == "outbound" and msg.status == "approved" and msg.approved_via == APPROVED_VIA_AUTO
+                and msg.sent_at is None):
+            c.execute("UPDATE messages SET status = 'draft', approved_via = '', auto_hold = 1, updated_at = ? "
+                      "WHERE id = ?", (stamp, message_id))
+            return get_message(message_id, conn=c)
         if msg.direction != "outbound" or msg.status != "draft":
             raise ValueError(f"only drafts can be {'held' if hold else 'released'}: message {message_id} is "
                              f"'{msg.status}'")
         if hold:
             c.execute("UPDATE messages SET auto_hold = 1 WHERE id = ?", (message_id,))
         else:
-            c.execute("UPDATE messages SET auto_hold = 0, updated_at = ? WHERE id = ? AND auto_hold = 1",
-                      (iso(_utc(now or utcnow())), message_id))
+            c.execute("UPDATE messages SET auto_hold = 0, auto_blocked = 0, updated_at = ? WHERE id = ? "
+                      "AND auto_hold = 1", (stamp, message_id))
         return get_message(message_id, conn=c)

@@ -12,7 +12,7 @@ from starlette.responses import Response
 
 from .. import leads_csv, outreach, repo
 from ..config import get_settings
-from ..models import AGENT_CHANNELS, LEAD_STATUSES, MESSAGE_CHANNELS, TIERS, Company, Lead, Message
+from ..models import AGENT_CHANNELS, APPROVED_VIA_AUTO, LEAD_STATUSES, MESSAGE_CHANNELS, TIERS, Company, Lead, Message
 from ..repo import AGENT_QUEUE_MAX
 from . import forms
 from .auth import checked_form, require_login
@@ -350,9 +350,7 @@ def message_action(request: Request, company_id: int, message_id: int,
         repo.delete_message(message_id)
         flash(request, "Message deleted.", "info")
         return redirect(back)
-    if action in HOLD_ACTIONS:
-        return _hold_action(request, company_id, message, HOLD_ACTIONS[action], back)
-    if action not in MESSAGE_ACTIONS:
+    if action not in MESSAGE_ACTIONS and action not in HOLD_ACTIONS:
         flash(request, "Unknown action.", "error")
         return redirect(back)
     edits: dict[str, Any] = {}
@@ -360,6 +358,8 @@ def message_action(request: Request, company_id: int, message_id: int,
         edits["body"] = _form_text(form, "body")
     if "subject" in form and message.direction == "outbound":
         edits["subject"] = _form_text(form, "subject")
+    if action in HOLD_ACTIONS:
+        return _hold_action(request, company_id, message, HOLD_ACTIONS[action], back, edits)
     try:
         updated = repo.update_message(message_id, status=MESSAGE_ACTIONS[action], **edits)
     except ValueError as exc:
@@ -367,7 +367,14 @@ def message_action(request: Request, company_id: int, message_id: int,
         return redirect(back)
     if message.status == "approved" and updated.status == "draft" and action == "save":
         # repo.update_message: an approval covers the exact text, so changed text waits for approval again.
-        flash(request, "Saved as a draft: you changed the approved text. Approve it again when it's ready.", "info")
+        company = repo.get_company(company_id)
+        if _auto_state(company, updated).get("state") == "waiting":
+            flash(request, f"Saved as a draft: you changed the approved text. Auto-approve approves it in "
+                           f"{hours_text(company.outreach.auto_approve_hours)} unless you approve, hold or skip it "
+                           "first.", "info")
+        else:
+            flash(request, "Saved as a draft: you changed the approved text. Approve it again when it's ready.",
+                  "info")
         return redirect(back)
     draft_note = "Moved back to drafts."
     if updated.auto_hold and message.status == "approved" and repo.get_company(company_id).outreach.auto_approve:
@@ -380,20 +387,46 @@ def message_action(request: Request, company_id: int, message_id: int,
     return redirect(back)
 
 
-def _hold_action(request: Request, company_id: int, message: Message, hold: bool, back: str) -> Response:
-    """Hold a draft, so auto-approve never approves it, or let a held draft auto-approve again."""
+def _auto_state(company: Company, message: Message) -> dict[str, Any]:
+    """What auto-approve does next with a draft (repo.auto_approve_states), or {} while it is off."""
+    if not company.outreach.auto_approve:
+        return {}
+    return repo.auto_approve_states(company, [message]).get(message.id, {})
+
+
+def _hold_action(request: Request, company_id: int, message: Message, hold: bool, back: str,
+                 edits: dict[str, str]) -> Response:
+    """Hold a draft, so auto-approve never approves it, or let a held draft auto-approve again.
+
+    On the lead page the buttons belong to the draft's edit form: text typed there is saved first, not lost.
+    Hold on a message auto-approve approved since the page was opened takes that approval back (set_auto_hold).
+    """
+    changed = {key: value for key, value in edits.items()
+               if (repo.message_text(value) if key == "body" else value) != getattr(message, key)}
+    if changed and message.status in ("draft", "approved"):  # never the text of a message sent in the meantime
+        try:
+            repo.update_message(message.id, **changed)
+        except ValueError as exc:  # e.g. an empty message
+            flash(request, str(exc), "error")
+            return redirect(back)
     try:
-        repo.set_auto_hold(message.id, hold)
-    except ValueError:  # not a draft (any more): approved, sent or skipped in the meantime
+        updated = repo.set_auto_hold(message.id, hold)
+    except ValueError:  # not a draft (any more): approved by hand, sent or skipped in the meantime
         flash(request, "Only drafts can be put on hold or let auto-approve, and this message isn't a draft.", "error")
         return redirect(back)
     company = repo.get_company(company_id)
-    if hold:
+    state = _auto_state(company, updated)
+    if hold and message.status == "approved" and message.approved_via == APPROVED_VIA_AUTO:
+        flash(request, "It had just been approved automatically. It's back in drafts and on hold: approve it "
+                       "yourself when it's ready.", "info")
+    elif hold:
         flash(request, "On hold: this draft won't be approved automatically. Approve it yourself when it's ready.",
               "info")
-    elif company.outreach.auto_approve:
+    elif state.get("state") == "waiting":
         flash(request, f"Hold lifted: this draft is approved automatically in "
                        f"{hours_text(company.outreach.auto_approve_hours)} unless you edit, hold or skip it.")
+    elif state.get("state") == "blocked":
+        flash(request, f"Hold lifted, but it isn't approved automatically for now: {state['reason']}.")
     else:
         flash(request, "Hold lifted.")
     return redirect(back)

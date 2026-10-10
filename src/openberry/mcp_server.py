@@ -368,11 +368,6 @@ def profile_gaps(company: Company) -> list[str]:
     return gaps
 
 
-# Unfilled template slots, including the ones in get_outreach_context's save_with example.
-_PLACEHOLDER = re.compile(r"\{\{?\s*[\w ]+\s*\}?\}|\[(?:first ?name|name|company|your name)\]"
-                          r"|<(?:subject|your message|first ?name|name|company)>", re.I)
-
-
 def _message_problems(company: Company, channel: str, subject: str, body: str) -> list[str]:
     """Reasons a draft can't be saved as written. Empty list = fine."""
     problems = []
@@ -389,9 +384,9 @@ def _message_problems(company: Company, channel: str, subject: str, body: str) -
     banned = find_terms(f"{subject}\n{body}", company.outreach.banned_words)
     if banned:
         problems.append(f"it uses banned words/phrases: {', '.join(banned)}. Rewrite without them")
-    placeholder = _PLACEHOLDER.search(f"{subject}\n{body}")
+    placeholder = outreach.unfilled_placeholder(f"{subject}\n{body}")
     if placeholder:
-        problems.append(f"it still contains the placeholder {placeholder.group(0)!r}; fill it in")
+        problems.append(f"it still contains the placeholder {placeholder!r}; fill it in")
     return problems
 
 
@@ -1161,8 +1156,9 @@ def update_lead(lead_id: int, changes: dict[str, Any]) -> dict[str, Any]:
     lead_company, company_domain, industry, company_size, location, linkedin_url, email, phone,
     website, github_username, twitter, profile_url, bio). Values overwrite the current ones.
     Changing linkedin_url, or moving the lead to replied, meeting, won, lost or disqualified, moves
-    its approved LinkedIn messages back to draft (an approval covers the recipient). Scores are
-    computed: use assess_lead to give your judgement. The lead is rescored.
+    its approved LinkedIn messages back to draft (an approval covers the recipient) and holds its
+    LinkedIn drafts, so auto-approve doesn't approve them: the user does. Scores are computed: use
+    assess_lead to give your judgement. The lead is rescored.
     Returns the updated lead row.
     """
     current = _get_lead(lead_id)
@@ -1321,7 +1317,7 @@ def save_outreach_message(
     Write it after get_outreach_context. Checks: LinkedIn connection notes must fit the company's
     LinkedIn account (200 characters free, 300 Premium: limits.max_chars), emails need a subject, the
     company's banned words are not allowed, and no unfilled placeholders. An older unsent draft for the
-    same lead, channel and step is superseded.
+    same lead, channel and step is superseded (if the user held it, the new draft is held too).
     Nothing is sent: a human reviews the draft in the dashboard, sends it from their own LinkedIn or
     email, then marks it sent. Never tell the user the message was sent. If the user turned on
     auto-approve for the company, the draft is approved automatically once its review window has passed
@@ -1347,6 +1343,10 @@ def save_outreach_message(
             repo.update_message(message_id, status="skipped")
         message = repo.create_message(lead.id, body, channel=channel, subject=subject, step=step,
                                       generated_by="claude", status="draft")
+        # Only the user releases a hold: a new version of a held draft is held too.
+        held = any(m.auto_hold for m in existing if m.id in superseded)
+        if held:
+            message = repo.set_auto_hold(message.id, True)
     out: dict[str, Any] = {
         "message_id": message.id,
         "status": message.status,
@@ -1360,7 +1360,10 @@ def save_outreach_message(
     }
     auto = _auto_approve_fields(repo.auto_approve_states(company, [message]), message)
     out.update(auto)
-    if "auto_approves_at" in auto:
+    if held:
+        out["reminder"] += (" It is on hold, like the draft it replaces: auto-approve never approves it, the user "
+                            "approves it themselves.")
+    elif "auto_approves_at" in auto:
         out["reminder"] = ("Saved as a draft. Auto-approve is on for this company: unless the user edits, holds or "
                            "skips it, it is approved automatically at auto_approves_at, and with AI agent sending on "
                            "their agent may then send it. Tell the user, so they can review it first.")
@@ -1452,8 +1455,15 @@ def update_message(
     out: dict[str, Any] = {"message": _message_row(updated), "lead_status": lead.status,
                            "link": outreach_url(updated.company_id)}
     if back_to_draft:
-        out["note"] = ("The approved text changed, so the message is a draft again: the user approves it before "
-                       "it is sent.")
+        auto = _auto_approve_fields(repo.auto_approve_states(_get_company(updated.company_id), [updated]), updated)
+        out.update(auto)
+        if "auto_approves_at" in auto:
+            out["note"] = ("The approved text changed, so the message is a draft again. Auto-approve is on: it is "
+                           "approved automatically at auto_approves_at unless the user edits, holds or skips it, and "
+                           "with AI agent sending on their agent may then send it. Tell the user.")
+        else:
+            out["note"] = ("The approved text changed, so the message is a draft again: the user approves it before "
+                           "it is sent.")
     if status == "sent":
         out["note"] = "Recorded as sent by the user. followups_due will list the lead when the next step is due."
     return out

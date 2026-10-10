@@ -15,12 +15,14 @@ from fastapi.templating import Jinja2Templates
 from starlette.responses import Response
 
 from .. import __version__, repo
+from ..collectors import google_places
 from ..config import get_settings
 from ..models import (
     COMPANY_SIZES,
     COMPANY_TYPES,
     LEAD_STATUSES,
     MESSAGE_CHANNELS,
+    PROSPECT_TYPES,
     SENIORITIES,
     SIGNAL_SOURCES,
     SIGNAL_TYPES,
@@ -57,7 +59,7 @@ SOURCE_LABELS = {
     "hackernews": "Hacker News", "reddit": "Reddit", "github": "GitHub", "greenhouse": "Greenhouse",
     "lever": "Lever", "ashby": "Ashby", "google_news": "Google News", "rss": "RSS", "linkedin": "LinkedIn",
     "web": "Web", "manual": "Manual", "claude": "Claude", "csv": "CSV import", "demo": "Demo",
-    "sec_edgar": "SEC EDGAR",
+    "sec_edgar": "SEC EDGAR", "google_places": "Google Maps",
 }
 LEAD_SOURCES = SIGNAL_SOURCES
 # ScanRun.status -> label; other statuses are shown humanized with a neutral badge.
@@ -279,6 +281,9 @@ def _build_env() -> jinja2.Environment:
         source_label=lambda s: SOURCE_LABELS.get(s, (s or "").replace("_", " ").title()),
         status_label=lambda s: STATUS_LABELS.get(s, (s or "").capitalize()),
         company_status=company_status_label, scan_status=scan_status_label, sent_via=sent_via_label,
+        # A Google Maps link built from a Place ID (Google Maps businesses): shown as "Google Maps", not "Profile".
+        maps_link=lambda url: bool(repo.google_place_id(str(url or ""))),
+        day_month=google_places.day_month,
     )
     env.globals.update(
         SIGNAL_TYPES=SIGNAL_TYPES, SENIORITIES=SENIORITIES, COMPANY_SIZES=COMPANY_SIZES, COMPANY_TYPES=COMPANY_TYPES,
@@ -299,7 +304,10 @@ def _build_env() -> jinja2.Environment:
         SIZE_CHIPS=[(s, s) for s in COMPANY_SIZES],
         COMPANY_TYPE_OPTIONS=[(t, "SMB" if t == "smb" else t.capitalize()) for t in COMPANY_TYPES],
         TONE_OPTIONS=[(t, t.capitalize()) for t in TONES],
-        SIGNAL_OPTIONS=[(k, label) for k, (label, _) in SIGNAL_TYPES.items()],
+        # Prospect types (business_search) aren't offered: the Google Maps searches themselves are the opt-in.
+        SIGNAL_OPTIONS=[(k, label) for k, (label, _) in SIGNAL_TYPES.items() if k not in PROSPECT_TYPES],
+        # This month's Google Maps searches, shown next to the searches in the profile form (never the key).
+        places_usage=google_places.usage_summary,
         CHANNEL_OPTIONS=list(CHANNEL_LABELS.items()),
         STATUS_OPTIONS=[(s, STATUS_LABELS[s]) for s in LEAD_STATUSES],
     )

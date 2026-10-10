@@ -59,7 +59,7 @@ OpenBerry gives Claude 24 tools.
 | `list_companies` | See registered companies with lead/hot counts |
 | `get_company_profile` | Read the ICP, offer, signal setup, and which sources are configured |
 | `register_company` / `update_company` | Onboard a company from a chat, or change its ICP, keywords or outreach style (`update_company` replaces lists and `signals.weights` whole), including your LinkedIn account type (`outreach.linkedin_account`: `free` or `premium`) when you tell Claude which one you have. Alert webhooks must be Slack or Discord incoming-webhook URLs. Claude can't turn AI agent sending on, raise its limit or lift its pause, and can't turn [auto-approve](AI_AGENT_SENDING.md#auto-approve-optional) on or shorten its window (it can turn either off) |
-| `run_signal_scan` | Run the free collectors now (HN, job boards, news, RSS, GitHub, SEC, Reddit) |
+| `run_signal_scan` | Run the free collectors now (HN, job boards, news, RSS, GitHub, SEC, Reddit, Google Maps) |
 | `get_prospecting_plan` | Get concrete LinkedIn/Google searches, competitor and influencer pages, lookalikes, and events to research |
 | `list_leads` / `get_lead` | Browse leads by tier, status or score; see the score reasons, signals and messages |
 | `add_leads` | Save people found with other tools (LinkedIn MCP, browser, search), with the signal that explains *why now*. People who turn hot trigger the company's alert |
@@ -76,6 +76,9 @@ OpenBerry gives Claude 24 tools.
 | `get_send_queue` | [AI agent sending](AI_AGENT_SENDING.md) only. The approved LinkedIn messages your browser agent may send now, with the exact text and profile link. With auto-approve on, it first approves the drafts whose review window has passed (`auto_approved_now`, and `auto_approved` on each item). Empty, with the reason, while sending is off, paused or at the daily limit. It also gives the connection limits: `connect_sent_7d` of `weekly_connect_limit` (80), `connect_notes_30d` of `monthly_note_limit` (5 on a free account, `null` on Premium) and `connect_blocked_reason`. Past them, connection requests wait and LinkedIn messages still come |
 | `confirm_message_sent` | The agent records each message right after sending it. OpenBerry checks every rule again (including the note length and the connection limits) and counts it toward the daily limit |
 | `report_send_problem` | The kill switch. On any LinkedIn warning, check or limit, it pauses agent sending for 24 hours and puts the message back to approved |
+
+Claude can set Google Maps searches with `update_company` (`signals.places_queries`). It never sees the key: the user
+adds it in the dashboard. `get_company_profile` shows how many Google Maps searches were used this month.
 
 Resources: `openberry://companies`, `openberry://company/{id}/profile`, `openberry://company/{id}/hot-leads`.
 Prompts: `onboard_company`, `daily_lead_hunt`, `write_outreach`, `weekly_report`, `send_approved_messages` (AI agent sending).

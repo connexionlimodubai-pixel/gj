@@ -93,8 +93,8 @@ How to work:
    Use the onboard_company prompt: interview the user (read their website with a fetch tool if you
    have one) and call register_company. Use update_company when their requirements change.
 2. Signals: run_signal_scan(company_id) collects free public signals with the collectors the
-   profile configures (Hacker News, Reddit, GitHub, company job boards, news and RSS feeds, and
-   more: see get_company_profile -> collectors) and scores the leads behind them. It can take a
+   profile configures (Hacker News, Reddit, GitHub, company job boards, news and RSS feeds, Google
+   Maps businesses, and more: see get_company_profile -> collectors) and scores the leads behind them. It can take a
    minute.
 3. Prospecting: get_prospecting_plan(company_id) returns concrete searches. Run them with
    companion MCP servers (a LinkedIn MCP server, Playwright/browser, fetch, web search). Save every
@@ -615,7 +615,8 @@ def get_company_profile(company_id: int) -> dict[str, Any]:
 
     Returns the full registration profile (offer, competitors, best customers, requirements, icp,
     signals, outreach rules incl. banned words, notify settings), which signal collectors are
-    configured and what each one still needs, pipeline stats, and dashboard links.
+    configured and what each one still needs (Google Maps shows this month's search usage and whether
+    the user added a key; the key itself is never shown), pipeline stats, and dashboard links.
     Read this before prospecting, scoring or writing for the company.
     """
     company = _get_company(company_id)
@@ -884,6 +885,8 @@ def _scan_result(company_id: int, stats: dict[str, Any]) -> dict[str, Any]:
             row["error"] = info["error"]
         if info.get("warnings"):
             row["warnings"] = info["warnings"][:3]
+        if info.get("counts"):
+            row["counts"] = info["counts"]
         collectors[name] = row
     out: dict[str, Any] = {
         "status": stats.get("status"),
@@ -933,9 +936,10 @@ async def run_signal_scan(company_id: int, sources: ScanSources = None,
                           wait_seconds: ScanWait = DEFAULT_SCAN_WAIT_SECONDS) -> dict[str, Any]:
     """Collect fresh intent signals for a company from free public sources and score the leads.
 
-    Sources include Hacker News, Reddit, GitHub, company job boards, news and RSS feeds, each used
-    only when the profile configures it (get_company_profile -> collectors shows what runs and what
-    each one needs). Usually takes 10-60 seconds. Returns counts of new signals and leads,
+    Sources include Hacker News, Reddit, GitHub, company job boards, news and RSS feeds, and Google
+    Maps businesses (needs a Google Maps API key the user adds in the dashboard), each used only when
+    the profile configures it (get_company_profile -> collectors shows what runs and what each one
+    needs). Usually takes 10-60 seconds. Returns counts of new signals and leads,
     per-collector results and errors, and the top 5 leads that just became hot. If the scan takes
     longer than wait_seconds it keeps running in the background: check list_leads or
     pipeline_report a minute later. While a scan started elsewhere (dashboard, scheduler, CLI) is

@@ -496,6 +496,9 @@ a.sig-type:hover { color: var(--accent-text); }
 .table tbody tr:hover td { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .table-compact td { padding: 6px var(--s3); }
+.table tr.has-detail td { border-bottom: 0; }
+.table tr.run-detail td { padding-top: 0; white-space: normal; }
+.table tr.run-detail p { position: sticky; left: 0; max-width: calc(100vw - 72px); }  /* readable without scrolling */
 .lead-cell { display: flex; align-items: center; gap: var(--s3); min-width: 200px; max-width: 300px; }
 .loc-cell { min-width: 120px; }
 .dash-grid .lead-cell { min-width: 160px; max-width: 230px; }
@@ -623,6 +626,29 @@ a.lead-name:hover { color: var(--accent-text); }
 .auto-held > .icon { color: var(--warning); }
 .auto-blocked > .icon { color: var(--muted); }
 .bubble-edit .auto-line { padding-top: var(--s2); border-top: 1px solid var(--accent-soft-2); }
+
+/* API keys page and Google Maps usage lines */
+.keys-card { display: grid; gap: var(--s4); max-width: 960px; scroll-margin-top: var(--s5); }
+.keys-head { display: flex; align-items: flex-start; gap: var(--s3); }
+.keys-head h2 { gap: var(--s2); }
+.keys-icon { flex: none; width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-text); }
+.keys-intro { color: var(--text-2); margin-top: 2px; }
+.keys-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s5); align-items: start; }
+.keys-block { display: grid; gap: var(--s3); align-content: start; min-width: 0; }
+.key-status .icon { color: var(--good); vertical-align: -2px; }
+.pill-key-refused { background: var(--warning-bg); color: var(--warning); }
+.key-refused { display: grid; gap: var(--s2); justify-items: start; padding: var(--s3); border-radius: 10px; background: var(--warning-bg); color: var(--text); }
+.key-refused .icon { color: var(--warning); vertical-align: -2px; }
+.keys-remove { justify-self: start; }
+.keys-meter { display: block; height: 8px; }
+.keys-meter.is-full .meter-fill { background: var(--warning); }
+.usage-line strong { font-variant-numeric: tabular-nums; }
+.keys-howto .steps-list { list-style: decimal; padding-left: 20px; display: grid; gap: 4px; color: var(--text-2); }
+.keys-terms { display: flex; gap: 6px; align-items: flex-start; }
+.keys-terms .icon { flex: none; margin-top: 2px; }
+.places-field { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.places-usage .icon { vertical-align: -2px; }
+.break { overflow-wrap: anywhere; }
 
 /* ------------------------------------------------------------------ registration board */
 .company-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--s4); }
@@ -804,7 +830,7 @@ a.lead-name:hover { color: var(--accent-text); }
   .feed-item { flex-wrap: wrap; }
   .feed-lead-col { width: 100%; padding-left: 38px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; }
   .outreach-tools { grid-template-columns: 1fr; }
-  .agent-grid, .agent-fields { grid-template-columns: 1fr; }
+  .agent-grid, .agent-fields, .keys-grid { grid-template-columns: 1fr; }
   .agent-pause { grid-template-columns: auto minmax(0, 1fr); }
   .agent-pause form { grid-column: 1 / -1; }
   .agent-pause .btn { width: 100%; }

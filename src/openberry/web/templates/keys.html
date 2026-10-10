@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">Workspace</p>
+    <h1>API keys</h1>
+    <p class="lede">Keys for optional sources. OpenBerry saves them in its settings file, <code class="break">{{ env_path }}</code>, which only your user account can read. A saved key is never shown again.</p>
+  </div>
+</div>
+
+{% set used = places.searches_used_this_month %}
+{% set limit = places.monthly_limit %}
+{% set pct = ((used / limit * 100) if limit else 100)|round|int %}
+{% set editable = google.source in ("saved", "") %}
+<section class="card keys-card" id="google-maps" aria-labelledby="google-maps-title">
+  <header class="keys-head">
+    <span class="keys-icon" aria-hidden="true">{{ m.icon("pin", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="google-maps-title" class="title-row">Google Maps {% if google.is_set and google_refused %}<span class="pill pill-key-refused">Key refused</span>{% else %}<span class="pill {{ 'pill-on' if google.is_set else 'pill-off' }}">{{ "Key saved" if google.is_set else "No key" }}</span>{% endif %}</h2>
+      <p class="keys-intro">Finds businesses on Google Maps, like hotels, event planners and law firms, and reads their contact details from their own websites. Add your searches to a company profile, under Signals.</p>
+    </div>
+  </header>
+
+  <div class="keys-grid">
+    <div class="keys-block">
+      <p class="key-status" id="google-key-status">
+        {% if google.source == "environment" %}The key is set in the server's environment (<code>{{ google.name }}</code>). Change it there.
+        {% elif google.source == "file" %}The key is set in <code class="break">{{ google.where }}</code>, which OpenBerry reads first. Change it there.
+        {% elif google.is_set and google.hint %}{% if not google_refused %}{{ m.icon("check", 14) }} {% endif %}Key saved, {{ google.hint }}.
+        {% elif google.is_set %}{% if not google_refused %}{{ m.icon("check", 14) }} {% endif %}Key saved.
+        {% else %}No key yet.{% endif %}
+      </p>
+      {% if google.is_set and google_refused %}
+      <div class="key-refused" role="status">
+        <p>{{ m.icon("alert", 14) }} Google refused this key: {{ google_refused }}</p>
+        <form method="post" action="/keys/google-maps">{{ m.csrf() }}
+          <input type="hidden" name="action" value="check_key">
+          <button class="btn btn-sm" type="submit">{{ m.icon("refresh", 14) }}Check again</button>
+        </form>
+      </div>
+      {% endif %}
+      {% if editable %}
+      <form method="post" action="/keys/google-maps" class="keys-form">{{ m.csrf() }}
+        <input type="hidden" name="action" value="save_key">
+        <div class="field">
+          <label for="google-key">Google Maps API key</label>
+          <div class="input-row">
+            <input class="input mono" id="google-key" name="key" type="password" value="" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="AIza…" required minlength="20" maxlength="200" aria-describedby="google-key-status">
+            <button class="btn btn-primary" type="submit">{{ m.icon("key", 14) }}{{ "Replace key" if google.is_set else "Save key" }}</button>
+          </div>
+        </div>
+      </form>
+      {% if google.is_set %}
+      <form method="post" action="/keys/google-maps" class="keys-remove">{{ m.csrf() }}
+        <input type="hidden" name="action" value="remove_key">
+        <button class="btn btn-sm btn-ghost btn-danger-text" type="submit" data-confirm="Remove the Google Maps key? Google Maps searches stop until you add a key again.">{{ m.icon("trash", 14) }}Remove key</button>
+      </form>
+      {% endif %}
+      {% endif %}
+    </div>
+
+    <div class="keys-block">
+      <p class="usage-line" id="google-usage"><strong>{{ used|compact }} of {{ limit|compact }}</strong> searches used this month. The count starts again on <span class="nowrap">{{ resets_label }}</span>.</p>
+      <span class="meter meter-series keys-meter{{ ' is-full' if used >= limit }}" role="progressbar" aria-labelledby="google-usage" aria-valuemin="0" aria-valuemax="{{ limit }}" aria-valuenow="{{ [used, limit]|min }}"><span class="meter-fill" style="width: {{ [pct, 100]|min }}%"></span></span>
+      {% if google_limit.source in ("saved", "") %}
+      <form method="post" action="/keys/google-maps" class="keys-form">{{ m.csrf() }}
+        <input type="hidden" name="action" value="save_limit">
+        <div class="field">
+          <label for="google-limit">Searches a month</label>
+          <div class="input-row">
+            <input class="input" id="google-limit" name="limit" type="number" min="0" max="{{ free_per_month }}" step="1" inputmode="numeric" value="{{ limit }}" aria-describedby="google-limit-help">
+            <button class="btn" type="submit">{{ m.icon("check", 14) }}Save limit</button>
+          </div>
+          <p class="help" id="google-limit-help">Google gives {{ free_per_month|compact }} free searches a month. Each page of up to 20 businesses is one search. OpenBerry stops at this limit.</p>
+        </div>
+      </form>
+      {% elif google_limit.source == "environment" %}
+      <p class="small muted">The limit is set in the server's environment (<code>{{ google_limit.name }}</code>). Change it there.</p>
+      {% else %}
+      <p class="small muted">The limit is set in <code class="break">{{ google_limit.where }}</code>, which OpenBerry reads first. Change it there.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <details class="inline-details keys-howto">
+    <summary>{{ m.icon("chevron-right", 14) }}How to get a key</summary>
+    <ol class="steps-list">
+      <li>Open the Google Cloud console (console.cloud.google.com) and create a project.</li>
+      <li>Set up billing. Google asks for a card, but the first {{ free_per_month|compact }} searches each month are free.</li>
+      <li>Turn on Places API (New) for the project.</li>
+      <li>Create an API key under APIs &amp; Services, Credentials. Restrict it to Places API (New).</li>
+      <li>Paste the key here and save.</li>
+    </ol>
+  </details>
+  <p class="small muted keys-terms">{{ m.icon("info", 14) }}<span>Google's terms let OpenBerry keep only each business's Place ID. Names, emails and phone numbers come from the business's own website, and OpenBerry respects each website's robots.txt.</span></p>
+</section>
+{% endblock %}

@@ -18,6 +18,7 @@ This table shows how each piece is replicated for free in OpenBerry. "Claude" me
 | Profile visitors / page followers | ⚠️ | No public API. Paste exports into Claude, which adds them with `add_leads` (type `profile_visit`). |
 | Events | ✅ / ⚠️ | Event names on the registration board. Claude looks up speakers and attendees with fetch/Playwright. |
 | Lookalikes of best customers | ✅ | Best customers on the registration board. `get_prospecting_plan` turns them into lookalike searches. |
+| Local business lists | ➕ | Google Maps businesses with contact details from their own websites (your Google key, free tier) |
 | AI lead scoring with "intent reasons" | ✅ | Transparent scoring: ICP fit + time-decayed intent + signal stacking + optional Claude score (`assess_lead`). Every reason is shown. |
 | Account-level intent | ✅ | Hiring, funding and news create *account* leads. People at that company inherit their intent. |
 | AI-personalised messages | ✅ | Claude (`get_outreach_context` → `save_outreach_message`), local Ollama, or a template |
@@ -32,7 +33,7 @@ This table shows how each piece is replicated for free in OpenBerry. "Claude" me
 | Dashboard / analytics | ✅ | KPI tiles, signals per day, signal mix, hot leads, scan history, reply rate |
 | Multiple brands / clients | ✅ | Each registered company has its own ICP, signals and pipeline. Public registration mode lets clients fill in the form themselves; their companies wait, paused, for your review. |
 
-✅ = built in · ⚠️ = possible with Claude plus a companion tool, or partially · ❌ = intentionally not built
+✅ = built in · ➕ = OpenBerry extra · ⚠️ = possible with Claude plus a companion tool, or partially · ❌ = intentionally not built
 
 ## Where the free version is weaker
 

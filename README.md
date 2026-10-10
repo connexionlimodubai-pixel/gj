@@ -23,6 +23,8 @@ The app isn't code-signed, which is why Windows and macOS ask you to confirm onc
 2. **Collect intent signals** on a schedule from free public sources:
    - Hacker News, GitHub, Greenhouse/Lever/Ashby job boards, Google News, RSS and SEC EDGAR
    - Reddit, if you have API access
+   - Google Maps businesses (hotels, event planners, law firms...) with the email and phone from their own websites,
+     if you add a Google Maps API key
    - LinkedIn and anything else Claude can browse
 3. **Score every lead** transparently: ICP fit + time-decayed intent + signal stacking, plus Claude's own judgement.
    Every point is explained ("Title matches 'Travel Manager'", "Hiring for a relevant role, 3d ago").
@@ -135,6 +137,8 @@ or in the environment. See [`.env.example`](.env.example) for the other settings
 | `OPENBERRY_ALLOWED_HOSTS` | Extra host names to answer to in local mode (no password), e.g. a LAN IP so `/mcp` works there |
 | `OPENBERRY_PUBLIC_REGISTRATION=true` | Let clients fill in the registration form themselves (agency intake). Their companies wait, paused, for your review |
 | `OPENBERRY_CONTACT_EMAIL` | Contact e-mail for SEC EDGAR's required User-Agent |
+| `OPENBERRY_GOOGLE_PLACES_KEY` | Google Maps API key for the Google Maps businesses source. Desktop users can paste it on the **API keys** page instead |
+| `OPENBERRY_GOOGLE_PLACES_MONTHLY_LIMIT` | Most Google Maps searches a month (default 900; Google's free tier is 1,000) |
 | `GITHUB_TOKEN` | Higher GitHub limits; stargazers of repos you admin |
 | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME` | Optional Reddit source (see its terms) |
 | `OPENBERRY_OLLAMA_URL`, `OPENBERRY_OLLAMA_MODEL` | Free local LLM: the "Local AI (Ollama)" writer in a lead's *Draft a message* card |
@@ -161,7 +165,7 @@ and without a password the server only answers to that host, `localhost` and IP 
 ```
 Claude Desktop / Code ──MCP──▶ OpenBerry ◀── dashboard (registration board, leads, outreach)
         │                          │
-        └─ optional MCP servers    ├─ collectors: HN · GitHub · job boards · News/RSS · SEC · Reddit
+        └─ optional MCP servers    ├─ collectors: HN · GitHub · job boards · News/RSS · SEC · Reddit · Google Maps
            (Playwright, fetch,     ├─ scoring: ICP fit + intent decay + signal stacking + Claude score
             LinkedIn, SearXNG)     └─ SQLite (~/.openberry/openberry.db)
 ```
@@ -175,12 +179,17 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
   non-commercial use, and Reddit requires an agreement for commercial use.
 - Prospect data is personal data. Comply with GDPR, the UAE PDPL, CAN-SPAM and similar laws: contact people with relevant, honest messages and
   honour opt-outs.
+- Google Maps: OpenBerry keeps only each business's Place ID, as Google's terms require. Contact details come from the
+  business's own website. Read the [Google Maps Platform Terms](https://cloud.google.com/maps-platform/terms) before you use it.
+- Bulk email: these are business contact addresses. Email providers block mailboxes that send to people who didn't opt
+  in (Hostinger's rules say so), and anti-spam laws apply. Send few, personal, relevant emails and honour opt-outs.
+  OpenBerry never sends email itself.
 
 ## Development
 
 ```bash
 uv sync --extra dev
-uv run pytest            # ~920 tests, no network needed
+uv run pytest            # ~1,180 tests, no network needed
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

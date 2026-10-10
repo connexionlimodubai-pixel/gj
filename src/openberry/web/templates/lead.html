@@ -11,7 +11,9 @@
     <div class="min0">
       <h1>{{ m.lead_title(lead) }}</h1>
       <p class="lead-hero-sub">
-        {% if lead.kind == "account" %}Account-level lead: the company is showing intent, the right person isn't known yet.
+        {% if lead.kind == "account" and has_intent %}Account-level lead: the company is showing intent, the right person isn't known yet.
+        {% elif lead.kind == "account" and found_on_maps %}Account-level lead: a business that matches your Google Maps search. The right person isn't known yet.
+        {% elif lead.kind == "account" %}Account-level lead: the right person isn't known yet.
         {% else %}{{ lead.title or "Title unknown" }}{% if lead.lead_company %} <span class="muted">at</span> {{ lead.lead_company }}{% endif %}{% endif %}
       </p>
       <p class="meta-inline">
@@ -23,7 +25,7 @@
       </p>
       <p class="link-row">
         {% if lead.linkedin_url|safe_url %}<a class="btn btn-sm" href="{{ lead.linkedin_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("linkedin", 14) }}LinkedIn</a>{% endif %}
-        {% if lead.profile_url|safe_url %}<a class="btn btn-sm" href="{{ lead.profile_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("external", 14) }}Profile</a>{% endif %}
+        {% if lead.profile_url|safe_url %}<a class="btn btn-sm" href="{{ lead.profile_url|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{% if lead.profile_url|maps_link %}{{ m.icon("pin", 14) }}Google Maps{% else %}{{ m.icon("external", 14) }}Profile{% endif %}</a>{% endif %}
         {% if lead.website|safe_url %}<a class="btn btn-sm" href="{{ lead.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ m.icon("globe", 14) }}Website</a>{% endif %}
         {% if lead.email|mailto %}<a class="btn btn-sm" href="{{ lead.email|mailto }}" target="_blank" rel="noopener noreferrer">{{ m.icon("mail", 14) }}{{ lead.email }}</a>{% endif %}
         {% if lead.phone %}<span class="btn btn-sm btn-static">{{ m.icon("phone", 14) }}{{ lead.phone }}</span>{% endif %}

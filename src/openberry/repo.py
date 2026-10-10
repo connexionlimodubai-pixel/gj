@@ -11,8 +11,9 @@ import json
 import re
 import sqlite3
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -26,6 +27,7 @@ from .models import (
     LEAD_STATUSES,
     MESSAGE_CHANNELS,
     MESSAGE_STATUSES,
+    PROSPECT_TYPES,
     SIGNAL_TYPES,
     Company,
     CompanyIn,
@@ -167,6 +169,24 @@ def normalize_profile_url(url: str) -> str:
     return base.rstrip("/") + (f"?{ident}" if ident else "")
 
 
+# Google Maps links built from a Place ID alone: the only thing OpenBerry keeps from Google's Places API.
+MAPS_PLACE_URL = "https://www.google.com/maps/place/?q=place_id:"
+PLACE_ID_RE = re.compile(r"[A-Za-z0-9_-]{10,300}")
+_MAPS_LINK = re.compile(r"^https?://(?:www\.|maps\.)?google\.com/maps/[^#]*?[?&]"
+                        r"(?:q=place_id(?::|%3A)|query_place_id=)([A-Za-z0-9_-]{10,300})(?=[&#]|$)", re.I)
+
+
+def maps_place_url(place_id: str) -> str:
+    """Google Maps link to a place, built from its Place ID."""
+    return MAPS_PLACE_URL + place_id
+
+
+def google_place_id(url: str) -> str:
+    """The Place ID in a Google Maps link (place/?q=place_id:..., or the Maps URLs query_place_id=...), else ""."""
+    m = _MAPS_LINK.match((url or "").strip())
+    return m.group(1) if m else ""
+
+
 def _norm_name(name: str) -> str:
     return " ".join(_words(_fold(name)))
 
@@ -175,8 +195,12 @@ def lead_identity_keys(data: LeadIn | Lead, kind: str) -> list[str]:
     keys: list[str] = []
     ckey = company_key(data.lead_company, data.company_domain)
     if kind == "account":
-        # Both identities, so "Acme Bank" seen first by name and later with acme.com merge.
-        return [f"acct:{k}" for k in (_name_key(data.lead_company), _domain_key(data.company_domain)) if k]
+        # Both identities, so "Acme Bank" seen first by name and later with acme.com merge; and the Google Maps
+        # Place ID, so the same business found again by another search merges too.
+        keys = [f"acct:{k}" for k in (_name_key(data.lead_company), _domain_key(data.company_domain)) if k]
+        if pid := google_place_id(data.profile_url):
+            keys.append(f"acct:gp:{pid}")
+        return keys
     if li := normalize_linkedin(data.linkedin_url):
         keys.append(f"li:{li}")
     if data.email and "@" in data.email:
@@ -391,10 +415,24 @@ def _find_existing(c: sqlite3.Connection, company_id: int, keys: list[str]) -> i
 
     Strong keys (LinkedIn, email, GitHub, X, profile URL, account name/domain) win. A name match
     alone is trusted only when the two records don't carry different identities of the same kind:
-    two John Smiths at Google with different LinkedIn profiles are two people.
+    two John Smiths at Google with different LinkedIn profiles are two people. Likewise an account
+    found on Google Maps never merges by name alone into one with another Place ID: two businesses.
     """
     strong = [k for k in keys if not k.startswith(_WEAK_KEY_PREFIXES)]
-    if (found := _lead_with_key(c, company_id, strong)) is not None:
+    if place := next((k for k in keys if k.startswith("acct:gp:")), ""):
+        names = [k for k in strong if k.startswith("acct:n:")]
+        strong = [k for k in strong if not k.startswith("acct:n:")]
+        if (found := _lead_with_key(c, company_id, strong)) is not None:  # the same Place ID or domain
+            return found
+        if names:
+            row = c.execute(
+                f"SELECT MIN(k.lead_id) AS id FROM lead_keys k WHERE k.company_id = ? "
+                f"AND k.key IN ({', '.join('?' * len(names))}) AND NOT EXISTS (SELECT 1 FROM lead_keys g "
+                "WHERE g.company_id = k.company_id AND g.lead_id = k.lead_id "
+                "AND substr(g.key, 1, 8) = 'acct:gp:' AND g.key != ?)", [company_id, *names, place]).fetchone()
+            if row["id"] is not None:
+                return row["id"]
+    elif (found := _lead_with_key(c, company_id, strong)) is not None:
         return found
     found = _lead_with_key(c, company_id, [k for k in keys if k.startswith(_WEAK_KEY_PREFIXES)])
     if found is None or not strong:
@@ -747,10 +785,13 @@ def add_signal(company_id: int, sig: SignalIn, lead_id: int | None = None,
 
 def list_signals(company_id: int, *, lead_id: int | None = None, type: str | None = None,
                  source: str | None = None, since: datetime | None = None, limit: int = 100,
-                 offset: int = 0, include_account: bool = False,
+                 offset: int = 0, include_account: bool = False, exclude_types: Iterable[str] = (),
                  conn: sqlite3.Connection | None = None) -> tuple[list[Signal], int]:
     where = ["s.company_id = ?"]
     params: list[Any] = [company_id]
+    if exclude := list(exclude_types):
+        where.append(f"s.type NOT IN ({', '.join('?' * len(exclude))})")
+        params.extend(exclude)
     if lead_id is not None:
         if include_account:
             where.append("(s.lead_id = ? OR s.lead_id IN (SELECT a.id FROM leads a JOIN leads p "
@@ -1086,6 +1127,129 @@ def get_scan_run(run_id: int, conn: sqlite3.Connection | None = None) -> ScanRun
 
 
 # --------------------------------------------------------------------------------------
+# Paid API usage and Google Maps search state
+# --------------------------------------------------------------------------------------
+
+_ID_BATCH = 500  # SQLite host parameters per statement, well under its limit
+
+
+@dataclass(frozen=True)
+class ApiUsage:
+    service: str
+    month: str             # 'YYYY-MM' (UTC)
+    used: int
+    limit: int
+    granted: bool = False  # reserve_api_call: this call may be made (and is counted already)
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.limit - self.used)
+
+
+def usage_month(now: datetime | None = None) -> str:
+    return (now or utcnow()).astimezone(timezone.utc).strftime("%Y-%m")
+
+
+def api_usage(service: str, limit: int, now: datetime | None = None,
+              conn: sqlite3.Connection | None = None) -> ApiUsage:
+    """This month's count, read-only (no row is created)."""
+    month = usage_month(now)
+    with _conn(conn) as c:
+        row = c.execute("SELECT used FROM api_usage WHERE service = ? AND month = ?", (service, month)).fetchone()
+    return ApiUsage(service, month, row["used"] if row else 0, limit)
+
+
+def reserve_api_call(service: str, limit: int, now: datetime | None = None,
+                     conn: sqlite3.Connection | None = None) -> ApiUsage:
+    """Count one paid call before making it, unless that would go over `limit` this month.
+
+    Atomic across threads and processes: the read and the write happen under SQLite's write lock (BEGIN IMMEDIATE).
+    A call that then fails stays counted: Google may have billed it, and over-counting is the safe side. Only a
+    refusal that is never billed is given back (release_api_call).
+    """
+    month = usage_month(now)
+    with _write_locked(conn) as c:
+        row = c.execute("SELECT used FROM api_usage WHERE service = ? AND month = ?", (service, month)).fetchone()
+        used = row["used"] if row else 0
+        if used >= limit:
+            return ApiUsage(service, month, used, limit, granted=False)
+        c.execute(
+            "INSERT INTO api_usage (service, month, used, updated_at) VALUES (?, ?, 1, ?) "
+            "ON CONFLICT(service, month) DO UPDATE SET used = used + 1, updated_at = excluded.updated_at",
+            (service, month, iso(now)))
+        return ApiUsage(service, month, used + 1, limit, granted=True)
+
+
+def release_api_call(service: str, month: str, conn: sqlite3.Connection | None = None) -> None:
+    """Give back a call counted by reserve_api_call in `month` ('YYYY-MM'): the API refused it without running it
+    (an invalid key, billing or the API turned off), so it was never billed."""
+    with _write_locked(conn) as c:
+        c.execute("UPDATE api_usage SET used = MAX(used - 1, 0), updated_at = ? WHERE service = ? AND month = ?",
+                  (iso(), service, month))
+
+
+def place_search_times(company_id: int, conn: sqlite3.Connection | None = None) -> dict[str, datetime]:
+    """query_key -> when every page of that Google Maps search was last read."""
+    with _conn(conn) as c:
+        rows = c.execute("SELECT query_key, searched_at FROM place_searches WHERE company_id = ?",
+                         (company_id,)).fetchall()
+    return {r["query_key"]: datetime.fromisoformat(r["searched_at"]) for r in rows}
+
+
+def finish_place_search(company_id: int, query_key: str, found: int, added: int, when: datetime | None = None,
+                        conn: sqlite3.Connection | None = None) -> None:
+    """Remember that every page of a Google Maps search was read (it then waits a week)."""
+    with _conn(conn) as c:
+        c.execute(
+            "INSERT INTO place_searches (company_id, query_key, searched_at, found, added) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(company_id, query_key) DO UPDATE SET searched_at = excluded.searched_at, "
+            "found = excluded.found, added = excluded.added",
+            (company_id, query_key, iso(when), int(found), int(added)))
+
+
+def prune_place_searches(company_id: int, keep: Iterable[str], conn: sqlite3.Connection | None = None) -> int:
+    """Forget searches no longer in the profile, so adding one back runs it at once. Returns the rows deleted."""
+    keep = set(keep)
+    with _conn(conn) as c:
+        gone = [r["query_key"] for r in c.execute("SELECT query_key FROM place_searches WHERE company_id = ?",
+                                                  (company_id,)).fetchall() if r["query_key"] not in keep]
+        c.executemany("DELETE FROM place_searches WHERE company_id = ? AND query_key = ?",
+                      [(company_id, k) for k in gone])
+    return len(gone)
+
+
+def handled_place_ids(company_id: int, place_ids: Iterable[str], recheck_before: datetime,
+                      conn: sqlite3.Connection | None = None) -> set[str]:
+    """The given Place IDs to skip: they became a lead (added = 1), or were skipped since `recheck_before`."""
+    ids = list(dict.fromkeys(place_ids))
+    found: set[str] = set()
+    with _conn(conn) as c:
+        for start in range(0, len(ids), _ID_BATCH):
+            batch = ids[start:start + _ID_BATCH]
+            rows = c.execute(
+                f"SELECT place_id FROM place_ids WHERE company_id = ? AND place_id IN ({', '.join('?' * len(batch))}) "
+                "AND (added = 1 OR checked_at >= ?)", [company_id, *batch, iso(recheck_before)]).fetchall()
+            found.update(r["place_id"] for r in rows)
+    return found
+
+
+def record_place_ids(company_id: int, outcomes: Mapping[str, bool], when: datetime | None = None,
+                     conn: sqlite3.Connection | None = None) -> None:
+    """Remember Place IDs this company handled: True when it became a lead (then it is never added again; written
+    by services.ingest with the lead, so a scan that stops before storing its leads loses none), False when it was
+    skipped."""
+    if not outcomes:
+        return
+    stamp = iso(when)
+    with _conn(conn) as c:
+        c.executemany(
+            "INSERT INTO place_ids (company_id, place_id, added, checked_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(company_id, place_id) DO UPDATE SET added = MAX(added, excluded.added), "
+            "checked_at = excluded.checked_at",
+            [(company_id, pid, int(bool(added)), stamp) for pid, added in outcomes.items()])
+
+
+# --------------------------------------------------------------------------------------
 # Hot-lead alerts
 # --------------------------------------------------------------------------------------
 
@@ -1112,6 +1276,9 @@ def claim_new_hot_leads(company_id: int, conn: sqlite3.Connection | None = None)
 # --------------------------------------------------------------------------------------
 
 
+_NOT_PROSPECT = f"type NOT IN ({', '.join(repr(t) for t in PROSPECT_TYPES)})"
+
+
 def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
     now = now or utcnow()
     with _conn(conn) as c:
@@ -1135,8 +1302,9 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
 
         start = (now - timedelta(days=13)).date()
         by_day = {(start + timedelta(days=i)).isoformat(): 0 for i in range(14)}
+        # Intent signals only: a business found on Google Maps (PROSPECT_TYPES) is a prospect, not intent.
         for r in c.execute("SELECT substr(occurred_at, 1, 10) d, COUNT(*) n FROM signals WHERE company_id = ? "
-                           "AND occurred_at >= ? GROUP BY d", (company_id, start.isoformat())):
+                           f"AND occurred_at >= ? AND {_NOT_PROSPECT} GROUP BY d", (company_id, start.isoformat())):
             if r["d"] in by_day:
                 by_day[r["d"]] = r["n"]
         by_type = [
@@ -1163,8 +1331,10 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
             "tiers": tiers,
             "statuses": statuses,
             "signals_total": count("SELECT COUNT(*) FROM signals WHERE company_id = ?", company_id),
-            "signals_7d": count("SELECT COUNT(*) FROM signals WHERE company_id = ? AND occurred_at >= ?",
-                                company_id, iso(now - timedelta(days=7))),
+            "signals_7d": count(f"SELECT COUNT(*) FROM signals WHERE company_id = ? AND occurred_at >= ? "
+                                f"AND {_NOT_PROSPECT}", company_id, iso(now - timedelta(days=7))),
+            "businesses_7d": count(f"SELECT COUNT(*) FROM signals WHERE company_id = ? AND occurred_at >= ? "
+                                   f"AND NOT {_NOT_PROSPECT}", company_id, iso(now - timedelta(days=7))),
             "signals_by_day": [{"date": d, "count": n} for d, n in by_day.items()],
             "signals_by_type": by_type,
             "signals_by_source": by_source,

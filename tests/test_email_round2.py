@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import imaplib
 import json
+import smtplib
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -145,6 +146,29 @@ def test_a_settings_problem_with_sending_never_stops_the_inbox_checks(company, b
     assert repo.get_message(follow_up.id).status != "approved" and repo.get_message(other.id).status == "approved"
     repo.record_email_failure(0, "", mailer.AUTH, "535 refused", FROM)
     assert services.inbox_due(now=NOW + timedelta(minutes=20)) is False
+
+
+@pytest.mark.parametrize("refused", [
+    (550, b"5.1.0 <sam@acme-mail.example>: Sender address rejected: User unknown in virtual mailbox table"),
+    (553, b"5.7.1 <sam@acme-mail.example>: Sender address rejected: not owned by user sam@acme-mail.example"),
+    (553, b"5.1.8 <sam@acme-mail.example>: Sender address rejected: Domain not found"),
+])
+def test_the_from_address_refused_at_rcpt_to_is_a_setting_not_a_bounce(company, box, refused):
+    """EMAIL-5: Postfix refuses a From address it doesn't allow in reply to RCPT TO (smtpd_delay_reject). Sending
+    waits for the settings, as at MAIL FROM: Lina's address isn't put on the never-email list, her lead isn't tagged,
+    and the mailbox isn't paused for 24 hours. The test email says the same."""
+    turn_on(company)
+    lina = lead(company, LINA, full_name="Lina Noor")
+    msg = approved(lina)
+    box.fail["rcpt"] = refused
+    assert send(NOW)["status"] == mailer.CONFIG
+    assert suppressed(LINA) == {} and repo.get_lead(lina).tags == []
+    assert repo.get_message(msg.id).status == "approved" and repo.get_message(msg.id).email_state == ""
+    state = repo.mailbox_state(FROM, now=NOW)
+    assert state["auth_failed"] and "won't send from" in state["pause_reason"] and state["paused_until"] is None
+    assert [e["kind"] for e in repo.list_email_events(lead_id=lina)] == []
+    outcome = services.send_test_email()
+    assert outcome.kind == mailer.CONFIG and "won't send from" in outcome.text
 
 
 def test_a_dns_failure_at_send_time_is_tried_again_by_itself(company, box):
@@ -481,6 +505,31 @@ def test_something_coming_back_for_a_maybe_sent_draft_makes_it_sent(company, box
     assert (stored.status, stored.email_state) == ("sent", "sent")
 
 
+@pytest.mark.parametrize("answers_it", [True, False])
+def test_a_reply_after_send_again_is_read_and_the_email_is_not_sent_twice(company, box, answers_it):
+    """EMAIL-3: an email may have been sent (the connection broke during DATA). At 19:00 in Dubai the user chooses Send
+    again: it waits for the sending hours. That evening Lina answers the first copy, which did arrive, or writes a new
+    email from her phone. It is read, and nothing goes out in the morning. A reply to the first copy (Send again keeps
+    its Message-ID) also records the email as sent."""
+    turn_on(company)
+    lina = lead(company, LINA, full_name="Lina Noor")
+    msg = approved(lina)
+    box.fail["data"] = smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+    assert send(NOW)["status"] == mailer.UNKNOWN
+    del box.fail["data"]
+    header = repo.get_message(msg.id).email_message_id
+    evening = NOW + timedelta(hours=9)  # 19:00 in Dubai: outside the sending hours
+    services.check_inbox(now=evening)
+    repo.resolve_email(msg.id, "send_again", now=evening)
+    box.deliver(reply("Thanks Sam, please call me tomorrow instead.", refers=header if answers_it else ""))
+    assert services.check_inbox(now=evening + timedelta(minutes=5))["recorded"] == 1
+    assert repo.get_lead(lina).status == "replied"
+    stored = repo.get_message(msg.id)
+    if answers_it:
+        assert (stored.status, stored.email_state, stored.sent_at) == ("sent", "sent", NOW)
+    assert send(NOW + timedelta(days=1)) == {"status": "idle"} and box.sent == []
+
+
 # --------------------------------------------------------------------------------------
 # The inbox: backlog, clock, colleagues, maybe-sent emails (F3, F5, F9, INBOX2-2, R2UI-12b)
 # --------------------------------------------------------------------------------------
@@ -573,26 +622,65 @@ def test_a_colleagues_forward_goes_to_the_person_it_names(company, box):
     assert [m.direction for m in repo.list_messages(company.id, lead_id=rania)].count("inbound") == 0
     assert repo.get_message(omar_follow_up.id).status == "skipped"
     assert repo.get_message(rania_follow_up.id).status == "approved"  # nobody asked about Rania
+    # EMAIL-2: only Omar is flagged and stopped for good. Rania's follow-up goes out when it is due.
+    later = NOW + timedelta(days=7)
+    assert [m.lead_id for m in repo.opt_out_hints(company.id)] == [omar]
+    assert send(later)["message_id"] == rania_follow_up.id
+    again = approved(omar, step=2)
+    assert repo.followups_due(company.id, now=later) == []
+    assert skip_reason(company, again.id, now=later) == "the lead is marked Replied"
 
 
-def test_a_colleagues_note_naming_nobody_stops_everyone_it_may_be_about(company, box):
-    """INBOX2-2: a colleague writes about "our GM" without naming anyone, and two people there got that email: it is
-    logged on the latest and the follow-ups of both stop, so the right one can't keep getting emails."""
-    turn_on(company)
+@pytest.mark.parametrize("note,hint", [
+    ("Please don't email our GM again, he isn't interested.", ""),
+    ("Our GM asked me to tell you: please remove him from your list.", "remove him from your list"),
+])
+def test_a_colleagues_note_naming_nobody_stops_everyone_it_may_be_about(company, box, note, hint):
+    """INBOX2-2, EMAIL-2: a colleague writes about "our GM" without naming anyone, and two people there got that email:
+    it is logged on the latest and noted on the other too, so the right one can't keep getting emails. A later step to
+    either is never due, auto-approved or sent, also by the AI agent. A note that looks like an opt-out is flagged on
+    each, so the user says which lead it is about. Only the latest moves to Replied, so the reply rate counts it once."""
+    turn_on(company, email_send_auto_approved=True, auto_approve=True, auto_approve_hours=24)
     first = lead(company, "omar.gm@desert-pearl-hotel.example", full_name="Omar")
     sent_from_mailbox(first, header_id="<omar-1@acme-mail.example>", when=NOW - timedelta(hours=3))
     second = lead(company, "rania.fom@desert-pearl-hotel.example", full_name="Rania")
     sent_from_mailbox(second, header_id="<rania-1@acme-mail.example>", when=NOW - timedelta(hours=1))
     follow_ups = [approved(first, step=2), approved(second, step=2)]
     services.check_inbox(now=NOW)
-    box.deliver(reply("Please don't email our GM again, he isn't interested.", sender="pa@desert-pearl-hotel.example",
-                      subject="RE: Airport transfers for your guests", refers="", name="Noura"))
+    box.deliver(reply(note, sender="pa@desert-pearl-hotel.example", subject="RE: Airport transfers for your guests",
+                      refers="", name="Noura"))
     result = services.check_inbox(now=NOW + timedelta(minutes=5))
     assert result["recorded"] == 1
     assert [repo.get_message(f.id).status for f in follow_ups] == ["skipped", "skipped"]
     assert [m.direction for m in repo.list_messages(company.id, lead_id=second)].count("inbound") == 1
     stopped = [e for e in repo.list_email_events(lead_id=first) if e["detail"].startswith("Follow-ups stopped")]
     assert stopped and "pa@desert-pearl-hotel.example" in stopped[0]["detail"]
+    # EMAIL-2: the note is on both pages, from the PA, flagged the same way. Only Rania (the latest) is Replied.
+    notes = repo.list_messages(company.id, direction="inbound")
+    assert sorted(m.lead_id for m in notes) == sorted([first, second])
+    assert {(m.email_from, m.opt_out_hint) for m in notes} == {("pa@desert-pearl-hotel.example", hint)}
+    assert len(repo.opt_out_hints(company.id)) == (2 if hint else 0)
+    assert [repo.get_lead(first).status, repo.get_lead(second).status] == ["contacted", "replied"]
+    assert repo.company_stats(company.id)["statuses"]["replied"] == 1
+    # Omar's next step is never due. Written anyway, auto-approve leaves it, and approved by hand it isn't sent.
+    later = NOW + timedelta(days=7)
+    assert repo.followups_due(company.id, now=later) == []
+    draft = approved(first, step=2, status="draft")
+    set_row(draft.id, created_at=repo.iso(later - timedelta(days=2)), updated_at=repo.iso(later - timedelta(days=2)))
+    assert repo.auto_approve_due(company.id, now=later)["approved"] == []
+    assert repo.get_message(draft.id).status == "draft"
+    by_hand = approved(first, step=2)
+    assert skip_reason(company, by_hand.id, now=later) == repo.LEAD_REPLIED
+    assert send(later) == {"status": "idle"} and box.sent == []
+    with db.connect() as c:  # the claim's own check, should the queue's be bypassed
+        assert repo._claim_email(c, repo.get_company(company.id, conn=c), by_hand.id, "x", FROM, "", later) is None
+    # Nor does the AI agent send him a LinkedIn message.
+    repo.update_company(company.id, {"outreach": {"agent_sending": True}})
+    repo.update_lead(first, {"linkedin_url": "https://www.linkedin.com/in/omar-gm"})
+    dm = repo.create_message(first, "Hi Omar, following up.", channel="linkedin_dm", step=2, status="approved",
+                             generated_by="claude")
+    skipped = {s["message_id"]: s["reason"] for s in repo.send_queue(company.id, now=later)["skipped"]}
+    assert skipped[dm.id] == repo.LEAD_REPLIED
 
 
 def test_mail_from_a_free_mail_domain_is_no_colleague(company, box):

@@ -309,7 +309,8 @@ def _reply(exc: Exception) -> tuple[int, str]:
 RETRY_TEXT = "Couldn't reach your mail server ({detail}). OpenBerry tries again in a few minutes."
 FROM_REFUSED_TEXT = ("Your mailbox won't send from {from_email} ({said}). Use the mailbox's own address, or an alias "
                      "of it, as the From address.")
-# The server refusing the From address at MAIL FROM: a setting to fix, not the provider blocking the mailbox.
+# The server refusing the From address: a setting to fix, not the provider blocking the mailbox. Postfix says so in
+# reply to RCPT TO by default (smtpd_delay_reject), so it is no bounce of the lead's address either.
 _SENDER_REFUSED = re.compile(r"sender address rejected|not owned by|not allowed to (?:send|relay)|"
                              r"relay(?:ing)? (?:denied|disallowed|not permitted)", re.I)
 UNKNOWN_TEXT = ("The connection broke while your mail server was receiving this email ({detail}). It may have gone "
@@ -353,12 +354,13 @@ def classify(exc: BaseException, phase: str, host: str = "", from_email: str = "
         said = f"{code} {words}".strip()
         if 400 <= code < 500 or (code < 400 and phase != "data"):  # a temporary refusal: try again later
             return Outcome(RETRY, RETRY_TEXT.format(detail=said), code, status)
+        # Postfix's "553 5.7.1 <bookings@...>: Sender address rejected: not owned by user", also at RCPT TO.
+        if phase in ("mail", "rcpt") and _SENDER_REFUSED.search(words):
+            return Outcome(CONFIG, FROM_REFUSED_TEXT.format(from_email=from_email, said=said), code, status)
         no_such_user = phase == "rcpt" and (address_refused(status, words) or not status.startswith("5.7.") and (
             _hard_bounce_status(status) or bool(_NO_SUCH_USER.search(words))))
         if no_such_user:
             return Outcome(BOUNCE, f"The address doesn't exist (the server said: {said}).", code, status)
-        if phase == "mail" and _SENDER_REFUSED.search(words):  # Postfix's "553 5.7.1 ... not owned by user"
-            return Outcome(CONFIG, FROM_REFUSED_TEXT.format(from_email=from_email, said=said), code, status)
         if status.startswith("5.7.") or (not status.startswith("5.2.") and _BLOCKED_WORDS.search(words)):
             return Outcome(PROVIDER_BLOCK, f"Your mail provider refused to send it: {said}. Check your mailbox in "
                                            "the provider's webmail before you resume.", code, status)

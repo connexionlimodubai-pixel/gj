@@ -195,6 +195,12 @@ def test_the_password_never_appears_in_outcomes_or_reprs(offline_mail):
     ("rcpt", (550, b"Mailbox not found"), mailer.BOUNCE),
     ("rcpt", (550, b"Account disabled"), mailer.BOUNCE),
     ("rcpt", (554, b"5.7.1 Relay access denied"), mailer.PROVIDER_BLOCK),
+    # EMAIL-5: Postfix refuses the From address in reply to RCPT TO: fix the From, not a bounce nor a block.
+    ("rcpt", (550, b"5.1.0 <sam@acme-mail.example>: Sender address rejected: User unknown in virtual mailbox table"),
+     mailer.CONFIG),
+    ("rcpt", (553, b"5.7.1 <sam@acme-mail.example>: Sender address rejected: not owned by user sam@acme-mail.example"),
+     mailer.CONFIG),
+    ("rcpt", (553, b"5.1.8 <sam@acme-mail.example>: Sender address rejected: Domain not found"), mailer.CONFIG),
     ("rcpt", (451, b"4.7.1 Greylisted, try again"), mailer.RETRY),
     ("rcpt", (552, b"5.2.2 Mailbox full, quota exceeded"), mailer.FAILED),  # their mailbox, not ours: no pause
     ("rcpt", (550, b"5.4.5 Daily user sending quota exceeded"), mailer.PROVIDER_BLOCK),

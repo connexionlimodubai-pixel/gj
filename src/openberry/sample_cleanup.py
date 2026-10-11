@@ -42,6 +42,13 @@ REMOVED_COMMAND_NOTE = ("The demo was removed in OpenBerry 0.2.0. Register your 
 BANNER_TEXT = "This is the sample company from the old demo: fictional people and companies."
 COMPANY_NOTE = ("This is the sample company from the old demo: fictional people and companies, never contacted. "
                 "Don't work on it. The user can delete it with the banner on its dashboard.")
+# A sample company the user made their own (CleanupPlan.repurposed): only the sample leads left in it are sample data.
+REPURPOSED_TEXT = "This company still holds {leads} from the old demo. Sample leads are never contacted."
+REPURPOSED_NOTE = " The user can remove them with the banner on its dashboard."
+NO_SAMPLE_LEADS_TEXT = "No sample leads from the old demo are left in this company."
+DELETE_BUTTON = "Delete sample company"
+REMOVE_BUTTON = "Remove sample leads"
+REMOVE_MARKER_BUTTON = "Remove sample marker"
 CLI_HELP = "remove the sample company the old demo created (shows what goes first)"
 NOT_FOUND = "No sample company found."
 
@@ -151,6 +158,17 @@ class CleanupPlan:
         return not (self.profile_edited or self.touched_demo_lead_ids or self.other_lead_ids or self.sent_messages)
 
     @property
+    def repurposed(self) -> bool:
+        """The user made the company their own: they changed its profile (as skips_scheduled_scans counts it). Leads
+        added to it don't count: 0.1.x scanned the demo company, and its profile is still the fictional one."""
+        return self.profile_edited
+
+    @property
+    def sample_leads_left(self) -> int:
+        """The sample leads still in the company: untouched (removed with the marker) or changed since (kept)."""
+        return len(self.sample_lead_ids) + len(self.touched_demo_lead_ids)
+
+    @property
     def token(self) -> str:
         """Changes when anything the removal decides on changes: the confirmation page sends it back, and a removal
         whose plan changed since the page was shown is refused."""
@@ -171,6 +189,31 @@ class CleanupPlan:
             "other_lead_ids": self.other_lead_ids, "sent_messages": self.sent_messages,
             "whole_company_safe": self.whole_company_safe,
         }
+
+
+def banner_text(plan: CleanupPlan) -> str:
+    """What the banner and the removal page say about the company: fictional, unless the user made it their own."""
+    if not plan.repurposed:
+        return f"{BANNER_TEXT} Nothing is ever sent to them."
+    if not plan.sample_leads_left:
+        return NO_SAMPLE_LEADS_TEXT
+    return REPURPOSED_TEXT.format(leads=count_of(plan.sample_leads_left, "sample lead"))
+
+
+def banner_button(plan: CleanupPlan) -> str:
+    """The banner's button says what the removal page offers: the whole company, its sample leads, or only the
+    marker (the banner then goes away)."""
+    if plan.whole_company_safe:
+        return DELETE_BUTTON
+    return REMOVE_BUTTON if plan.sample_leads_left else REMOVE_MARKER_BUTTON
+
+
+def company_note(plan: CleanupPlan) -> str:
+    """The note Claude gets with the company (MCP list_companies), "" for none. A company the user made their own is
+    theirs to work on: only its sample leads are left alone, and with none left there is nothing to say."""
+    if not plan.repurposed:
+        return COMPANY_NOTE
+    return banner_text(plan) + REPURPOSED_NOTE if plan.sample_leads_left else ""
 
 
 def _seeded_draft(msg: Message, marker: ScanRun) -> bool:

@@ -582,6 +582,7 @@ def upsert_lead(company_id: int, data: LeadIn, conn: sqlite3.Connection | None =
 
 
 OPT_OUT_TAG = "unsubscribed"  # the lead asked not to be contacted: never emailed again, whatever address it gets
+OPT_OUT_NOTE = "Asked not to be contacted"  # the dated note record_opt_out adds to the lead's notes
 
 
 def update_lead(lead_id: int, fields: dict[str, Any], conn: sqlite3.Connection | None = None,
@@ -1019,7 +1020,8 @@ def get_message(message_id: int, conn: sqlite3.Connection | None = None) -> Mess
 
 
 def update_message(message_id: int, *, status: str | None = None, body: str | None = None,
-                   subject: str | None = None, conn: sqlite3.Connection | None = None) -> Message:
+                   subject: str | None = None, version: str | None = None,
+                   conn: sqlite3.Connection | None = None) -> Message:
     """Edit a message. Marking it sent/replied also advances the lead's pipeline status.
 
     Approving it here is a person's approval (or Claude's, for the user), so approved_via is cleared: only
@@ -1027,9 +1029,13 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
     auto-approve never approves it again behind the user's back; a text edit that makes it a draft doesn't.
     The read and the write hold SQLite's write lock (BEGIN IMMEDIATE), like auto_approve_due: an edit made while
     auto-approve approves the draft sees the approval, so the new text is a draft again, never approved unread.
+    version: the message_version of the text a page showed, when its form posts no text (the Outreach page's
+    Approve). Nothing changes if the text is different now (DRAFT_CHANGED), as in bulk_update_drafts.
     """
     with _write_locked(conn) as c:
         msg = get_message(message_id, conn=c)
+        if version is not None and message_version(msg) != version:
+            raise ValueError(DRAFT_CHANGED)
         updates: dict[str, Any] = {}
         if body is not None:
             if not message_text(body):
@@ -1131,6 +1137,7 @@ BULK_NOT_DRAFT = "no longer a draft"
 BULK_CHANGED = "edited since the page opened"
 BULK_NOTE_TOO_LONG = "connection note too long"
 BULK_NO_SUBJECT = "email without a subject"
+DRAFT_CHANGED = "This draft changed since you opened the page: review it, then approve it."
 
 
 def message_version(msg: Message) -> str:
@@ -3365,7 +3372,7 @@ def record_opt_out(lead_id: int, source: str, detail: str = "", message_id: int 
             if address:
                 _add_suppression(c, address, "opt_out", lead.company_id, lead.id, message_id, detail, now)
         tags = lead.tags + ["unsubscribed"] if "unsubscribed" not in lead.tags else lead.tags
-        note = f"{now:%Y-%m-%d}: Asked not to be contacted ({source})."
+        note = f"{now:%Y-%m-%d}: {OPT_OUT_NOTE} ({source})."
         notes = lead.notes if note in lead.notes else f"{lead.notes}\n{note}".strip()
         if lead.kind == "account" and lead.lead_company.strip() and not automatic:
             company = get_company(lead.company_id, conn=c)

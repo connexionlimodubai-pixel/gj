@@ -631,12 +631,12 @@ def list_companies() -> dict[str, Any]:
 
     Each company is a separate workspace with its own offer, ICP, signals, leads and outreach.
     Returns id, name, website, status (active/paused), lead and hot-lead counts, last scan time
-    and a dashboard link per company. The fictional sample company an older version created has a
-    "note" saying so: leave it alone.
+    and a dashboard link per company. A company that holds sample data an older version created has
+    a "note" saying what to leave alone.
     """
-    samples = sample_cleanup.sample_company_ids()
-    rows = [_company_row(c) | ({"note": sample_cleanup.COMPANY_NOTE} if c.id in samples else {})
-            for c in repo.list_companies()]
+    notes = {i: sample_cleanup.company_note(plan) for i in sample_cleanup.sample_company_ids()
+             if (plan := sample_cleanup.cleanup_plan(i))}
+    rows = [_company_row(c) | ({"note": notes[c.id]} if notes.get(c.id) else {}) for c in repo.list_companies()]
     out: dict[str, Any] = {"companies": rows, "dashboard": _base_url()}
     if not rows:
         out["hint"] = "No company registered yet. Use the onboard_company prompt or call register_company."

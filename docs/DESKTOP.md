@@ -259,8 +259,9 @@ above, and keep these five things in mind:
 4. **There is no downgrade.** Don't open the upgraded data with 0.1.x. To go back, put the copy from step 1 back
    while OpenBerry and Claude Desktop are closed.
 5. **Remove the sample company.** If you loaded the demo in 0.1.x, open its company: a banner at the top says it is
-   the sample company from the old demo. Click **Delete sample company**. The next page shows what goes and what
-   stays, and nothing is removed until you confirm. Its fictional people are never contacted in the meantime.
+   the sample company from the old demo. Click **Delete sample company** (**Remove sample leads** if you made it
+   your own company). The next page shows what goes and what stays, and nothing is removed until you confirm. Its
+   fictional people are never contacted in the meantime.
    `openberry-cli remove-sample` does the same from the command line.
 
 ## Closing the app

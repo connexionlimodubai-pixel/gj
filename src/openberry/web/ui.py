@@ -385,10 +385,12 @@ def render(request: Request, name: str, context: dict[str, Any] | None = None, *
     ctx: dict[str, Any] = {"company": None, "active": "", "title": "", "values": {}, "errors": {}}
     ctx.update(context or {})
     company = ctx["company"]
+    # The sample company an older version left (sample_cleanup): a banner on its pages leads to its removal page.
+    sample = (sample_cleanup.cleanup_plan(company.id)
+              if show_nav and isinstance(company, Company) and ctx["active"] != "sample" else None)
     ctx.update(
-        # The sample company an older version left (sample_cleanup): a banner on its pages leads to its removal page.
-        sample_banner=bool(show_nav and isinstance(company, Company) and ctx["active"] != "sample"
-                           and sample_cleanup.is_sample_company(company.id)),
+        sample_banner={"text": sample_cleanup.banner_text(sample),
+                       "button": sample_cleanup.banner_button(sample)} if sample else None,
         show_nav=show_nav,
         public=public,
         logged_in=logged_in,

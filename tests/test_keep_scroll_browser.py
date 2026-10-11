@@ -138,3 +138,22 @@ def test_hold_and_release_from_the_keyboard_keep_the_focus_on_the_same_draft(com
     assert not repo.get_message(target).auto_hold
     assert focused() == ["hold", f"q-{target}"]
     page.close()
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+def test_an_approve_refused_because_the_draft_changed_keeps_the_card_in_place(company, base_url, browser, viewport):
+    """SEC-2: Claude rewrote the draft after the page was opened, so Approve approves nothing. The card stays where
+    it was on screen, now with the new text, and the message says why."""
+    target = drafts(company.id, [f"Lead {n}" for n in range(8)])[3]
+    page = browser.new_page(viewport=viewport)
+    page.goto(f"{base_url}/c/{company.id}/outreach?tab=drafts")
+    scroll_card_to(page, target, 300)
+    repo.update_message(target, body="Hi, the text Claude wrote while you read the old one.")
+    with page.expect_navigation():
+        page.click(f"#q-{target} button[value=approve]")
+    page.wait_for_load_state("load")
+    assert repo.get_message(target).status == "draft"
+    assert abs(card_top(page, target) - 300) <= 2
+    assert "the text Claude wrote" in page.inner_text(f"#q-{target}")
+    assert "This draft changed since you opened the page: review it, then approve it." in page.inner_text(".flashes")
+    page.close()

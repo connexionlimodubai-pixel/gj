@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">Workspace</p>
+    <h1>Your data</h1>
+    <p class="lede">Everything OpenBerry knows is in one file on this computer: your companies, leads, messages and email opt-outs. Download a backup now and then, and keep it somewhere else, like another drive or cloud storage.</p>
+  </div>
+</div>
+
+<section class="card keys-card" id="download" aria-labelledby="download-title">
+  <header class="keys-head">
+    <span class="keys-icon" aria-hidden="true">{{ m.icon("download", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="download-title">Download backup</h2>
+      <p class="keys-intro">A complete copy of your data, made safely while OpenBerry runs. Your settings and passwords are not in it.</p>
+    </div>
+  </header>
+  <div class="btn-row">
+    <a class="btn btn-primary" href="/data/backup" download="{{ download_name }}">{{ m.icon("download", 14) }}Download backup</a>
+  </div>
+</section>
+
+<section class="card keys-card" id="folder" aria-labelledby="folder-title">
+  <header class="keys-head">
+    <span class="keys-icon" aria-hidden="true">{{ m.icon("folder", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="folder-title">Data folder</h2>
+      <p class="keys-intro"><code class="break">{{ data_folder }}</code></p>
+    </div>
+  </header>
+  <ul class="data-files">
+    <li><code>{{ db_file }}</code> <span class="muted">({{ db_size }})</span>: your data.</li>
+    <li><code class="break">{{ env_path }}</code>: your settings, API keys and mailbox password. Keep it private.</li>
+    <li><code>backups</code>: the automatic backups below.</li>
+  </ul>
+  <p class="small muted">To copy the whole folder by hand, close OpenBerry and quit Claude Desktop first, and copy every file in it, including the ones ending in -wal and -shm.</p>
+</section>
+
+<section class="card keys-card" id="backups" aria-labelledby="backups-title">
+  <header class="keys-head">
+    <span class="keys-icon" aria-hidden="true">{{ m.icon("database", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="backups-title">Automatic backups</h2>
+      <p class="keys-intro">{% if daily_on %}OpenBerry saves a copy every day while it is open, and keeps {{ daily_days }} days and {{ daily_weeks }} weeks of them. {% else %}Daily copies are off, because the scheduler is off (OPENBERRY_SCHEDULER). {% endif %}It also saves one before an update changes your data, before a company is deleted and before a restore.</p>
+    </div>
+  </header>
+  {% if snapshots %}
+  <div class="table-wrap">
+    <table class="table data-table">
+      <thead><tr><th scope="col">Saved</th><th scope="col">Why</th><th scope="col" class="num data-size">Size</th><th scope="col"><span class="sr-only">Download</span></th></tr></thead>
+      <tbody>
+        {% for s in snapshots %}
+        <tr>
+          <td class="nowrap"><time datetime="{{ s.created|iso_dt }}" title="{{ s.created|abs_dt }}">{{ s.created|local_dt }}</time></td>
+          <td>{{ s.label }}</td>
+          <td class="num nowrap data-size">{{ s.size }}</td>
+          <td class="data-dl"><a class="btn btn-sm btn-ghost" href="/data/backups/{{ s.name }}" download="{{ s.name }}" title="{{ s.name }}">{{ m.icon("download", 14) }}<span class="sr-only">Download {{ s.name }}</span></a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="small muted">In <code class="break">{{ backups_folder }}</code></p>
+  {% else %}
+  <p class="muted">No automatic backups yet.{% if daily_on %} The first daily one is saved a few minutes after OpenBerry starts.{% endif %}</p>
+  {% endif %}
+</section>
+
+<section class="card keys-card" id="restore" aria-labelledby="restore-title">
+  <header class="keys-head">
+    <span class="keys-icon" aria-hidden="true">{{ m.icon("history", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="restore-title">Restore a backup</h2>
+      <p class="keys-intro">Restoring replaces your data with the backup's. OpenBerry checks the backup first, and keeps a copy of your current data.</p>
+    </div>
+  </header>
+  {% if restore.docker %}
+  <ol class="steps-list data-steps">
+    <li>In the folder with docker-compose.yml, run these, with the backup's file name:
+      <div class="code-block"><pre id="restore-cmd">{% for line in restore.steps %}{{ line }}
+{% endfor %}</pre>{{ m.copy_button("#restore-cmd", "Copy", "btn btn-sm btn-ghost") }}</div>
+    </li>
+    <li>Copy a downloaded backup into the volume's backups folder first if it isn't there.</li>
+  </ol>
+  {% else %}
+  <ol class="steps-list data-steps">
+    <li>Close OpenBerry, and quit Claude Desktop (right-click its icon by the clock, Quit).</li>
+    <li>Run this in a terminal (Command Prompt on Windows), with the path of your backup file:
+      <div class="code-block"><pre id="restore-cmd">{{ restore.line }}</pre>{{ m.copy_button("#restore-cmd", "Copy", "btn btn-sm btn-ghost") }}</div>
+      {% if restore.db_env %}<p class="small muted">This OpenBerry uses <code class="break">OPENBERRY_DB={{ restore.db_env }}</code>: set it the same way for the command.</p>{% endif %}
+    </li>
+    <li>Open OpenBerry again.</li>
+  </ol>
+  {% endif %}
+  <p class="callout callout-warning">{{ m.icon("alert", 14) }}<span>After a restore, email sending and AI agent sending are off for every company. From the data the backup replaces, OpenBerry keeps the never-email list and the record of sent emails, and the opt-outs, replies and sends recorded for the leads and messages in the backup. Leads and messages added after the backup was made are not in it: before you turn sending back on, check LinkedIn and your mailbox's Sent folder.</span></p>
+</section>
+{% endblock %}

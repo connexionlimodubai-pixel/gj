@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
+import io
+import tempfile
+from collections.abc import Iterator
 from datetime import date
-from typing import Any
+from typing import IO, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
+from starlette.background import BackgroundTask
 from starlette.datastructures import FormData, UploadFile
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from .. import leads_csv, outreach, repo
 from ..config import get_settings
-from ..models import AGENT_CHANNELS, LEAD_STATUSES, MESSAGE_CHANNELS, TIERS, Company, Lead, Message
+from ..models import (
+    AGENT_CHANNELS, APPROVED_VIA_AUTO, LEAD_STATUSES, MESSAGE_CHANNELS, PROSPECT_TYPES, TIERS, Company, Lead, Message,
+    split_list,
+)
 from ..repo import AGENT_QUEUE_MAX
-from . import forms
+from . import forms, mail
 from .auth import checked_form, require_login
-from .pages import redirect
+from .pages import hours_text, redirect
 from .session import flash, remember_company, safe_next
 from .ui import LEAD_SOURCES, choice, int_param, page_info, render
 
@@ -24,7 +31,15 @@ router = APIRouter(dependencies=[Depends(require_login)], include_in_schema=Fals
 
 LEAD_SORTS = {"score": "Score", "recent": "Recently added", "signal": "Latest signal", "name": "Name"}
 MAX_CSV_BYTES = 5 * 1024 * 1024
+CSV_IN_MEMORY_BYTES = 4 * 1024 * 1024  # a larger export goes to a temporary file
+CSV_CHUNK_BYTES = 64 * 1024
 MESSAGE_ACTIONS = {"save": None, "approve": "approved", "sent": "sent", "skip": "skipped", "draft": "draft"}
+# Auto-approve: hold a waiting draft (it is never approved automatically), or let a held one auto-approve again.
+HOLD_ACTIONS = {"hold": True, "release": False}
+# What the lead page's timeline shows of what came back to the mailbox (replies are messages of their own).
+EMAIL_TIMELINE_EVENTS = ("auto_reply", "bounce", "soft_bounce", "policy_reject", "opt_out", "send_failed", "unknown",
+                         "resolved", "edited")
+NO_SUBJECT = "Add a subject first: an email needs one."
 
 
 def _lead_filters(tier: str, status: str, kind: str, source: str, q: str, sort: str) -> dict[str, Any]:
@@ -69,15 +84,33 @@ def leads_page(request: Request, company_id: int, tier: str = "", status: str = 
     })
 
 
+def _csv_file(company_id: int, filters: dict[str, Any]) -> IO[bytes]:
+    """Every matching lead as CSV, in a temporary file (in memory while small), read back from the start."""
+    out = tempfile.SpooledTemporaryFile(max_size=CSV_IN_MEMORY_BYTES)  # noqa: SIM115 (closed after the response)
+    text = io.TextIOWrapper(out, encoding="utf-8", newline="")
+    leads_csv.write_leads_csv(text, repo.iter_leads(company_id, **filters))
+    text.flush()
+    text.detach()  # keep `out` open
+    out.seek(0)
+    return out
+
+
+def _chunks(fh: IO[bytes]) -> Iterator[bytes]:
+    while chunk := fh.read(CSV_CHUNK_BYTES):
+        yield chunk
+
+
 @router.get("/c/{company_id}/leads.csv")
 def leads_export(company_id: int, tier: str = "", status: str = "", kind: str = "", source: str = "",
                  q: str = "", sort: str = "score") -> Response:
+    """Every lead the Leads page's filters match, with no row limit, from one snapshot of the database."""
     company = repo.get_company(company_id)
-    items, _ = repo.list_leads(company_id, **_lead_filters(tier, status, kind, source, q, sort), limit=5000)
+    fh = _csv_file(company_id, _lead_filters(tier, status, kind, source, q, sort))
     slug = "".join(ch if ch.isalnum() else "-" for ch in company.name.lower()).strip("-")[:40] or "company"
     filename = f"openberry-leads-{slug}-{date.today().isoformat()}.csv"
-    return Response(leads_csv.export_leads_csv(items), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    return StreamingResponse(_chunks(fh), media_type="text/csv; charset=utf-8", background=BackgroundTask(fh.close),
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                      "Cache-Control": "no-store"})
 
 
 def _nothing_imported_reason(stats: dict[str, Any]) -> str:
@@ -156,13 +189,23 @@ def lead_create(request: Request, company_id: int, form: FormData = Depends(chec
 def lead_page(request: Request, company_id: int, lead_id: int) -> Response:
     company, lead = _company_lead(company_id, lead_id)
     remember_company(request, company_id)
+    repo.auto_approve_due(company_id)  # the drafts below are current, also with the scheduler off
     signals, signal_total = repo.list_signals(company_id, lead_id=lead_id, include_account=True, limit=100)
     messages = sorted(repo.list_messages(company_id, lead_id=lead_id, limit=500), key=lambda m: (m.created_at, m.id))
     contacts = repo.contacts_at_account(lead)
     channel, step = outreach.next_touch(company, lead, messages)
+    repo.expire_email_claims()
+    email = mail.email_status(company, messages)
     return render(request, "lead.html", {
         "company": company, "lead": lead, "active": "leads", "title": lead.display_name,
         "signals": signals, "signal_total": signal_total, "messages": messages, "contacts": contacts,
+        "auto_states": repo.auto_approve_states(company, messages) if company.outreach.auto_approve else {},
+        # Email sending: what happens to each email, whether the address may be emailed, and what came back.
+        "email": email, "suppression": repo.suppressed_addresses([lead.email]).get(repo.normalize_email(lead.email)),
+        "email_events": repo.list_email_events(lead_id=lead.id, kinds=EMAIL_TIMELINE_EVENTS, limit=20),
+        # A business found on Google Maps is a prospect: only its other signals show intent.
+        "has_intent": any(s.type not in PROSPECT_TYPES for s in signals),
+        "found_on_maps": lead.source == "google_places" or any(s.type in PROSPECT_TYPES for s in signals),
         "default_channel": channel, "next_step": step,
         "claude_prompt": f"Use openberry: get the outreach context for lead {lead.id} and write a "
                          f"{channel} message{f' for step {step}' if step > 1 else ''}, then save it.",
@@ -182,9 +225,26 @@ def lead_update(request: Request, company_id: int, lead_id: int, form: FormData 
     for name in ("notes", "tags"):
         if name in form:
             fields[name] = _form_text(form, name)
+    # The user's own form: removing the "unsubscribed" tag here is their decision (Claude and the API can't), but
+    # only from a page that showed it. A page opened before the opt-out was recorded (say, by the inbox check) keeps
+    # the tag, the lead's status and the dated note.
+    shown = repo.OPT_OUT_TAG in split_list(_form_text(form, "shown_tags"))
     try:
-        repo.update_lead(lead_id, fields)
-        flash(request, "Lead updated.")
+        with repo.write_locked() as c:
+            lead = repo.get_lead(lead_id, conn=c)
+            opted_out_since = repo.OPT_OUT_TAG in lead.tags and not shown
+            if opted_out_since:
+                fields.pop("status", None)
+                if "notes" in fields:
+                    dated = [line for line in lead.notes.splitlines()
+                             if repo.OPT_OUT_NOTE in line and line not in fields["notes"]]
+                    fields["notes"] = "\n".join([fields["notes"], *dated]).strip()
+            repo.update_lead(lead_id, fields, conn=c, keep_opt_out=not shown)
+        if opted_out_since:
+            flash(request, "Lead updated, except the status: the lead asked not to be contacted since you opened "
+                           "this page.", "warning")
+        else:
+            flash(request, "Lead updated.")
     except ValueError as exc:
         flash(request, str(exc), "error")
     return redirect(f"/c/{company_id}/leads/{lead_id}")
@@ -197,13 +257,18 @@ def lead_profile(request: Request, company_id: int, lead_id: int, form: FormData
     if not fields.get("full_name", lead.full_name) and not fields.get("lead_company", lead.lead_company):
         flash(request, "A lead needs a name or a company.", "error")
     else:
-        approved = len(repo.list_messages(company_id, status="approved", lead_id=lead_id))
-        repo.update_lead(lead_id, fields)
-        if len(repo.list_messages(company_id, status="approved", lead_id=lead_id)) < approved:
-            flash(request, "Profile saved and lead rescored. The LinkedIn profile changed, so approved LinkedIn "
-                           "messages to this lead are drafts again: approve them for the new profile.", "info")
-        else:
-            flash(request, "Profile saved and lead rescored.")
+        before = repo.list_messages(company_id, status="approved", lead_id=lead_id)
+        updated = repo.update_lead(lead_id, fields)
+        still = {m.id for m in repo.list_messages(company_id, status="approved", lead_id=lead_id)}
+        lapsed = {m.channel == "email" for m in before if m.id not in still}
+        changed = []
+        if True in lapsed:
+            changed.append("The email address changed, so approved emails to this lead are drafts again: approve them "
+                           f"for {updated.email or 'the new address'}.")
+        if False in lapsed:
+            changed.append("The LinkedIn profile changed, so approved LinkedIn messages to this lead are drafts again: "
+                           "approve them for the new profile.")
+        flash(request, " ".join(["Profile saved and lead rescored.", *changed]), "info" if changed else "success")
     return redirect(f"/c/{company_id}/leads/{lead_id}")
 
 
@@ -223,7 +288,11 @@ def lead_add_signal(request: Request, company_id: int, lead_id: int,
 @router.post("/c/{company_id}/leads/{lead_id}/delete")
 def lead_delete(request: Request, company_id: int, lead_id: int, form: FormData = Depends(checked_form)) -> Response:
     _, lead = _company_lead(company_id, lead_id)
-    repo.delete_lead(lead_id)
+    try:
+        repo.delete_lead(lead_id)
+    except ValueError as exc:  # an email to this lead is being sent right now
+        flash(request, str(exc), "error")
+        return redirect(f"/c/{company_id}/leads/{lead_id}")
     flash(request, f"Deleted {lead.display_name}.", "info")
     return redirect(f"/c/{company_id}/leads")
 
@@ -250,10 +319,10 @@ async def lead_draft(request: Request, company_id: int, lead_id: int,
             return redirect(back)
     else:
         subject, body = outreach.draft_template(company, lead, signals, channel, step)
-    await run_in_threadpool(lambda: repo.create_message(lead_id, body, channel=channel, subject=subject, step=step,
-                                                        generated_by=engine))
+    msg = await run_in_threadpool(lambda: repo.create_message(lead_id, body, channel=channel, subject=subject,
+                                                              step=step, generated_by=engine))
     flash(request, "Draft created. Review and edit it before you send it.")
-    return redirect(back)
+    return redirect(f"/c/{company_id}/leads/{lead_id}#msg-{msg.id}")
 
 
 @router.post("/c/{company_id}/leads/{lead_id}/reply")
@@ -263,18 +332,34 @@ def lead_reply(request: Request, company_id: int, lead_id: int, form: FormData =
     channel = choice(_form_text(form, "channel"), MESSAGE_CHANNELS) or "linkedin_dm"
     if not body:
         flash(request, "Paste the reply text first.", "error")
-    else:
-        repo.log_reply(lead_id, body, channel=channel)
-        flash(request, "Reply logged. The lead moved to 'replied' and pending drafts were skipped.")
-    return redirect(f"/c/{company_id}/leads/{lead_id}#outreach")
+        return redirect(f"/c/{company_id}/leads/{lead_id}#outreach")
+    msg = repo.log_reply(lead_id, body, channel=channel)
+    flash(request, "Reply logged. The lead moved to 'replied' and pending drafts were skipped.")
+    return redirect(f"/c/{company_id}/leads/{lead_id}#msg-{msg.id}")
 
 
 # --------------------------------------------------------------------------------------
 # Messages
 # --------------------------------------------------------------------------------------
 
+def _approved_email_note(company_id: int, message: Message) -> str:
+    """What happens to an email just approved: OpenBerry emails it from the user's mailbox, or the user sends it."""
+    if not repo.get_company(company_id).outreach.email_sending:
+        return "Approved. Copy it and send it from your inbox."
+    queue = repo.email_queue(company_id, limit=repo.EMAIL_QUEUE_MAX)
+    why_not = next((s["reason"] for s in queue["skipped"] if s["message_id"] == message.id), "")
+    if why_not:
+        return f"Approved. It won't be emailed now ({mail.for_you(why_not)}); you can copy it and send it yourself."
+    if queue["blocked_reason"] and queue["blocked_reason"] != "outside_hours":
+        why = mail.for_you(repo.email_blocked_message(queue, you=True))
+        return f"Approved. OpenBerry emails it from your mailbox once it can send again ({why[:1].lower()}{why[1:]})."
+    return "Approved. OpenBerry will email it from your mailbox, exactly as it is, with your footer."
+
+
 def _approved_note(company_id: int, message: Message) -> str:
-    """What happens to a message just approved: the user sends it, or their AI agent may."""
+    """What happens to a message just approved: the user sends it, their AI agent may, or OpenBerry emails it."""
+    if message.channel == "email":
+        return _approved_email_note(company_id, message)
     if message.channel not in AGENT_CHANNELS or not repo.get_company(company_id).outreach.agent_sending:
         return "Approved. Copy it and send it from LinkedIn or your inbox."
     queue = repo.send_queue(company_id, limit=AGENT_QUEUE_MAX)
@@ -290,7 +375,7 @@ def _bulk_selection(form: FormData) -> list[tuple[int, str]]:
     selected: list[tuple[int, str]] = []
     for value in form.getlist("message"):
         raw_id, _, version = value.partition(":") if isinstance(value, str) else ("", "", "")
-        if raw_id.isdigit() and version and (int(raw_id), version) not in selected:
+        if raw_id.isdecimal() and version and (int(raw_id), version) not in selected:
             selected.append((int(raw_id), version))
     return selected
 
@@ -322,8 +407,9 @@ def bulk_message_action(request: Request, company_id: int, form: FormData = Depe
     if done:
         text = f"{verb} {len(done)} draft{'' if len(done) == 1 else 's'}."
         if action == "approve":
-            text += (" Your AI agent can send the LinkedIn ones." if company.outreach.agent_sending
-                     else f" Send {'it' if len(done) == 1 else 'them'} from the Approved tab.")
+            senders = [*([" Your AI agent can send the LinkedIn ones."] if company.outreach.agent_sending else []),
+                       *([" OpenBerry emails the emails from your mailbox."] if company.outreach.email_sending else [])]
+            text += "".join(senders) or f" Send {'it' if len(done) == 1 else 'them'} from the Approved tab."
         if problems:
             text += f" {sum(problems.values())} not {verb.lower()}: {_bulk_problems(problems)}."
     else:
@@ -337,16 +423,24 @@ def bulk_message_action(request: Request, company_id: int, form: FormData = Depe
 @router.post("/c/{company_id}/messages/{message_id}")
 def message_action(request: Request, company_id: int, message_id: int,
                    form: FormData = Depends(checked_form)) -> Response:
-    message = repo.get_message(message_id)
+    try:
+        message = repo.get_message(message_id)
+    except repo.NotFound:  # deleted since the page was opened: in another tab, or by Claude
+        flash(request, "This message was deleted since you opened the page. Nothing was changed.", "error")
+        return redirect(safe_next(form.get("next"), f"/c/{company_id}/outreach").split("#", 1)[0])
     if message.company_id != company_id:
         raise repo.NotFound(f"message {message_id} not found")
     back = safe_next(form.get("next"), f"/c/{company_id}/leads/{message.lead_id}#outreach")
     action = _form_text(form, "action", "save")
     if action == "delete":
-        repo.delete_message(message_id)
+        try:
+            repo.delete_message(message_id)
+        except ValueError as exc:  # an email being sent right now
+            flash(request, str(exc), "error")
+            return redirect(back)
         flash(request, "Message deleted.", "info")
-        return redirect(back)
-    if action not in MESSAGE_ACTIONS:
+        return redirect(back.split("#", 1)[0])  # its #msg anchor is gone: the form's data-keep-scroll keeps the place
+    if action not in MESSAGE_ACTIONS and action not in HOLD_ACTIONS:
         flash(request, "Unknown action.", "error")
         return redirect(back)
     edits: dict[str, Any] = {}
@@ -354,18 +448,85 @@ def message_action(request: Request, company_id: int, message_id: int,
         edits["body"] = _form_text(form, "body")
     if "subject" in form and message.direction == "outbound":
         edits["subject"] = _form_text(form, "subject")
+    if action in HOLD_ACTIONS:
+        return _hold_action(request, company_id, message, HOLD_ACTIONS[action], back, edits)
+    if (action == "approve" and message.channel == "email" and message.direction == "outbound"
+            and not edits.get("subject", message.subject).strip()):
+        flash(request, NO_SUBJECT, "error")
+        return redirect(back)
+    # The Outreach page's Approve posts no text, only the version of the text it showed: an edit Claude or another
+    # tab saved since then is not approved unread. A post without one (a page from before) approves nothing.
+    # Approve is only shown on drafts and approved messages: one sent or skipped since the page opened stays so.
+    version = _form_text(form, "version") if action == "approve" and not edits else None
     try:
-        updated = repo.update_message(message_id, status=MESSAGE_ACTIONS[action], **edits)
+        updated = repo.update_message(message_id, status=MESSAGE_ACTIONS[action], version=version,
+                                      pending_only=action == "approve", **edits)
     except ValueError as exc:
         flash(request, str(exc), "error")
         return redirect(back)
     if message.status == "approved" and updated.status == "draft" and action == "save":
         # repo.update_message: an approval covers the exact text, so changed text waits for approval again.
-        flash(request, "Saved as a draft: you changed the approved text. Approve it again when it's ready.", "info")
+        company = repo.get_company(company_id)
+        if _auto_state(company, updated).get("state") == "waiting":
+            flash(request, f"Saved as a draft: you changed the approved text. Auto-approve approves it in "
+                           f"{hours_text(company.outreach.auto_approve_hours)} unless you approve, hold or skip it "
+                           "first.", "info")
+        else:
+            flash(request, "Saved as a draft: you changed the approved text. Approve it again when it's ready.",
+                  "info")
         return redirect(back)
+    draft_note = "Moved back to drafts."
+    if updated.auto_hold and message.status == "approved" and repo.get_company(company_id).outreach.auto_approve:
+        draft_note = "Moved back to drafts and put on hold: it won't be approved automatically. Approve it yourself."
     flash(request, {
         "save": "Message saved.", "approve": _approved_note(company_id, message),
         "sent": "Marked as sent. The follow-up timer has started.", "skip": "Message skipped.",
-        "draft": "Moved back to drafts.",
+        "draft": draft_note,
     }[action])
+    return redirect(back)
+
+
+def _auto_state(company: Company, message: Message) -> dict[str, Any]:
+    """What auto-approve does next with a draft (repo.auto_approve_states), or {} while it is off."""
+    if not company.outreach.auto_approve:
+        return {}
+    return repo.auto_approve_states(company, [message]).get(message.id, {})
+
+
+def _hold_action(request: Request, company_id: int, message: Message, hold: bool, back: str,
+                 edits: dict[str, str]) -> Response:
+    """Hold a draft, so auto-approve never approves it, or let a held draft auto-approve again.
+
+    On the lead page the buttons belong to the draft's edit form: text typed there is saved first, not lost.
+    Hold on a message auto-approve approved since the page was opened takes that approval back (set_auto_hold).
+    """
+    changed = {key: value for key, value in edits.items()
+               if (repo.message_text(value) if key == "body" else value) != getattr(message, key)}
+    if changed and message.status in ("draft", "approved"):  # never the text of a message sent in the meantime
+        try:
+            repo.update_message(message.id, **changed)
+        except ValueError as exc:  # e.g. an empty message
+            flash(request, str(exc), "error")
+            return redirect(back)
+    try:
+        updated = repo.set_auto_hold(message.id, hold)
+    except ValueError:  # not a draft (any more): approved by hand, sent or skipped in the meantime
+        flash(request, "Only drafts can be put on hold or let auto-approve, and this message isn't a draft.", "error")
+        return redirect(back)
+    company = repo.get_company(company_id)
+    state = _auto_state(company, updated)
+    if hold and message.status == "approved" and message.approved_via == APPROVED_VIA_AUTO:
+        flash(request, "It had just been approved automatically. It's back in drafts and on hold: approve it "
+                       "yourself when it's ready.", "info")
+    elif hold:
+        flash(request, "On hold: this draft won't be approved automatically. Approve it yourself when it's ready.",
+              "info")
+    elif state.get("state") == "waiting":
+        flash(request, f"Hold lifted: this draft is approved automatically in "
+                       f"{hours_text(company.outreach.auto_approve_hours)} unless you approve, hold or skip it first. "
+                       "Editing it starts the window again.")
+    elif state.get("state") == "blocked":
+        flash(request, f"Hold lifted, but it isn't approved automatically for now: {state['reason']}.")
+    else:
+        flash(request, "Hold lifted.")
     return redirect(back)

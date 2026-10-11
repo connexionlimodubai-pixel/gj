@@ -1,0 +1,35 @@
+{
+  "places": [
+    {
+      "id": "ChIJAcmeEvents00001",
+      "websiteUri": "https://www.acme-events.ae/?utm_source=GOOGLE-UTM-MARKER&utm_medium=organic",
+      "displayName": {"text": "GOOGLE-NAME-MARKER Acme", "languageCode": "en"},
+      "formattedAddress": "GOOGLE-ADDRESS-MARKER, Al Quoz, Dubai",
+      "nationalPhoneNumber": "04 GOOGLE-PHONE-MARKER"
+    },
+    {
+      "id": "ChIJDesertDmc000002",
+      "websiteUri": "https://desertdmc.com/"
+    },
+    {
+      "id": "ChIJNoWebsite000003",
+      "displayName": {"text": "GOOGLE-NAME-MARKER Corner Cafe", "languageCode": "en"}
+    },
+    {
+      "id": "ChIJFacebookOnly004",
+      "websiteUri": "https://www.facebook.com/eventsbysara"
+    },
+    {
+      "id": "ChIJAcmeEvents00001",
+      "websiteUri": "https://www.acme-events.ae/"
+    },
+    {
+      "websiteUri": "https://no-id.example-business.ae/"
+    },
+    {
+      "id": "not a valid id!",
+      "websiteUri": "https://bad-id.example-business.ae/"
+    }
+  ],
+  "nextPageToken": "AeCrKXsPAGETWO-token_value"
+}

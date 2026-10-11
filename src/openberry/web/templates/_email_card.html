@@ -1,0 +1,201 @@
+{# The Outreach page's Email sending card (web/mail.py email_status). Included by outreach.html. Times about sending
+   are shown on this computer's clock, like the sending hours. #}
+{% set email_low, email_high = EMAIL_LIMIT_RANGE %}
+{% set gap_low, gap_high = EMAIL_GAP_RANGE %}
+{% set start_hour, end_hour = email.sending_hours %}
+{% set pill = "on" if email.state == "on" else ("off" if email.state == "off" else ("limit" if email.state in ("daily_limit", "mailbox_limit", "outside_hours") else "paused")) %}
+<section class="card agent-card email-card" id="email" aria-labelledby="email-title">
+  <header class="agent-head">
+    <span class="agent-icon" aria-hidden="true">{{ m.icon("mail", 20) }}</span>
+    <div class="min0 grow">
+      <h2 id="email-title" class="title-row">Email sending (your mailbox) <span class="pill pill-agent-{{ pill }}">{{ email.label }}</span></h2>
+      <p class="agent-status">
+        {% if email.state == "off" %}Off. Approved emails wait for you to copy them into a new email and send them yourself.
+        {% elif email.state == "on" %}On: {{ email.sent_last_24h }} of {{ email.daily_limit }} sent in the last 24 hours.{% if email.eligible_total and email.next_soon %} The next email goes out within a minute.{% elif email.eligible_total and email.next_send_at %} Next email at {{ email.next_send_at|local_dt }}.{% endif %}
+        {% elif email.state == "outside_hours" %}On, outside your sending hours: {{ email.sent_last_24h }} of {{ email.daily_limit }} sent in the last 24 hours.{% if email.next_send_at %} Sending starts again at {{ email.next_send_at|local_dt }}.{% endif %}
+        {% elif email.state in ("daily_limit", "mailbox_limit") %}On, but the daily limit is used up: {{ email.sent_last_24h }} of {{ email.daily_limit }} sent in the last 24 hours.{% if email.limit_frees_at %} Your mailbox can send again from {{ email.limit_frees_at|local_dt }}.{% endif %}
+        {% else %}On, but nothing is sent now. {{ email.message }}.
+        {% endif %}
+      </p>
+      <p class="small muted email-from">
+        {% if email.mailbox.connected %}Sends from <strong class="break">{% if email.from_name %}{{ email.from_name }} &lt;{{ email.from_email }}&gt;{% else %}{{ email.from_email }}{% endif %}</strong> · {% if email.inbox_checked_at %}inbox checked {{ m.when(email.inbox_checked_at) }}{% else %}inbox not checked yet{% endif %} · <a href="/mailbox">Mailbox settings</a>
+        {% else %}No mailbox is connected yet. <a href="/mailbox">Connect your mailbox{{ m.icon("chevron-right", 12) }}</a>
+        {% endif %}
+      </p>
+      <p class="small muted">Sending hours: {{ email.hours_text }}, on the clock of the computer OpenBerry runs on ({{ email.zone }}). Emails go out only while OpenBerry is open{% if not scheduler_enabled %}, and with the scheduler off only when you click Send now{% endif %}.</p>
+    </div>
+  </header>
+
+  {% if email.sending_stopped %}<div class="flash flash-error" role="alert">{{ m.icon("alert") }}<p>{{ email.sending_stopped }}</p></div>{% endif %}
+  {% if email.paused_until %}
+  <div class="agent-pause" role="alert">
+    {{ m.icon("alert", 18) }}
+    <div class="min0 grow">
+      <p><strong>Email sending is paused until {{ email.paused_until|local_dt }}:</strong></p>
+      <p class="agent-reason">{{ email.pause_reason or "No details given." }}</p>
+    </div>
+    <form method="post" action="/c/{{ company.id }}/outreach/email/resume">{{ m.csrf() }}
+      <button class="btn btn-sm" type="submit" data-confirm="Resume email sending? Check the bounced addresses and your mailbox first.">{{ m.icon("play", 14) }}Resume</button>
+    </form>
+  </div>
+  {% endif %}
+  {% if email.mailbox.paused %}
+  <div class="agent-pause" role="alert">
+    {{ m.icon("alert", 18) }}
+    <div class="min0 grow">
+      <p><strong>Your mailbox is paused{% if email.mailbox.auth_failed %} until you fix its settings{% elif email.mailbox_paused_until %} until {{ email.mailbox_paused_until|local_dt }}{% endif %}:</strong></p>
+      <p class="agent-reason">{{ email.mailbox.pause_reason or "No details given." }}</p>
+      {% if email.mailbox.auth_failed and email.mailbox_paused_until %}<p><strong>Also until {{ email.mailbox_paused_until|local_dt }}:</strong></p><p class="agent-reason">{{ email.mailbox.wait_reason or "No details given." }}</p>{% endif %}
+    </div>
+    <a class="btn btn-sm" href="/mailbox#status">Mailbox settings</a>
+  </div>
+  {% endif %}
+
+  {% if not email.enabled %}<details class="email-setup"{% if email.mailbox.connected or company.outreach.email_footer %} open{% endif %}><summary>{{ m.icon("chevron-right", 14) }}Set up email sending</summary>{% endif %}
+  <div class="agent-grid email-grid">
+    <div class="agent-controls">
+      <form method="post" action="/c/{{ company.id }}/outreach/email" class="email-form">{{ m.csrf() }}
+        <div class="grid-2">
+          <div class="field">
+            <label for="email-limit">Daily limit</label>
+            <input class="input" id="email-limit" name="email_daily_limit" type="number" min="{{ email_low }}" max="{{ email_high }}" inputmode="numeric" value="{{ email.daily_limit }}" aria-describedby="email-limit-help">
+            <p class="help" id="email-limit-help">Emails in any 24 hours ({{ email_low }}–{{ email_high }}). Start with 5 to 10 a day; at most 50 from one mailbox.</p>
+          </div>
+          <div class="field">
+            <label for="email-gap">Minutes between emails</label>
+            <input class="input" id="email-gap" name="email_gap_minutes" type="number" min="{{ gap_low }}" max="{{ gap_high }}" inputmode="numeric" value="{{ email.gap_minutes }}" aria-describedby="email-gap-help">
+            <p class="help" id="email-gap-help">One email at a time. Mail providers don't allow bursts.</p>
+          </div>
+        </div>
+        <fieldset class="field email-hours">
+          <legend>Sending hours <span class="muted">(the clock of the computer OpenBerry runs on: {{ email.zone }})</span></legend>
+          <div class="chips day-chips">
+            {% for day in WEEKDAYS %}<label class="chip"><input type="checkbox" name="email_days" value="{{ loop.index0 }}"{% if loop.index0 in email.sending_days %} checked{% endif %}><span class="chip-box" aria-hidden="true">{{ m.icon("check", 12) }}</span><span>{{ day }}</span></label>{% endfor %}
+          </div>
+          <div class="hours-row">
+            <label class="sr-only" for="email-start">From</label>
+            <select class="input" id="email-start" name="email_start_hour">{% for h in range(0, 24) %}<option value="{{ h }}"{% if h == start_hour %} selected{% endif %}>{{ "%02d:00"|format(h) }}</option>{% endfor %}</select>
+            <span>to</span>
+            <label class="sr-only" for="email-end">To</label>
+            <select class="input" id="email-end" name="email_end_hour">{% for h in range(1, 25) %}<option value="{{ h }}"{% if h == end_hour %} selected{% endif %}>{{ "%02d:00"|format(h) if h < 24 else "24:00" }}</option>{% endfor %}</select>
+          </div>
+        </fieldset>
+        <div class="field">
+          <label for="email-footer">Footer</label>
+          <textarea class="input" id="email-footer" name="email_footer" rows="4" maxlength="600" data-footer-input aria-describedby="email-footer-help">{{ email.footer_text }}</textarea>
+          <p class="help" id="email-footer-help">Added under every email when it is sent: who you are, your business address, and how to opt out (with the word "unsubscribe").</p>
+          {% if email.footer_problems and (email.enabled or company.outreach.email_footer) %}<p class="field-error">{{ m.icon("alert", 14) }}<span>{{ email.footer_problems|join("; ")|capitalize }}.</span></p>{% endif %}
+        </div>
+        {% if auto.enabled or email.send_auto_approved %}
+        <label class="check-line"><input type="checkbox" name="email_send_auto_approved" value="true"{% if email.send_auto_approved %} checked{% endif %} data-confirm-check="Drafts nobody has read will be emailed {{ auto.hours|plural('hour') }} after they are written, from your mailbox. That includes template drafts for new hot leads and drafts Claude writes. Turn this on only if you trust every draft."><span>Also send emails that auto-approve approved <span class="muted">(nobody read them)</span></span></label>
+        {% endif %}
+        {% if auto.enabled and email.send_auto_approved and email.enabled %}
+        <p class="callout callout-warning">{{ m.icon("alert", 14) }}<span><strong>Fully automatic:</strong> drafts are emailed {{ auto.hours|plural("hour") }} after they're written, without anyone reading them.</span></p>
+        {% endif %}
+        {% if not email.enabled %}
+        <div class="callout callout-warning agent-warning email-warning">
+          {{ m.icon("alert", 14) }}
+          <div>
+            <p><strong>Before you turn it on</strong></p>
+            <ul>
+              <li><strong>Your mail provider may not allow this.</strong> {% if email.hostinger %}Hostinger doesn't allow emails to people who didn't ask for them, and can block your mailbox.{% else %}Hostinger, for example, doesn't allow emails to people who didn't ask for them, and can block your mailbox. Zoho Mail allows one-to-one business email only, never bulk.{% endif %} Use a separate mailbox for outreach, ideally on a separate domain. Never the mailbox your customers write to.</li>
+              <li><strong>Set up SPF, DKIM and DMARC</strong> for the domain you send from.</li>
+              <li><strong>Keep it small.</strong> Start with 5 to 10 a day.</li>
+              <li><strong>Follow the law.</strong> Say who you are, give your business address and honour every opt-out. The UAE's data protection law, the EU's GDPR and the US CAN-SPAM Act apply to business emails, and some countries need consent first. This isn't legal advice.</li>
+              <li>OpenBerry sends only the emails you approve, exactly as written, with your footer. It stops for anyone who replies, opts out or bounces.</li>
+            </ul>
+          </div>
+        </div>
+        <label class="check-line"><input type="checkbox" name="acknowledge" value="true"><span>I've read this. I'm sending from a mailbox I'm allowed to use for outreach.</span></label>
+        {% endif %}
+        <div class="btn-row">
+          {% if email.enabled %}
+          <button class="btn" type="submit" name="action" value="save">{{ m.icon("check", 14) }}Save</button>
+          <button class="btn" type="submit" name="action" value="off" formnovalidate>{{ m.icon("pause", 14) }}Turn off</button>
+          {% else %}
+          <button class="btn btn-primary" type="submit" name="action" value="on" data-confirm="Turn on email sending? OpenBerry will email the emails you approve from {{ email.from_email or 'your mailbox' }}{% if email.eligible_total %}, starting with the {{ email.eligible_total|plural('approved email') }} ready now, oldest first{% endif %}, at most {{ email.daily_limit }} a day. Your mail provider may block mailboxes that send unsolicited email." data-confirm-limit="#email-limit">{{ m.icon("play", 14) }}Turn on</button>
+          <button class="btn" type="submit" name="action" value="save" formnovalidate>Save settings</button>
+          {% endif %}
+        </div>
+      </form>
+    </div>
+
+    <div class="agent-side">
+      <h3 class="label-sm">What your emails look like</h3>
+      <div class="email-preview" aria-label="Email preview">
+        <p class="email-preview-head"><span class="muted">From</span> <span class="break">{% if email.from_name %}{{ email.from_name }} &lt;{{ email.from_email or "you" }}&gt;{% else %}{{ email.from_email or "Your mailbox" }}{% endif %}</span></p>
+        <p class="email-preview-head"><span class="muted">Subject</span> <span class="break">{{ email.preview.subject if email.preview and email.preview.subject else "Your subject, as approved" }}</span></p>
+        <div class="email-preview-body">{{ email.preview.body if email.preview else "Your email, exactly as you approved it." }}</div>
+        <div class="email-preview-footer" data-footer-preview>{{ email.footer_text }}</div>
+      </div>
+      <p class="small muted">Plain text, no tracking. Mail apps can show an Unsubscribe button: it emails your mailbox, and OpenBerry stops within minutes.</p>
+
+      <h3 class="label-sm">Queued for your mailbox <span class="count">{{ email.eligible_total if email.enabled else 0 }}</span></h3>
+      {% if email.enabled and email["items"] %}
+      <ul class="list agent-queue">
+        {% for item in email["items"] %}
+        <li class="list-item">
+          {{ m.avatar(item.lead_name) }}
+          <div class="min0 grow">
+            <a class="lead-name" href="/c/{{ company.id }}/leads/{{ item.lead_id }}#msg-{{ item.message_id }}">{{ item.lead_name or "Unnamed lead" }}</a>
+            <span class="sub break">{{ item.subject }} · step {{ item.step }}</span>
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% if email.eligible_total > email["items"]|length %}<p class="small muted">+{{ email.eligible_total - email["items"]|length }} more, oldest first.</p>{% endif %}
+      {% if email.state == "on" and email.next_soon %}
+      <form method="post" action="/c/{{ company.id }}/outreach/email/send-now">{{ m.csrf() }}<button class="btn btn-sm" type="submit">{{ m.icon("send", 14) }}Send now</button></form>
+      {% endif %}
+      {% else %}
+      <p class="agent-empty small">
+        {% if not email.enabled %}Nothing is queued while email sending is off.
+        {% else %}Nothing to send. Approve email drafts first: only approved emails to leads with a valid address who haven't replied are queued.{% endif %}
+      </p>
+      {% endif %}
+      {% if email.enabled and email.skipped %}
+      <details class="agent-skipped">
+        <summary>{{ email.skipped|length|plural("approved email") }} can't be sent from your mailbox now</summary>
+        <ul>
+          {% for s in email.skipped[:email.skipped_shown] %}
+          {% set lead = email_leads.get(s.lead_id) %}
+          <li><a href="/c/{{ company.id }}/leads/{{ s.lead_id }}#msg-{{ s.message_id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}Lead {{ s.lead_id }}{% endif %}</a>: {{ s.reason }}</li>
+          {% endfor %}
+          {% if email.skipped|length > email.skipped_shown %}<li class="muted">+{{ email.skipped|length - email.skipped_shown }} more</li>{% endif %}
+        </ul>
+      </details>
+      {% endif %}
+
+      {% if email.attention or email.events or email.hints %}
+      <h3 class="label-sm">Needs your attention</h3>
+      <ul class="list email-attention">
+        {% for msg in email.hints %}
+        {% set lead = email_leads.get(msg.lead_id) %}
+        <li class="list-item">
+          <div class="min0 grow">
+            <a class="lead-name" href="/c/{{ company.id }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}Lead {{ msg.lead_id }}{% endif %}</a>
+            {{ m.opt_out_hint(msg, "/c/" ~ company.id ~ "/outreach#email", msg.email_from if lead and msg.email_from and msg.email_from != lead.email|lower else "") }}
+          </div>
+        </li>
+        {% endfor %}
+        {% for msg in email.attention %}
+        {% set lead = email_leads.get(msg.lead_id) %}
+        <li class="list-item">
+          <div class="min0 grow">
+            <a class="lead-name" href="/c/{{ company.id }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}Lead {{ msg.lead_id }}{% endif %}</a>
+            <span class="sub break">{% if msg.email_state == "unknown" %}{{ m.maybe_sent_text(email.saves_sent) }}{% else %}Not sent: {{ msg.send_error }}{% endif %}</span>
+            {{ m.email_actions(msg, "/c/" ~ company.id ~ "/outreach#email", msg.id in email.dead_address) }}
+          </div>
+        </li>
+        {% endfor %}
+        {% for e in email.events %}
+        {% set lead = email_leads.get(e.lead_id) %}
+        <li class="list-item"><div class="min0 grow">{% if e.lead_id %}<a class="lead-name" href="/c/{{ company.id }}/leads/{{ e.lead_id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}A lead{% endif %}</a>{% else %}<span class="lead-name">A lead deleted since</span>{% endif %}<span class="sub break">{{ "Bounced" if e.kind == "bounce" else "Opted out" }} {{ m.when(e.created_at) }}{% if e.detail %}: <bdi>{{ e.detail }}</bdi>{% endif %}</span></div></li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      <p class="small agent-links"><a href="{{ EMAIL_DOCS_URL }}" target="_blank" rel="noopener noreferrer">How email sending works{{ m.icon("external", 12) }}</a><a href="/mailbox">Mailbox{{ m.icon("chevron-right", 12) }}</a></p>
+    </div>
+  </div>
+  {% if not email.enabled %}</details>{% endif %}
+</section>

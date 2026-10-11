@@ -91,7 +91,7 @@ class FakeGitHub:
             return gh_response(200, fixture(f"stargazers_page{page}.json"))
         if path.startswith("/users/"):
             user = FIXTURES / f"user_{path.removeprefix('/users/')}.json"
-            return gh_response(200, json.loads(user.read_text())) if user.is_file() else error("error_404.json", 404)
+            return gh_response(200, json.loads(user.read_text(encoding="utf-8"))) if user.is_file() else error("error_404.json", 404)
         if path.endswith("/forks"):
             return gh_response(200, self.extra_forks.get(path, []))
         if path.endswith(("/issues", "/stargazers")):
@@ -459,7 +459,7 @@ async def test_time_budget_stops_with_warning(company):
 
 
 async def test_403_html_stops_with_warning(company):
-    blocked = httpx.Response(403, text=(FIXTURES / "blocked_403.html").read_text(),
+    blocked = httpx.Response(403, text=(FIXTURES / "blocked_403.html").read_text(encoding="utf-8"),
                              headers={"Content-Type": "text/html; charset=utf-8"})
     handler = FakeGitHub({ISSUES: blocked})
     signals, ctx = await run(company, handler)
@@ -752,7 +752,7 @@ PUBLIC_USER_KEYS = SIMPLE_USER_KEYS | {
 
 def test_fixtures_match_the_documented_github_payloads():
     for path in FIXTURES.glob("user_*.json"):
-        profile = json.loads(path.read_text())
+        profile = json.loads(path.read_text(encoding="utf-8"))
         assert set(profile) == PUBLIC_USER_KEYS, path.name
         assert isinstance(profile["blog"], str)  # "" when unset, never null
     for page in ("stargazers_page1.json", "stargazers_page2.json", "stargazers_page3.json"):
@@ -803,7 +803,7 @@ async def test_placeholder_accounts_are_not_leads(company):
 
 
 async def test_html_403_on_stargazers_stops_instead_of_blaming_the_restriction(company, token):
-    blocked = httpx.Response(403, text=(FIXTURES / "blocked_403.html").read_text(),
+    blocked = httpx.Response(403, text=(FIXTURES / "blocked_403.html").read_text(encoding="utf-8"),
                              headers={"Content-Type": "text/html; charset=utf-8"})
     handler = FakeGitHub({STARS: blocked})
     signals, ctx = await run(company, handler)

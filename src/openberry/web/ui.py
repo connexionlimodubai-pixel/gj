@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,18 +15,21 @@ from fastapi import Request
 from fastapi.templating import Jinja2Templates
 from starlette.responses import Response
 
-from .. import __version__, repo
+from .. import __version__, db, repo, sample_cleanup
+from ..collectors import google_places
 from ..config import get_settings
 from ..models import (
     COMPANY_SIZES,
     COMPANY_TYPES,
     LEAD_STATUSES,
     MESSAGE_CHANNELS,
+    PROSPECT_TYPES,
     SENIORITIES,
     SIGNAL_SOURCES,
     SIGNAL_TYPES,
     TIERS,
     TONES,
+    WEEKDAYS,
     Company,
     Lead,
 )
@@ -36,7 +40,7 @@ from ..outreach import (
     account_label,
     connect_note_limit,
 )
-from .forms import AGENT_LIMIT_RANGE
+from .forms import AGENT_LIMIT_RANGE, AUTO_APPROVE_HOURS_RANGE, EMAIL_GAP_RANGE, EMAIL_LIMIT_RANGE
 from .icons import ICONS, LOGO
 from .session import csrf_token, is_logged_in, pop_flashes
 
@@ -46,6 +50,7 @@ STATIC_DIR = WEB_DIR / "static"
 REPO_URL = "https://github.com/connexionlimodubai-pixel/gj"
 DOCS_URL = REPO_URL + "#readme"
 AGENT_DOCS_URL = REPO_URL + "/blob/main/docs/AI_AGENT_SENDING.md"
+EMAIL_DOCS_URL = REPO_URL + "/blob/main/docs/EMAIL_SENDING.md"
 
 CHANNEL_LABELS = {
     "linkedin_connect": "LinkedIn connection note",
@@ -56,8 +61,9 @@ CHANNEL_LABELS = {
 SOURCE_LABELS = {
     "hackernews": "Hacker News", "reddit": "Reddit", "github": "GitHub", "greenhouse": "Greenhouse",
     "lever": "Lever", "ashby": "Ashby", "google_news": "Google News", "rss": "RSS", "linkedin": "LinkedIn",
-    "web": "Web", "manual": "Manual", "claude": "Claude", "csv": "CSV import", "demo": "Demo",
-    "sec_edgar": "SEC EDGAR",
+    "web": "Web", "manual": "Manual", "claude": "Claude", "csv": "CSV import",
+    "sec_edgar": "SEC EDGAR", "google_places": "Google Maps",
+    "demo": "Sample (old demo)",  # rows 0.1.x's demo left (sample_cleanup); no longer a filter option
 }
 LEAD_SOURCES = SIGNAL_SOURCES
 # ScanRun.status -> label; other statuses are shown humanized with a neutral badge.
@@ -112,6 +118,37 @@ def ago(dt: datetime | None, now: datetime | None = None) -> str:
 def abs_dt(dt: datetime | None) -> str:
     dt = as_utc(dt)
     return f"{dt.day} {dt:%b %Y, %H:%M} UTC" if dt else ""
+
+
+def local_dt(dt: datetime | None) -> str:
+    """A time on this computer's clock, as the email sending hours are: "Mon 13 Oct, 09:00"."""
+    dt = as_utc(dt)
+    if not dt:
+        return ""
+    local = repo.local_time(dt)
+    return f"{local:%a} {local.day} {local:%b, %H:%M}"
+
+
+def clock_zone(dt: datetime | None = None) -> str:
+    """The time zone of the sending hours, as an offset ("UTC+04:00", "UTC"): in Docker or on a server it is the
+    server's clock (set TZ to change it), which the person at the browser can't see otherwise."""
+    local = repo.local_time(as_utc(dt) or repo.utcnow())
+    offset = local.utcoffset()
+    if not offset:
+        return "UTC"
+    minutes = int(offset.total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    return f"UTC{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+
+
+def to_datetime(value: Any) -> datetime | None:
+    """An ISO 8601 string (as repo returns them) or a datetime, as an aware datetime; None for anything else."""
+    if isinstance(value, str) and value:
+        try:
+            return as_utc(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+    return as_utc(value) if isinstance(value, datetime) else None
 
 
 def iso_dt(dt: datetime | None) -> str:
@@ -200,7 +237,15 @@ def scan_status_label(status: str) -> str:
 
 
 # Message.sent_via -> who recorded the send, shown next to sent messages ("" = the user, shown as nothing).
-SENT_VIA_LABELS = {"agent": "Sent by AI agent", "claude": "Marked sent by Claude"}
+SENT_VIA_LABELS = {"agent": "Sent by AI agent", "claude": "Marked sent by Claude", "smtp": "Sent from your mailbox"}
+# email_events.kind -> what the lead page's timeline says (repo.record_inbound, record_email_failure, resolve_email,
+# update_message).
+EMAIL_EVENT_LABELS = {
+    "reply": "Replied", "auto_reply": "Automatic reply (out of office)", "bounce": "Bounced: the address doesn't work",
+    "soft_bounce": "Delivery delayed", "policy_reject": "Refused by their mail server",
+    "opt_out": "Asked not to be emailed", "send_failed": "Sending failed", "unknown": "May have been sent",
+    "resolved": "Resolved", "opt_out_hint": "Looks like an opt-out", "edited": "Text changed",
+}
 
 
 def sent_via_label(message: Any) -> str:
@@ -272,13 +317,17 @@ def _build_env() -> jinja2.Environment:
         lstrip_blocks=True,
     )
     env.filters.update(
-        ago=ago, abs_dt=abs_dt, iso_dt=iso_dt, compact=compact, safe_url=safe_url, mailto=mailto, host=host,
+        ago=ago, abs_dt=abs_dt, local_dt=local_dt, iso_dt=iso_dt, todatetime=to_datetime, compact=compact,
+        safe_url=safe_url, mailto=mailto, host=host,
         reason_parts=reason_parts, top_reason=top_reason, initials=initials, plural=plural,
         signal_label=signal_label,
         channel_label=lambda c: CHANNEL_LABELS.get(c, c),
         source_label=lambda s: SOURCE_LABELS.get(s, (s or "").replace("_", " ").title()),
         status_label=lambda s: STATUS_LABELS.get(s, (s or "").capitalize()),
         company_status=company_status_label, scan_status=scan_status_label, sent_via=sent_via_label,
+        # A Google Maps link built from a Place ID (Google Maps businesses): shown as "Google Maps", not "Profile".
+        maps_link=lambda url: bool(repo.google_place_id(str(url or ""))),
+        day_month=google_places.day_month,
     )
     env.globals.update(
         SIGNAL_TYPES=SIGNAL_TYPES, SENIORITIES=SENIORITIES, COMPANY_SIZES=COMPANY_SIZES, COMPANY_TYPES=COMPANY_TYPES,
@@ -292,14 +341,19 @@ def _build_env() -> jinja2.Environment:
         query_with=query_with, version=__version__,
         select_options=select_options, check_options=check_options, pending_review=pending_review,
         SCAN_STATUS_LABELS=SCAN_STATUS_LABELS,
-        DOCS_URL=DOCS_URL, AGENT_DOCS_URL=AGENT_DOCS_URL, ICONS=ICONS, LOGO=LOGO,
-        AGENT_LIMIT_RANGE=AGENT_LIMIT_RANGE,
+        DOCS_URL=DOCS_URL, AGENT_DOCS_URL=AGENT_DOCS_URL, EMAIL_DOCS_URL=EMAIL_DOCS_URL, ICONS=ICONS, LOGO=LOGO,
+        EMAIL_EVENT_LABELS=EMAIL_EVENT_LABELS,
+        AGENT_LIMIT_RANGE=AGENT_LIMIT_RANGE, AUTO_APPROVE_HOURS_RANGE=AUTO_APPROVE_HOURS_RANGE,
+        EMAIL_LIMIT_RANGE=EMAIL_LIMIT_RANGE, EMAIL_GAP_RANGE=EMAIL_GAP_RANGE, WEEKDAYS=WEEKDAYS,
         message_version=repo.message_version, BULK_MESSAGES_MAX=repo.BULK_MESSAGES_MAX,
         SIZE_OPTIONS=[(s, f"{s} employees") for s in COMPANY_SIZES],
         SIZE_CHIPS=[(s, s) for s in COMPANY_SIZES],
         COMPANY_TYPE_OPTIONS=[(t, "SMB" if t == "smb" else t.capitalize()) for t in COMPANY_TYPES],
         TONE_OPTIONS=[(t, t.capitalize()) for t in TONES],
-        SIGNAL_OPTIONS=[(k, label) for k, (label, _) in SIGNAL_TYPES.items()],
+        # Prospect types (business_search) aren't offered: the Google Maps searches themselves are the opt-in.
+        SIGNAL_OPTIONS=[(k, label) for k, (label, _) in SIGNAL_TYPES.items() if k not in PROSPECT_TYPES],
+        # This month's Google Maps searches, shown next to the searches in the profile form (never the key).
+        places_usage=google_places.usage_summary,
         CHANNEL_OPTIONS=list(CHANNEL_LABELS.items()),
         STATUS_OPTIONS=[(s, STATUS_LABELS[s]) for s in LEAD_STATUSES],
     )
@@ -308,6 +362,15 @@ def _build_env() -> jinja2.Environment:
 
 templates = Jinja2Templates(env=_build_env())
 ASSET_VERSION = _asset_version()
+
+
+def _nav_companies() -> list[Company]:
+    """The company switcher's list. Pages that don't need the database (Your data, API keys, Mailbox) still show,
+    without it, when the database can't be read: Your data's automatic backups stay downloadable."""
+    try:
+        return repo.list_companies()
+    except (sqlite3.Error, db.DatabaseProblem):
+        return []
 
 
 def render(request: Request, name: str, context: dict[str, Any] | None = None, *, status_code: int = 200,
@@ -322,12 +385,18 @@ def render(request: Request, name: str, context: dict[str, Any] | None = None, *
     show_nav = logged_in and not public
     ctx: dict[str, Any] = {"company": None, "active": "", "title": "", "values": {}, "errors": {}}
     ctx.update(context or {})
+    company = ctx["company"]
+    # The sample company an older version left (sample_cleanup): a banner on its pages leads to its removal page.
+    sample = (sample_cleanup.cleanup_plan(company.id)
+              if show_nav and isinstance(company, Company) and ctx["active"] != "sample" else None)
     ctx.update(
+        sample_banner={"text": sample_cleanup.banner_text(sample),
+                       "button": sample_cleanup.banner_button(sample)} if sample else None,
         show_nav=show_nav,
         public=public,
         logged_in=logged_in,
         auth_enabled=bool(settings.password),
-        nav_companies=repo.list_companies() if show_nav else [],
+        nav_companies=_nav_companies() if show_nav else [],
         flashes=pop_flashes(request),
         csrf_token=csrf_token(request),
         asset_version=ASSET_VERSION,

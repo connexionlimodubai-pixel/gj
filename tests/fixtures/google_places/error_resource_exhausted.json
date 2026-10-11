@@ -1,0 +1,19 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Quota exceeded for quota metric 'SearchTextRequest' and limit 'SearchTextRequest per minute' of service 'places.googleapis.com' for consumer 'project_number:123456789012'.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "RATE_LIMIT_EXCEEDED",
+        "domain": "googleapis.com",
+        "metadata": {
+          "consumer": "projects/123456789012",
+          "quota_metric": "places.googleapis.com/search_text_requests",
+          "service": "places.googleapis.com"
+        }
+      }
+    ]
+  }
+}

@@ -55,6 +55,16 @@ def test_inline_comments_are_stripped_from_unquoted_values_only(tmp_path: Path, 
     assert os.environ["OB_TEST_WINS"] == "from the environment"
 
 
+def test_a_value_with_a_dollar_sign_in_single_quotes_is_read_as_written() -> None:
+    """Docker Compose reads $name in an unquoted or double-quoted value as a variable, so .env.example and the README
+    put such a password in single quotes. Compose then keeps it as written, and OpenBerry's own reader must too."""
+    assert config._dotenv_value("'Sunny$day2026!x'") == "Sunny$day2026!x"
+    assert config._dotenv_value("'abc$123 #x'  # a comment") == "abc$123 #x"
+    assert config._dotenv_value("Sunny$day2026!x") == "Sunny$day2026!x"  # no variables here either
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "single quotes" in example and "OPENBERRY_PASSWORD='" in example
+
+
 def test_reddit_username_with_a_trailing_comment_reaches_the_user_agent(tmp_path: Path, clean_env: None,
                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     env = tmp_path / "openberry.env"

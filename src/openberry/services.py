@@ -1,16 +1,19 @@
-"""Orchestration: run collectors, turn raw signals into scored leads, alert on new hot leads."""
+"""Orchestration: run collectors, turn raw signals into scored leads, alert on new hot leads, auto-approve drafts."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
+import threading
+import time
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
 
-from . import repo
+from . import config, mailer, repo
 from .collectors import CollectContext, RawSignal, get_collectors
 from .config import get_settings
 from .db import connect
@@ -57,6 +60,9 @@ def ingest(company_id: int, raw_signals: list[RawSignal]) -> IngestStats:
                     else:
                         stats.leads_updated += 1
                 _, sig_created = repo.add_signal(company_id, raw.signal, lead_id=lead_id, conn=c, rescore=False)
+                if raw.signal.source == "google_places" and raw.signal.external_id.startswith("gp:"):
+                    # Stored with its lead, in the same transaction: a business is "added" only once it is.
+                    repo.record_place_ids(company_id, {raw.signal.external_id[3:]: True}, conn=c)
                 if sig_created:
                     stats.signals_new += 1
                 else:
@@ -88,6 +94,7 @@ async def run_scan(company_id: int, *, trigger: str = "manual", sources: list[st
     Returns a stats dict (also stored on the scan run) with per-collector counts and errors.
     Raises ScanInProgress while another scan of the company runs (in any process).
     """
+    config.refresh_saved_settings()  # a key saved in the dashboard by another process counts at once
     company = repo.get_company(company_id)
     collectors = [c for c in get_collectors(sources) if c.enabled_for(company)]
     run_id = repo.start_scan_run(company_id, trigger)
@@ -114,14 +121,17 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
     try:
         async def run_one(collector) -> None:
             ctx = CollectContext(client=client, since=since, settings=settings)
+            timeout = getattr(collector, "timeout_seconds", None) or COLLECTOR_TIMEOUT_SECONDS
             try:
-                raw = await asyncio.wait_for(collector.collect(company, ctx), COLLECTOR_TIMEOUT_SECONDS)
+                raw = await asyncio.wait_for(collector.collect(company, ctx), timeout)
                 all_raw.extend(raw)
-                per_collector[collector.name] = {"found": len(raw), "warnings": ctx.warnings}
+                per_collector[collector.name] = {"found": len(raw), "warnings": ctx.warnings,
+                                                 **({"counts": dict(ctx.counts)} if ctx.counts else {})}
             except Exception as exc:
                 log.warning("collector %s failed: %s", collector.name, exc)
                 per_collector[collector.name] = {"found": 0, "error": f"{type(exc).__name__}: {exc}",
-                                                 "warnings": ctx.warnings}
+                                                 "warnings": ctx.warnings,
+                                                 **({"counts": dict(ctx.counts)} if ctx.counts else {})}
 
         await asyncio.gather(*(run_one(c) for c in collectors))
     finally:
@@ -132,6 +142,7 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
     repo.set_last_scan(company_id)
     # Every person who is hot and not alerted yet, including leads that turned hot outside a scan.
     alerts = await alert_new_hot_leads(company_id, company)
+    auto_approved = await auto_approve_company(company_id)
 
     stats = {
         "collectors": per_collector,
@@ -141,6 +152,7 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
         "leads_new": ingest_stats.leads_new,
         "leads_updated": ingest_stats.leads_updated,
         **alerts,
+        "auto_approved": auto_approved,
         "errors": ingest_stats.errors[:20],
     }
     status, problem = scan_status(collectors, per_collector)
@@ -153,7 +165,7 @@ async def _scan(company: Company, run_id: int, collectors: list, sources: list[s
 
 
 NOTHING_CONFIGURED = ("No signal source is configured for this company: add keywords, subreddits, GitHub repos, "
-                      "job boards, news queries or RSS feeds to its profile.")
+                      "job boards, news queries, RSS feeds or Google Maps searches to its profile.")
 NOTHING_WORKED = ("No source returned anything and every one failed or reported problems (see the warnings): "
                   "check the network, proxy or API limits.")
 
@@ -201,17 +213,25 @@ async def alert_new_hot_leads(company_id: int, company: Company | None = None) -
     """Alert on hot people not alerted yet (and draft for them in auto_draft mode), once per lead.
 
     Called after every scan and on every scheduler tick, so leads that turn hot through Claude,
-    the API, a CSV import or an edit are alerted too.
+    the API, a CSV import or an edit are alerted too. An alert that reached none of the company's
+    webhooks (a network drop) is tried again at the next ticks, for a day; the auto-draft is made
+    once, with the first try.
     """
     company = company or repo.get_company(company_id)
-    leads = await asyncio.to_thread(repo.claim_new_hot_leads, company_id)
+    now = repo.utcnow()
+    leads, retries = await asyncio.to_thread(repo.claim_hot_lead_alerts, company_id, now)
     notified: list[str] = []
     drafted = 0
     if leads:
         notified = await notify_hot_leads(company, leads)
-        if company.outreach.mode == "auto_draft":
-            drafted = await asyncio.to_thread(auto_draft, company, leads)
-    return {"newly_hot": [lead.id for lead in leads], "notified": notified, "drafted": drafted}
+        alertable = [lead.id for lead in leads if lead.score >= company.notify.min_score]
+        if company.notify.slack_webhook_url or company.notify.discord_webhook_url:
+            await asyncio.to_thread(repo.release_hot_lead_alerts, alertable, now, bool(notified))
+        fresh = [lead for lead in leads if lead.id not in retries]
+        if company.outreach.mode == "auto_draft" and fresh:
+            drafted = await asyncio.to_thread(auto_draft, company, fresh)
+    return {"newly_hot": [lead.id for lead in leads if lead.id not in retries], "notified": notified,
+            "drafted": drafted, **({"retried": sorted(retries)} if retries else {})}
 
 
 async def alert_active_companies() -> dict[int, dict[str, Any]]:
@@ -225,8 +245,31 @@ async def alert_active_companies() -> dict[int, dict[str, Any]]:
         except Exception:
             log.exception("hot-lead alerts failed for company %s", company.id)
             continue
-        if result["newly_hot"]:
+        if result["newly_hot"] or result.get("retried"):
             results[company.id] = result
+    return results
+
+
+async def auto_approve_company(company_id: int) -> list[int]:
+    """repo.auto_approve_due for one company: the drafts it approved. A failure is logged, never raised, so it
+    can't fail the scan or the tick that runs it."""
+    try:
+        return (await asyncio.to_thread(repo.auto_approve_due, company_id))["approved"]
+    except Exception:
+        log.exception("auto-approve failed for company %s", company_id)
+        return []
+
+
+async def auto_approve_active_companies() -> dict[int, list[int]]:
+    """Auto-approve due drafts for every active company that turned it on; returns {company_id: approved ids}
+    for the companies where something was approved. One company's error never stops the others."""
+    results = {}
+    for company in repo.list_companies():
+        if company.status != "active" or not company.outreach.auto_approve:
+            continue
+        approved = await auto_approve_company(company.id)
+        if approved:
+            results[company.id] = approved
     return results
 
 
@@ -243,10 +286,222 @@ async def scan_due_companies(trigger: str = "schedule") -> list[dict[str, Any]]:
     return results
 
 
+# --------------------------------------------------------------------------------------
+# Email sending from the user's own mailbox (the dashboard process only: scheduler.email_loop and the dashboard's
+# buttons). `openberry mcp` never calls these.
+# --------------------------------------------------------------------------------------
+
+INBOX_EVERY = timedelta(minutes=5)     # the inbox is checked this often while OpenBerry is open
+RECORD_ATTEMPTS = 3                    # writing a sent email to the database, ~10 seconds in all
+RECORD_WAIT_SECONDS = 3.0
+# Set when a sent email couldn't be recorded in the database: this process sends nothing more until it restarts.
+_sending_stopped = ""
+
+
+def connected_mailbox() -> mailer.Mailbox | None:
+    """The mailbox the Mailbox page saved (another process's save counts at once), or None while it isn't set up."""
+    config.refresh_saved_settings()
+    return mailer.Mailbox.from_settings(get_settings())
+
+
+def sending_stopped() -> str:
+    return _sending_stopped
+
+
+def _record_sent(job: mailer.EmailJob, address: str, now: datetime | None) -> bool:
+    for attempt in range(RECORD_ATTEMPTS):
+        try:
+            repo.record_email_sent(job.message_id, job.header_id, address, now=now)
+            return True
+        except Exception:
+            log.exception("couldn't record sent email %s (attempt %s)", job.message_id, attempt + 1)
+            if attempt < RECORD_ATTEMPTS - 1:
+                time.sleep(RECORD_WAIT_SECONDS)
+    return False
+
+
+_sending_now = threading.Event()  # set while an email is handed to the mail server (desktop.py waits for it on exit)
+
+
+def email_in_progress() -> bool:
+    """An email is being sent right now (claimed, from the sign-in to the server's last answer)."""
+    return _sending_now.is_set()
+
+
+def send_next_email(now: datetime | None = None) -> dict[str, Any]:
+    """Send at most one approved email from the mailbox (repo.claim_next_email decides which, if any).
+
+    Blocking (SMTP): run it in a worker thread. Returns {"status": "sent" | "idle" | "not_connected" | "stopped" |
+    an Outcome kind, "message_id", "text"}. Never raises for a mail problem. `now` is for tests: the claim, the
+    email's Date header and the record all use it.
+    """
+    global _sending_stopped
+    box = connected_mailbox()
+    if box is None:
+        return {"status": "not_connected"}
+    if _sending_stopped:
+        return {"status": "stopped", "text": _sending_stopped}
+    claim = secrets.token_hex(16)
+    job = repo.claim_next_email(claim, box.from_email, box.from_name, now=now)
+    if job is None:
+        return {"status": "idle"}
+    _sending_now.set()
+    try:
+        return _send_claimed(box, job, claim, now)
+    finally:
+        _sending_now.clear()
+
+
+def _send_claimed(box: mailer.Mailbox, job: mailer.EmailJob, claim: str, now: datetime | None) -> dict[str, Any]:
+    global _sending_stopped
+    outcome = mailer.send(job, box, on_data=lambda: repo.mark_email_data(job.message_id, claim, now=now), now=now)
+    if outcome.ok:
+        if not _record_sent(job, box.key, now):
+            # It went out but the database can't say so: send nothing more until a restart. The email stays in
+            # "data" and becomes "may have been sent" (never sent again automatically).
+            _sending_stopped = ("An email was sent but OpenBerry couldn't record it in its database, so it stopped "
+                                "sending. Restart OpenBerry.")
+            log.error("email sending stopped: message %s was sent but not recorded", job.message_id)
+            return {"status": "stopped", "message_id": job.message_id, "text": _sending_stopped}
+        if box.save_sent and (problem := mailer.save_sent_copy(box, outcome.data)):
+            log.warning("couldn't save a copy of email %s in the Sent folder: %s", job.message_id, problem)
+        log.info("email sent: message %s", job.message_id)
+        return {"status": "sent", "message_id": job.message_id}
+    repo.record_email_failure(job.message_id, claim, outcome.kind, outcome.text, box.key, now=now)
+    log.warning("email %s not sent (%s); the Outreach page says why", job.message_id, outcome.kind)
+    log.debug("email %s: %s", job.message_id, outcome.text)  # a mail server's reply can quote the address
+    return {"status": outcome.kind, "message_id": job.message_id, "text": outcome.text}
+
+
+_clock_warned = False
+
+
+def inbox_due(now: datetime | None = None) -> bool:
+    """A mailbox is connected, its login isn't refused (a wrong password is never tried again by itself: providers
+    block an account that keeps trying one; a settings problem with sending doesn't stop the inbox checks) and its
+    inbox wasn't tried in the last INBOX_EVERY. A last try later than now means the computer's clock went back: the
+    inbox is checked at once rather than hours later."""
+    global _clock_warned
+    address = get_settings().mailbox_address()
+    if not address:
+        return False
+    state = repo.mailbox_state(address)
+    if state["login_refused"]:
+        return False
+    tried = state["inbox_tried_at"]
+    if not tried:
+        return True
+    now = now or repo.utcnow()
+    tried_at = datetime.fromisoformat(tried)
+    if tried_at > now + repo.CLOCK_SLACK:
+        if not _clock_warned:
+            log.warning("the computer's clock went back (the last inbox check is stamped %s): checking the inbox now",
+                        tried)
+            _clock_warned = True
+        return True
+    return tried_at <= now - INBOX_EVERY
+
+
+RECORD_FAILED = "OpenBerry couldn't save a message from your inbox ({detail}). It reads it again at the next check."
+CATCH_UP_ROUNDS = 25  # batches of mailer.INBOX_FETCH_MAX new messages read in one check (about 5,000 headers)
+STILL_READING = ("OpenBerry is still reading the new mail in {folder} (more than {count} messages arrived since the last "
+                 "check). Nothing is sent until it has read them all: it goes on at the next check.")
+
+
+def check_inbox(now: datetime | None = None) -> dict[str, Any]:
+    """Read the inbox (and the junk folder) read-only for replies, opt-outs and bounces about OpenBerry's leads.
+
+    Blocking (IMAP): run it in a worker thread. Each message is recorded once (repo.record_inbound); mail that is about
+    no lead is never read in full or stored, nor is OpenBerry's own email coming back (a lead with the mailbox's own
+    address). A folder's position moves on only once every message in it was recorded: when one can't be (the
+    database is busy), the check fails, sending waits, and the next check reads it again. A backlog (a laptop closed
+    over the weekend) is read in batches until it is all read; if it is too big for one check, the check counts as
+    not done yet, so nothing is sent before every new message was seen. Positions are kept per IMAP server and
+    username: the first check with new details reads the mail since the last check (a changed From address changes
+    nothing). A refused login pauses the mailbox (repo.pause_mailbox_login). Returns {"status": "ok" | "failed" |
+    "not_connected", "checked", "recorded", "text"}.
+    """
+    box = connected_mailbox()
+    if box is None:
+        return {"status": "not_connected"}
+    now = now or repo.utcnow()
+    previous = repo.mailbox_state(box.address, now=now)
+    known = repo.imap_positions(box.address, box.reader_key)
+    positions: dict[str, Any] = dict(known or {})
+    last_good = datetime.fromisoformat(previous["inbox_checked_at"]).date() if previous["inbox_checked_at"] else None
+    since = (last_good or now.date()) - timedelta(days=1)
+    # Never read with these details, but another server or username was read until last_good: read since then
+    # rather than nothing, so no reply is skipped (each message is recorded once).
+    catch_up = since if known is None and last_good and repo.read_with_other_details(box.address,
+                                                                                     box.reader_key) else None
+    own = {box.address, box.username.strip().lower(), box.reader[0].strip().lower()} - {""}
+    index = repo.inbound_index(now, own_domains={mailer.domain_of(a) for a in own})
+    footers = [c.outreach.email_footer for c in repo.list_companies() if c.outreach.email_footer]
+
+    def relevant(headers: Any) -> bool:
+        facts = mailer.header_facts(headers)
+        if facts["message_id"] in index["ours"] or facts["from_email"] in own:
+            return False  # our own email came back (sent to the mailbox itself), or the test email
+        return bool(facts["references"] & index["ours"] or facts["from_email"] in index["leads"] or facts["bounce"]
+                    or facts["unsubscribe"] or facts["from_domain"] in index["domains"])
+
+    checked = recorded = 0
+    behind = ""
+    try:
+        with mailer.Inbox(box) as inbox:
+            folders = inbox.folders()
+            for folder in dict.fromkeys(f for f in (folders["inbox"], folders["junk"]) if f):
+                first_since = catch_up
+                for _round in range(CATCH_UP_ROUNDS):
+                    found, position, more = inbox.fetch_new(folder, positions.get(folder), relevant, since=since,
+                                                            first_since=first_since)
+                    first_since = None
+                    for key, raw in found:
+                        checked += 1
+                        try:
+                            inbound = mailer.classify_inbound(raw, footers)
+                        except Exception:  # one unreadable message never stops the check
+                            log.warning("inbox message %s skipped", key, exc_info=True)
+                            continue
+                        try:  # a message without a Message-ID is known by its content wherever it is read again
+                            result = repo.record_inbound(inbound, mailer.content_key(raw), now=now)
+                        except Exception as exc:
+                            log.exception("inbox message %s couldn't be recorded", key)
+                            raise mailer.MailError(mailer.RETRY, RECORD_FAILED.format(
+                                detail=mailer.server_text(exc) or type(exc).__name__)) from exc
+                        recorded += result["status"] == "recorded"
+                    positions[folder] = position  # every message read so far in this folder was handled
+                    if not more:
+                        break
+                else:
+                    behind = behind or STILL_READING.format(folder=folder,
+                                                            count=CATCH_UP_ROUNDS * mailer.INBOX_FETCH_MAX)
+    except mailer.MailError as exc:
+        if exc.kind == mailer.AUTH:
+            repo.pause_mailbox_login(box.address, exc.text, now=now)
+        repo.save_inbox_check(box.address, False, exc.text, positions=positions, now=now, reader=box.reader_key)
+        return {"status": "failed", "text": exc.text, "kind": exc.kind}
+    if behind:
+        repo.save_inbox_check(box.address, False, behind, positions=positions, now=now, reader=box.reader_key)
+        return {"status": "failed", "text": behind, "kind": mailer.RETRY, "checked": checked, "recorded": recorded}
+    repo.save_inbox_check(box.address, True, positions=positions, now=now, reader=box.reader_key)
+    return {"status": "ok", "checked": checked, "recorded": recorded}
+
+
+def send_test_email() -> mailer.Outcome:
+    """Send a short test email to the mailbox's own address (never anyone else). Not counted toward any limit."""
+    box = connected_mailbox()
+    if box is None:
+        return mailer.Outcome(mailer.CONFIG, "Connect your mailbox first: fill in every field and save.")
+    return mailer.send_test(box)
+
+
 def collector_overview(company: Company) -> list[dict[str, Any]]:
-    """Which sources will run for this company and what each one still needs."""
-    return [
-        {
+    """Which sources will run for this company and what each one still needs (and paid-API usage, if any)."""
+    config.refresh_saved_settings()
+    rows = []
+    for c in get_collectors():
+        row: dict[str, Any] = {
             "name": c.name,
             "label": c.label,
             "signal_types": list(c.signal_types),
@@ -254,5 +509,7 @@ def collector_overview(company: Company) -> list[dict[str, Any]]:
             "configured": c.is_configured(company),
             "enabled": c.enabled_for(company),
         }
-        for c in get_collectors()
-    ]
+        if (usage := c.usage() if hasattr(c, "usage") else None) is not None:
+            row["usage"] = usage
+        rows.append(row)
+    return rows

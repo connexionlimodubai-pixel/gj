@@ -1,6 +1,6 @@
 [project]
 name = "openberry"
-version = "0.1.1"
+version = "0.2.0"
 description = "Free, self-hosted, open-source alternative to Gojiberry: intent-signal lead generation driven by Claude via MCP, with a web dashboard."
 readme = "README.md"
 license = "MIT"
@@ -18,9 +18,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+# playwright and pillow: the browser tests and the icon tests (`uv run playwright install chromium` once).
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "playwright>=1.45", "pillow>=10"]
 # The desktop app's native window (`openberry desktop`). Without it the dashboard opens in the browser.
 desktop = ["pywebview>=5"]
+
+[dependency-groups]
+# Building the desktop app (packaging/build.py), locked in uv.lock like the rest: `uv sync --group build`.
+build = ["pyinstaller>=6.22,<7", "pyinstaller-hooks-contrib>=2026.8"]
 
 [project.scripts]
 openberry = "openberry.cli:main"
@@ -37,3 +42,11 @@ packages = ["src/openberry"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::DeprecationWarning", "error::PendingDeprecationWarning"]
+
+[tool.ruff.lint]
+select = ["F", "E9", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency markers are meant to be called in argument defaults.
+extend-immutable-calls = ["fastapi.Body", "fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Query"]

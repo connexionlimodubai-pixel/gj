@@ -38,6 +38,33 @@
 {% if agent.enabled and agent.paused %}
 <div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>AI agent sending is paused</strong> until {{ agent.paused_until|abs_dt }}. Your agent reported a problem on LinkedIn: <span class="agent-reason">{{ agent.pause_reason or "no details given" }}</span> <a href="{{ base }}/outreach#agent">Review it on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
 {% endif %}
+{% if email.enabled and email.paused_until %}
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>Email sending is paused</strong> until {{ email.paused_until|local_dt }}: <span class="agent-reason">{{ email.pause_reason or "no details given" }}</span> <a href="{{ base }}/outreach#email">Review it on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
+{% elif email.enabled and email.mailbox.paused %}
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>Your mailbox is paused</strong>: <span class="agent-reason">{{ email.mailbox.pause_reason or "no details given" }}</span> <a href="/mailbox#status">Mailbox settings{{ m.icon("chevron-right", 12) }}</a></p></div>
+{% elif email.enabled and email.mailbox.inbox_error %}
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>OpenBerry can't read your inbox</strong>, so it sends no email: <span class="agent-reason">{{ email.mailbox.inbox_error }}</span> <a href="/mailbox#status">Mailbox settings{{ m.icon("chevron-right", 12) }}</a></p></div>
+{% endif %}
+{% if email.attention %}
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}{% set one = email.attention|length == 1 %}<p><strong>{{ email.attention|length|plural("email") }} from your mailbox need{{ "s" if one }} you:</strong> {{ "it" if one else "they" }} may have been sent, or sending failed. <a href="{{ base }}/outreach#email">Check {{ "it" if one else "them" }} on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
+{% endif %}
+{% if email.hints %}
+{# One row per lead to decide on: a colleague's note about several leads is on each of them, so leads are counted. #}
+<section class="card hint-card" aria-labelledby="hints-title">
+  <header class="card-head"><div><h2 id="hints-title" class="title-icon">{{ m.icon("alert") }}{{ email.hints|map(attribute="lead_id")|unique|list|length|plural("lead") }} may not want to be emailed again</h2>
+    <p class="card-sub">Each reply already stopped that lead's emails. Say whether it is an opt-out.</p></div></header>
+  <ul class="list email-attention">
+    {% for msg in email.hints[:5] %}
+    {% set lead = hint_leads.get(msg.lead_id) %}
+    <li class="list-item"><div class="min0 grow">
+      <a class="lead-name" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}Lead {{ msg.lead_id }}{% endif %}</a>
+      {{ m.opt_out_hint(msg, base, msg.email_from if lead and msg.email_from and msg.email_from != lead.email|lower else "") }}
+    </div></li>
+    {% endfor %}
+  </ul>
+  {% if email.hints|length > 5 %}<p class="small muted">+{{ email.hints|length - 5 }} more on the <a href="{{ base }}/outreach#email">Outreach page</a>.</p>{% endif %}
+</section>
+{% endif %}
 
 <section class="kpis" aria-label="Key numbers">
   {% for k in kpis %}
@@ -50,6 +77,9 @@
 </section>
 {% if agent.enabled and not agent.paused %}
 <p class="agent-line">{{ m.icon("bot", 15) }}<span>AI agent sending is on: <strong>{{ agent.sent_last_24h }} of {{ agent.daily_limit }}</strong> LinkedIn messages sent in the last 24 hours{% if agent.state == "limit" %}, daily limit reached{% else %} · {{ agent.eligible_total }} queued{% endif %}.</span> <a href="{{ base }}/outreach#agent">Outreach{{ m.icon("chevron-right", 12) }}</a></p>
+{% endif %}
+{% if email.enabled %}
+<p class="agent-line{% if email.state not in ('on', 'outside_hours') %} agent-line-held{% endif %}">{{ m.icon("mail", 15) }}<span>Email sending is {{ email.phrase }}: <strong>{{ email.sent_last_24h }} of {{ email.daily_limit }}</strong> emails sent in the last 24 hours · {{ email.eligible_total }} queued.</span> <a href="{{ base }}/outreach#email">Outreach{{ m.icon("chevron-right", 12) }}</a></p>
 {% endif %}
 
 <div class="dash-grid">
@@ -173,6 +203,7 @@
     {% else %}
       {% call m.empty("zap", "No signals yet") %}<p>They show up here as soon as a scan finds something.</p>{% endcall %}
     {% endif %}
+    {% if stats.businesses_7d %}<p class="small muted">Also {{ stats.businesses_7d|plural("business", "businesses") }} found on Google Maps in the last 7 days. <a href="{{ base }}/leads?source=google_places">See them</a></p>{% endif %}
   </section>
 
   <div class="dash-col">
@@ -211,6 +242,7 @@
               {% elif s.configured %}<span class="pill pill-off">Signal types off</span>
               {% else %}<span class="pill pill-off">Needs setup</span>{% endif %}</p>
             {% if not s.enabled %}<p class="small muted">Needs {{ s.requires }}. <a href="{{ s.setup_url or base ~ '/settings#step-signals' }}">Set up</a></p>{% endif %}
+            {% if s.usage and (s.enabled or s.usage.api_key_set) %}<p class="small muted source-usage">{{ s.usage.searches_used_this_month|compact }} of {{ s.usage.monthly_limit|compact }} searches used this month</p>{% endif %}
           </div>
         </li>
         {% endfor %}
@@ -226,9 +258,9 @@
         <thead><tr><th scope="col">Started</th><th scope="col">Trigger</th><th scope="col">Status</th><th scope="col" class="num">New signals</th><th scope="col" class="num">New leads</th><th scope="col" class="hide-sm">Duration</th><th scope="col">Issues</th></tr></thead>
         <tbody>
           {% for r in runs %}
-          <tr>
+          <tr{% if r.places %} class="has-detail"{% endif %}>
             <td class="nowrap">{{ m.when(r.run.started_at) }}</td>
-            <td>{{ r.run.trigger|capitalize }}</td>
+            <td>{{ {"cli": "Command line", "api": "API"}.get(r.run.trigger, r.run.trigger|capitalize) }}</td>
             <td><span class="pill pill-run-{{ r.run.status if r.run.status in SCAN_STATUS_LABELS else 'other' }}">{{ r.run.status|scan_status }}</span></td>
             <td class="num">{{ r.signals_new if r.signals_new is not none else "—" }}</td>
             <td class="num">{{ r.leads_new if r.leads_new is not none else "—" }}</td>
@@ -242,6 +274,7 @@
               {% else %}<span class="muted">None</span>{% endif %}
             </td>
           </tr>
+          {% if r.places %}<tr class="run-detail"><td colspan="7"><p class="small muted">{{ r.places }}</p></td></tr>{% endif %}
           {% endfor %}
         </tbody>
       </table>

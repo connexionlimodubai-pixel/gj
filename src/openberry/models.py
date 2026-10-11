@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 # --------------------------------------------------------------------------------------
 # Vocabularies
@@ -24,12 +24,17 @@ SIGNAL_TYPES: dict[str, tuple[str, int]] = {
     "profile_visit": ("Visited your profile or website", 35),
     "event": ("Attending a relevant event", 15),
     "company_news": ("Company in the news", 15),
+    # Not intent: the business matched a search the user set up (a prospect list). Scored mostly on ICP fit.
+    "business_search": ("Matches a business search you set up", 10),
     "custom": ("Other signal", 15),
 }
+# Signal types that only say where a lead was found. They are not offered under "Signal types to track"
+# (the searches themselves are the opt-in) and never count toward signal stacking.
+PROSPECT_TYPES = ("business_search",)
 
 SIGNAL_SOURCES = (
     "hackernews", "reddit", "github", "greenhouse", "lever", "ashby",
-    "google_news", "rss", "sec_edgar", "linkedin", "web", "manual", "claude", "csv", "demo",
+    "google_news", "rss", "sec_edgar", "google_places", "linkedin", "web", "manual", "claude", "csv",
 )
 
 SENIORITIES: dict[str, str] = {
@@ -60,12 +65,40 @@ SCAN_STATUSES: dict[str, str] = {
     "nothing_configured": "No sources configured",
 }
 JOB_BOARD_PROVIDERS = ("greenhouse", "lever", "ashby")
-# Channels an AI agent may send through the send queue (email is always sent by the user).
+# Channels an AI agent may send through the send queue (never email: OpenBerry's own email sending does that).
 AGENT_CHANNELS = ("linkedin_connect", "linkedin_dm")
 # Message.sent_via: who recorded the send. "" = the user (dashboard, API, CSV), "agent" = confirm_message_sent,
-# "claude" = Claude marked it sent with update_message (counts toward the agent's daily limit too).
-SENT_VIA = ("", "agent", "claude")
+# "claude" = Claude marked it sent with update_message (counts toward the agent's daily limit too), "smtp" =
+# OpenBerry sent it from the user's own mailbox (email sending, repo.record_email_sent).
+SENT_VIA = ("", "agent", "claude", "smtp")
+SENT_VIA_SMTP = "smtp"
 AGENT_PAUSE_REASON_MAX = 500
+FOLLOWUP_DAYS_RANGE = (1, 90)  # days to wait before a follow-up (outreach.followup_days)
+# OutreachConfig fields of auto-approve: changed on the dashboard's Outreach page only (repo.update_company keeps them
+# on a profile save; Claude and the JSON API may only turn it off or make the window longer).
+AUTO_APPROVE_SETTINGS = ("auto_approve", "auto_approve_hours", "auto_approve_since")
+# Message.approved_via: "auto" = auto-approve approved it (repo.auto_approve_due), "" = a person did.
+APPROVED_VIA_AUTO = "auto"
+# OutreachConfig fields of email sending: changed on the Outreach page's Email sending card only (repo.update_company
+# keeps them on a profile save; Claude and the JSON API may only turn it off, lower the daily limit, space emails
+# further apart or stop auto-approved emails being sent).
+EMAIL_SETTINGS = ("email_sending", "email_daily_limit", "email_gap_minutes", "email_days", "email_start_hour",
+                  "email_end_hour", "email_footer", "email_send_auto_approved", "email_paused_until",
+                  "email_pause_reason")
+EMAIL_FOOTER_MAX = 600
+# The fewest minutes between two emails: Zoho Mail (and most providers) forbid bursts, and limit a new mailbox to
+# about 50 emails an hour.
+EMAIL_GAP_MIN = 5
+# Message.email_state of an outbound email OpenBerry sends from the user's mailbox (repo.claim_next_email):
+# "" not tried (or back in the queue), "claimed" being prepared, "data" the mail server is receiving it, "sent",
+# "failed" (the reason in send_error), "unknown" (the connection broke while the server was receiving it: it may have
+# gone out, so it is never sent again automatically), "bounced" (sent, then a hard bounce came back).
+EMAIL_STATES = ("", "claimed", "data", "sent", "failed", "unknown", "bounced")
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+# Google Maps searches (SignalConfig.places_queries) a profile may hold, and their length.
+MAX_PLACES_QUERIES = 30
+MAX_PLACES_QUERY_CHARS = 200
 
 
 # --------------------------------------------------------------------------------------
@@ -97,8 +130,54 @@ def split_list(value: Any) -> list[str]:
 StrList = Annotated[list[str], BeforeValidator(split_list)]
 
 
+def split_lines(value: Any) -> list[str]:
+    """Like split_list, but only line breaks separate items: a search may contain commas ("law firms in DIFC, Dubai").
+
+    Whitespace inside an item collapses to single spaces; duplicates (case-insensitive) and blanks are dropped.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts: list[Any] = re.split(r"\r\n|\r|\n", value)
+    elif isinstance(value, (list, tuple)):
+        parts = []
+        for item in value:
+            parts.extend(split_lines(item) if isinstance(item, str) else [item])
+    else:
+        parts = [value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = " ".join(str(part).split())
+        if text and text.casefold() not in seen:
+            seen.add(text.casefold())
+            out.append(text)
+    return out
+
+
+LineList = Annotated[list[str], BeforeValidator(split_lines)]
+
+
 def _blank_to_none(value: Any) -> Any:
     return None if isinstance(value, str) and not value.strip() else value
+
+
+def _weekdays(value: Any) -> Any:
+    """0 (Monday) to 6 (Sunday), sorted and deduplicated; also accepts "Mon, Tue" and "0,1"."""
+    if isinstance(value, str):
+        value = split_list(value)
+    if not isinstance(value, (list, tuple, set)):
+        return value
+    days: set[int] = set()
+    for item in value:
+        text = str(item).strip()
+        if text.isdecimal() and int(text) < len(WEEKDAYS):
+            days.add(int(text))
+        elif text[:3].title() in WEEKDAYS:
+            days.add(WEEKDAYS.index(text[:3].title()))
+        else:
+            raise ValueError(f"unknown weekday {text!r}: use 0 (Monday) to 6 (Sunday)")
+    return sorted(days)
 
 
 class _Model(BaseModel):
@@ -157,7 +236,8 @@ def parse_job_boards(value: Any) -> list[dict[str, str]] | Any:
 class SignalConfig(_Model):
     """What to watch. Each list feeds one or more collectors."""
 
-    enabled_types: StrList = Field(default_factory=lambda: list(SIGNAL_TYPES), description="Signal types to track")
+    enabled_types: StrList = Field(default_factory=lambda: [t for t in SIGNAL_TYPES if t not in PROSPECT_TYPES],
+                                   description="Signal types to track")
     keywords: StrList = Field(default_factory=list, description="Topics to monitor on HN/Reddit/news, e.g. 'corporate chauffeur'")
     subreddits: StrList = Field(default_factory=list, description="Subreddits to watch (without r/)")
     github_repos: StrList = Field(default_factory=list, description="owner/repo of competitor or related repos: issue authors and forkers become leads (stargazers only for repos you admin, with GITHUB_TOKEN)")
@@ -166,6 +246,11 @@ class SignalConfig(_Model):
     news_queries: StrList = Field(default_factory=list, description="Google News queries, e.g. 'raises Series A fintech'")
     rss_feeds: StrList = Field(default_factory=list, description="Any RSS/Atom feed URLs to scan for keywords")
     sec_queries: StrList = Field(default_factory=list, description="SEC EDGAR full-text queries (US companies). Form D funding filings match names, places, people and industry labels (e.g. 'Other Technology', 'Texas'); 8-K executive changes match topical phrases (e.g. 'logistics software')")
+    places_queries: LineList = Field(default_factory=list, description=(
+        "Google Maps searches, one per line, as typed in Google Maps, e.g. 'event management companies in Dubai'. "
+        "Each business found becomes an account lead with the email and phone its own website lists. Needs a "
+        f"Google Maps API key, which the user adds in the dashboard. At most {MAX_PLACES_QUERIES}, each under "
+        f"{MAX_PLACES_QUERY_CHARS} characters"))
     influencers: StrList = Field(default_factory=list, description="LinkedIn profile URLs whose post engagers Claude should check")
     competitor_pages: StrList = Field(default_factory=list, description="Competitor LinkedIn/company pages whose engagers Claude should check")
     events: StrList = Field(default_factory=list, description="Events/webinars whose attendees are good leads")
@@ -187,6 +272,15 @@ class SignalConfig(_Model):
                 out.append(repo)
         return out
 
+    @field_validator("places_queries")
+    @classmethod
+    def _check_places_queries(cls, v: list[str]) -> list[str]:
+        if len(v) > MAX_PLACES_QUERIES:
+            raise ValueError(f"At most {MAX_PLACES_QUERIES} Google Maps searches")
+        if any(len(q) > MAX_PLACES_QUERY_CHARS for q in v):
+            raise ValueError(f"Keep each Google Maps search under {MAX_PLACES_QUERY_CHARS} characters")
+        return v
+
     @field_validator("weights")
     @classmethod
     def _clamp_weights(cls, v: dict[str, int]) -> dict[str, int]:
@@ -204,9 +298,14 @@ class OutreachConfig(_Model):
     signature: str = ""
     max_followups: int = Field(default=2, ge=0, le=6)
     followup_days: Annotated[list[int], BeforeValidator(lambda v: [int(x) for x in split_list(v)] if isinstance(v, str) else v)] = Field(
-        default_factory=lambda: [3, 7], description="Days to wait after each sent message before the next follow-up is due")
+        default_factory=lambda: [3, 7], description="Days to wait after each sent message before the next follow-up "
+                                                    f"is due ({FOLLOWUP_DAYS_RANGE[0]} to {FOLLOWUP_DAYS_RANGE[1]})")
     mode: Literal["review", "auto_draft"] = Field(
-        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot lead, however it turned hot (scan, Claude, import or edit). Nothing is ever sent automatically.")
+        default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot "
+                                      "lead, however it turned hot (scan, Claude, import or edit). Drafts are never "
+                                      "sent: a person approves them (or auto_approve does, if the user turned it on) "
+                                      "and sends them, lets their own AI agent send approved LinkedIn messages, or "
+                                      "lets OpenBerry email approved emails from their mailbox (email_sending).")
     banned_words: StrList = Field(default_factory=list, description="Words/phrases messages must never use")
     extra_instructions: str = Field(default="", description="Anything Claude must respect when writing messages")
     # LinkedIn's own limits on connection-request notes depend on the account (LinkedIn help a563153, a6239760):
@@ -218,27 +317,80 @@ class OutreachConfig(_Model):
     # AI agent sending: an MCP-capable browser agent in the user's own browser sends the LinkedIn messages the
     # user approved, through the send queue (repo.send_queue). These four are changed in the dashboard only.
     agent_sending: bool = Field(
-        default=False, description="Let an AI agent in your own browser send the LinkedIn messages you approved")
+        default=False, description="Let an AI agent in your own browser send approved LinkedIn messages")
     agent_daily_limit: int = Field(
         default=15, ge=1, le=50, description="Most LinkedIn messages the agent may send in any 24 hours")
     agent_paused_until: datetime | None = Field(
         default=None, description="Agent sending is paused until then (the agent reported a problem)")
     agent_pause_reason: str = Field(default="", description="The problem the agent reported")
+    # Auto-approve (repo.auto_approve_due): a draft the user doesn't approve, hold or skip is approved once its
+    # review window has passed (an edit starts the window again). Off by default, and like agent sending only the
+    # dashboard turns it on.
+    auto_approve: bool = Field(
+        default=False, description="Approve drafts automatically once they have waited auto_approve_hours for you")
+    auto_approve_hours: int = Field(
+        default=2, ge=1, le=72, description="Hours a draft waits for you after it was written or last edited")
+    auto_approve_since: datetime | None = Field(
+        default=None, description="When auto-approve was turned on: drafts written before get the full window from "
+                                  "then")
+
+    # Email sending (repo.email_queue / repo.claim_next_email): OpenBerry sends the approved emails from the user's own
+    # mailbox (the Mailbox page), exactly as approved plus the footer. Off by default, and only the dashboard turns it
+    # on, raises the limits, widens the sending hours, changes the footer or resumes a pause.
+    email_sending: bool = Field(
+        default=False, description="Send approved emails from the user's own mailbox (the dashboard's Mailbox page)")
+    email_daily_limit: int = Field(
+        default=30, ge=1, le=100, description="Most emails sent from the mailbox for this company in any 24 hours")
+    email_gap_minutes: int = Field(
+        default=5, ge=EMAIL_GAP_MIN, le=240,
+        description="At least this many minutes between two emails from the mailbox (5 or more)")
+    email_days: Annotated[list[int], BeforeValidator(lambda v: _weekdays(v))] = Field(
+        default_factory=lambda: [0, 1, 2, 3, 4], description="Days emails may go out: 0 = Monday ... 6 = Sunday")
+    email_start_hour: int = Field(default=9, ge=0, le=23, description="Sending hours start (local time)")
+    email_end_hour: int = Field(default=18, ge=1, le=24, description="Sending hours end (local time)")
+    email_footer: str = Field(
+        default="", max_length=EMAIL_FOOTER_MAX, description="Added under every email when it is sent: who you are, "
+                                                             "your business address and how to opt out")
+    email_send_auto_approved: bool = Field(
+        default=False, description="Also send emails that auto-approve approved (nobody read them)")
+    email_paused_until: datetime | None = Field(
+        default=None, description="Email sending is paused until then (bounces or the mail provider refusing)")
+    email_pause_reason: str = Field(default="", description="Why email sending paused")
 
     @field_validator("linkedin_account", mode="before")
     @classmethod
     def _account_word(cls, v: Any) -> Any:
         return v.strip().lower() if isinstance(v, str) else v
 
-    @field_validator("agent_paused_until")
+    @field_validator("agent_paused_until", "auto_approve_since", "email_paused_until")
     @classmethod
-    def _utc_pause(cls, v: datetime | None) -> datetime | None:
+    def _utc_times(cls, v: datetime | None) -> datetime | None:
         return v.replace(tzinfo=timezone.utc) if v is not None and v.tzinfo is None else v
 
-    @field_validator("agent_pause_reason")
+    @field_validator("agent_pause_reason", "email_pause_reason")
     @classmethod
     def _short_reason(cls, v: str) -> str:
         return v[:AGENT_PAUSE_REASON_MAX]
+
+    @field_validator("followup_days")
+    @classmethod
+    def _real_waits(cls, v: list[int]) -> list[int]:
+        # A follow-up goes out only once its wait has passed: never 0 or negative days (a profile saved by an older
+        # version keeps loading, with its waits brought into range).
+        low, high = FOLLOWUP_DAYS_RANGE
+        return [max(low, min(high, int(days))) for days in v]
+
+    @field_validator("email_footer", mode="before")
+    @classmethod
+    def _footer_lines(cls, v: Any) -> Any:
+        # As message bodies are stored (repo.message_text): LF line breaks, the ends trimmed.
+        return v.replace("\r\n", "\n").replace("\r", "\n").strip() if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _hours_in_order(self) -> "OutreachConfig":
+        if self.email_end_hour <= self.email_start_hour:
+            raise ValueError("email sending hours must end after they start")
+        return self
 
 
 class NotifyConfig(_Model):
@@ -418,7 +570,24 @@ class Message(_Model):
     updated_at: datetime
     sent_at: datetime | None = None
     sent_via: str = Field(default="", description="'' = marked sent by the user, 'agent' = the AI agent sent it, "
-                                                   "'claude' = Claude marked it sent")
+                                                   "'claude' = Claude marked it sent, 'smtp' = OpenBerry sent it from "
+                                                   "the user's mailbox")
+    auto_hold: bool = Field(default=False, description="The user held this draft: auto-approve never approves it")
+    approved_via: str = Field(default="", description="'auto' = auto-approve approved it after its review window, "
+                                                       "'' = a person did (or it isn't approved)")
+    auto_blocked: bool = Field(default=False, description="Auto-approve found a reason not to approve this draft: once "
+                                                          "the reason goes away, it waits a full review window again")
+    # Email sending (schema version 5): outbound emails OpenBerry sends from the user's mailbox.
+    email_state: str = Field(default="", description="'' | claimed | data | sent | failed | unknown | bounced")
+    email_message_id: str | None = Field(default=None, description="The Message-ID header OpenBerry gave the email")
+    email_to: str = Field(default="", description="The address it was sent to (the lead's email may change later)")
+    email_claim: str = ""
+    email_claimed_at: datetime | None = None
+    email_attempts: int = 0
+    send_error: str = Field(default="", description="Why sending it failed, in plain words")
+    email_from: str = Field(default="", description="A reply read in the inbox: the address that wrote it")
+    opt_out_hint: str = Field(default="", description="A reply read in the inbox: words that look like an opt-out, "
+                                                      "waiting for the user to say whether it is one")
 
 
 class ScanRun(_Model):

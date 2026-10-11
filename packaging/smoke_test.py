@@ -3,11 +3,12 @@
 With a fresh, temporary OPENBERRY_HOME (your own data is never touched) it runs, in order:
 
   1. `openberry-cli --version`
-  2. `openberry-cli demo`                      the database and the demo data
-  3. `openberry-cli serve --port <free>`       /healthz, the demo dashboard /c/1, /help and a static file
-  4. `openberry-cli mcp`                       what Claude Desktop starts: an MCP handshake over stdio,
-                                               tools/list (24 tools) and a tool call that sees the demo company
-  5. `OpenBerry --smoke` (if given)            the app's executable starts its server, checks it and stops;
+  2. `openberry-cli serve --port <free>`       /healthz; registers a company and a lead through the JSON API
+                                               (the real HTTP write path), then the dashboard /c/1, the lead
+                                               page, /help and a static file
+  3. `openberry-cli mcp`                       what Claude Desktop starts: an MCP handshake over stdio,
+                                               tools/list (25 tools) and a tool call that sees that company
+  4. `OpenBerry --smoke` (if given)            the app's executable starts its server, checks it and stops;
                                                a windowed Windows app has no console, so its log file counts too
 
 It stops at the first failure and exits 1 with a message saying what broke. It needs only the
@@ -33,7 +34,7 @@ from pathlib import Path
 from typing import IO, Any
 
 PROTOCOL_VERSION = "2025-06-18"
-EXPECTED_TOOLS = 24
+EXPECTED_TOOLS = 25
 COMMAND_TIMEOUT = 120.0  # seconds; a first start of a packaged app can be slow (antivirus scans on Windows)
 SERVER_TIMEOUT = 90.0
 MCP_TIMEOUT = 60.0
@@ -93,11 +94,18 @@ def expect_success(result: subprocess.CompletedProcess[str], what: str) -> str:
     return result.stdout
 
 
-def http_get(url: str, timeout: float = 10.0) -> tuple[int, str]:
-    """GET `url` directly (never through a proxy): (status, body). Raises OSError if it can't connect."""
+def http_get(url: str, timeout: float = 10.0, data: Any = None) -> tuple[int, str]:
+    """GET `url` directly (never through a proxy): (status, body). Raises OSError if it can't connect.
+
+    With `data`, POST it as JSON instead.
+    """
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(url)
+    if data is not None:
+        request = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), method="POST",
+                                         headers={"Content-Type": "application/json"})
     try:
-        with opener.open(url, timeout=timeout) as resp:
+        with opener.open(request, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
@@ -200,20 +208,39 @@ def check_version(cli: Path, env: Mapping[str, str], cwd: Path) -> str:
     return out
 
 
-def check_demo(cli: Path, env: Mapping[str, str], cwd: Path) -> str:
-    out = expect_success(run([str(cli), "demo"], env, cwd), "demo")
-    if "Demo company created with id 1" not in out:
-        raise SmokeFailure(f"demo printed {tail(out)!r}, expected 'Demo company created with id 1'")
-    return "demo company 1 created"
+# What check_serve registers through the JSON API. No signal sources are configured, so nothing is scanned.
+SMOKE_COMPANY = {"name": "Smoke Test Co"}
+SMOKE_LEAD = {
+    "full_name": "Smoke Test Lead", "title": "Travel Manager", "lead_company": "Smoke Test Client",
+    "email": "smoke.lead@example.com",
+    "signals": [{"type": "keyword_mention", "title": "Looking for a chauffeur service", "strength": 60}],
+}
 
 
 def server_pages(cli: Path) -> list[tuple[str, str]]:
     """(path, text the page must contain) for each page `serve` must answer."""
     return [
-        ("/c/1", "Demo"),  # the demo company's dashboard: templates, database and the demo data
+        ("/c/1", SMOKE_COMPANY["name"]),  # the dashboard: templates, database and what the API just wrote
+        ("/c/1/leads/1", SMOKE_LEAD["full_name"]),
         ("/help", cli.name),  # Claude Desktop's config starts this very command line (bundled_cli)
         ("/static/app.css", "--"),  # static files are bundled
     ]
+
+
+def seed_through_api(url: str) -> None:
+    """Register company 1 and its lead 1 with the JSON API (open to scripts in local mode)."""
+    for path, data, key in (("/api/companies", SMOKE_COMPANY, None), ("/api/companies/1/leads", SMOKE_LEAD, "lead")):
+        status, body = http_get(url + path, data=data)
+        if status != 201:
+            raise SmokeFailure(f"POST {path} answered {status}: {tail(body, 500)}")
+        try:
+            answer = json.loads(body)
+            created = answer[key] if key else answer
+            created_id = created["id"]
+        except (ValueError, KeyError, TypeError):
+            raise SmokeFailure(f"POST {path} answered {tail(body, 500)!r}") from None
+        if created_id != 1:
+            raise SmokeFailure(f"POST {path} created id {created_id!r}, expected 1 in a new data folder")
 
 
 def check_serve(cli: Path, env: Mapping[str, str], cwd: Path) -> str:
@@ -228,6 +255,7 @@ def check_serve(cli: Path, env: Mapping[str, str], cwd: Path) -> str:
     pump.start()
     try:
         wait_until_healthy(url, proc)
+        seed_through_api(url)
         for path, expected in pages:
             status, body = http_get(url + path)
             if status != 200:
@@ -239,7 +267,7 @@ def check_serve(cli: Path, env: Mapping[str, str], cwd: Path) -> str:
         pump.join(5)
         raise SmokeFailure(f"serve: {exc}\nserver output: {tail(''.join(output))}") from exc
     stop(proc)
-    return f"served {', '.join(path for path, _ in pages)} at {url}"
+    return f"registered a company and a lead, served {', '.join(path for path, _ in pages)} at {url}"
 
 
 def check_mcp(cli: Path, env: Mapping[str, str], cwd: Path, expected_tools: int = EXPECTED_TOOLS) -> str:
@@ -272,7 +300,7 @@ def check_mcp(cli: Path, env: Mapping[str, str], cwd: Path, expected_tools: int 
         called = jsonrpc_response(reader, 3)["result"]
         companies = (called.get("structuredContent") or {}).get("companies") or []
         if called.get("isError") or not companies:
-            raise SmokeFailure(f"list_companies did not see the demo company: {json.dumps(called)[:500]}")
+            raise SmokeFailure(f"list_companies did not see the registered company: {json.dumps(called)[:500]}")
         proc.stdin.close()  # Claude Desktop closes stdin to stop the server
         proc.wait(timeout=30)
     except (SmokeFailure, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
@@ -306,7 +334,6 @@ def checks_for(cli: Path, app: Path | None, home: Path, cwd: Path,
     env = clean_env(home)
     checks: list[tuple[str, Callable[[], str]]] = [
         ("version", lambda: check_version(cli, env, cwd)),
-        ("demo", lambda: check_demo(cli, env, cwd)),
         ("serve", lambda: check_serve(cli, env, cwd)),
         ("mcp", lambda: check_mcp(cli, env, cwd, expected_tools)),
     ]
@@ -329,7 +356,7 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
                                      description="Check a built OpenBerry app end to end.")
     parser.add_argument("cli", type=executable, help="the console executable, e.g. dist/OpenBerry/openberry-cli")
     parser.add_argument("app", type=executable, nargs="?", help="the app's executable, e.g. dist/OpenBerry/OpenBerry")
-    parser.add_argument("--expect-tools", type=int, default=EXPECTED_TOOLS, help="MCP tools expected (default: 24)")
+    parser.add_argument("--expect-tools", type=int, default=EXPECTED_TOOLS, help="MCP tools expected (default: 25)")
     return parser.parse_args(argv)
 
 

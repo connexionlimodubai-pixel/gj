@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import zlib
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -123,21 +124,51 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
             resp.raise_for_status()
             if "html" not in resp.headers.get("content-type", "html"):
                 raise UnsafeURL("URL did not return an HTML page")
-            body = await _read_capped(resp, MAX_BYTES)
+            body = await read_capped(resp, MAX_BYTES)
             return parse_page(body.decode(resp.encoding or "utf-8", errors="replace"), str(resp.url))
     raise UnsafeURL("too many redirects")
 
 
-async def _read_capped(resp: httpx.Response, limit: int) -> bytes:
-    """The first `limit` bytes of the body; the rest is never downloaded."""
+async def read_capped(resp: httpx.Response, limit: int) -> bytes:
+    """The first `limit` bytes of the body, decompressed; the rest is never downloaded.
+
+    The body is decompressed here, at most `limit` bytes of it: httpx's aiter_bytes() decompresses each received
+    chunk in full, so 300 KB of gzip could become 300 MB in memory. Raises httpx.DecodingError for an encoding we
+    didn't ask for (we send Accept-Encoding: gzip, deflate) or a broken body.
+    """
+    if resp.is_stream_consumed:  # a body that was already in memory (httpx.Response(content=...)), decoded
+        return resp.content[:limit]
+    encoding = resp.headers.get("content-encoding", "").strip().lower()
+    plain = encoding in ("", "identity")
+    if not plain and encoding not in ("gzip", "x-gzip", "deflate"):  # "br", "gzip, gzip"...
+        raise httpx.DecodingError(f"unsupported content encoding {encoding[:40]!r}", request=resp.request)
+    decoder: Any = None
+    head = b""
     chunks: list[bytes] = []
     size = 0
-    async for chunk in resp.aiter_bytes():
-        chunks.append(chunk)
-        size += len(chunk)
+    async for raw in resp.aiter_raw():
+        data = raw
+        if not plain:
+            if decoder is None:  # the first two bytes say which header the body has
+                head += raw
+                if len(head) < 2:
+                    continue
+                raw, head = head, b""
+                zlib_header = raw[0] & 0x0F == 8 and int.from_bytes(raw[:2], "big") % 31 == 0
+                # 47 = 32 + 15: a gzip or a zlib header; -15: "deflate" without its zlib header, as some servers send
+                decoder = zlib.decompressobj(47 if encoding != "deflate" or zlib_header else -15)
+            try:
+                data = decoder.decompress(raw, limit - size)
+            except zlib.error as exc:
+                raise httpx.DecodingError(f"broken {encoding} body", request=resp.request) from exc
+        chunks.append(data)
+        size += len(data)
         if size >= limit:
             break
     return b"".join(chunks)[:limit]
+
+
+_read_capped = read_capped  # the old name
 
 
 def suggest_profile(summary: dict[str, Any]) -> dict[str, str]:

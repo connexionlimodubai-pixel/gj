@@ -1,0 +1,10 @@
+# Caddy in front of OpenBerry on a server: HTTPS with a free Let's Encrypt certificate, renewed by itself.
+# Used by `docker compose --profile caddy up -d`. See the README, "Run it on a server".
+#
+# The address is OPENBERRY_BASE_URL from .env, for example https://leads.example.com. Caddy forwards every request to
+# OpenBerry inside Docker and tells it the visitor's own address (X-Forwarded-For) and that the request came over
+# HTTPS (X-Forwarded-Proto). OpenBerry believes these only from OPENBERRY_TRUSTED_PROXIES.
+
+{$OPENBERRY_BASE_URL} {
+	reverse_proxy openberry:8000
+}

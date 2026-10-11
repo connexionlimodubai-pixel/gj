@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from .base import CollectContext, Collector, RawSignal
 from .github import GitHubCollector
+from .google_places import GooglePlacesCollector
 from .hackernews import HackerNewsCollector
 from .jobs import JobBoardsCollector
 from .news import GoogleNewsCollector, RssCollector
@@ -21,6 +22,7 @@ ALL: list[Collector] = [
     GoogleNewsCollector(),
     RssCollector(),
     SecEdgarCollector(),
+    GooglePlacesCollector(),
 ]
 
 COLLECTORS: dict[str, Collector] = {c.name: c for c in ALL}

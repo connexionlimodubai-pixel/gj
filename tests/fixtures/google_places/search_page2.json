@@ -1,0 +1,22 @@
+{
+  "places": [
+    {
+      "id": "ChIJGulfLaw00000005",
+      "websiteUri": "https://gulflaw.ae/en/",
+      "formattedAddress": "GOOGLE-ADDRESS-MARKER, DIFC, Dubai"
+    },
+    {
+      "id": "ChIJPalmcrest000006",
+      "websiteUri": "https://www.palmcrest-hotels.com/en-us/hotels/dxbpm-palmcrest-marina-hotel-dubai/overview/?scid=GOOGLE-UTM-MARKER"
+    },
+    {
+      "id": "ChIJAcmeEvents00001",
+      "websiteUri": "https://www.acme-events.ae/"
+    },
+    {
+      "id": "ChIJDownSite0000007",
+      "websiteUri": "https://down.example-dead.ae/"
+    }
+  ],
+  "nextPageToken": "AeCrKXsPAGETHREE-token_value"
+}

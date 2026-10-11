@@ -24,7 +24,8 @@
         <a class="muted-link small" href="{{ c.website|safe_url }}" target="_blank" rel="noopener noreferrer nofollow">{{ c.website|host or c.website }}</a>
         {% else %}<span class="muted small">No website</span>{% endif %}
       </div>
-      <span class="pill pill-company-{{ 'pending' if pending_review(c) else c.status }}">{{ c|company_status }}</span>
+      {% if card.sample %}<a class="pill pill-sample" href="/c/{{ c.id }}/sample" title="{{ card.sample }}">Sample</a>
+      {% else %}<span class="pill pill-company-{{ 'pending' if pending_review(c) else c.status }}">{{ c|company_status }}</span>{% endif %}
     </div>
     <p class="company-meta">
       {% if c.industry %}<span>{{ m.icon("target", 14) }}{{ c.industry }}</span>{% endif %}
@@ -45,7 +46,7 @@
       <span class="contact">{{ m.icon("user", 14) }}{% if c.contact_name %}{{ c.contact_name }}{% else %}<span class="muted">No contact person</span>{% endif %}{% if c.contact_email %}<span class="muted"> · {{ c.contact_email }}</span>{% endif %}</span>
       <span class="btn-row">
         {% if c.status == "paused" %}
-        <form method="post" action="/c/{{ c.id }}/status">{{ m.csrf() }}<input type="hidden" name="status" value="active"><input type="hidden" name="next" value="/companies">
+        <form method="post" action="/c/{{ c.id }}/status" data-keep-scroll>{{ m.csrf() }}<input type="hidden" name="status" value="active"><input type="hidden" name="next" value="/companies">
           <button class="btn btn-sm" type="submit">{{ m.icon("play", 14) }}Activate</button></form>
         {% endif %}
         <a class="btn btn-sm btn-ghost" href="/c/{{ c.id }}/settings">{{ "Review" if pending_review(c) else "Edit" }}</a>
@@ -61,10 +62,9 @@
 {% else %}
 <div class="card">
   {% call m.empty("board", "No companies registered yet") %}
-  <p>Register your company to start collecting intent signals, or load the demo to look around first.</p>
+  <p>Register your company to start collecting intent signals.</p>
   <div class="btn-row center">
     <a class="btn btn-primary" href="/register">{{ m.icon("plus") }}Register a company</a>
-    <form method="post" action="/demo">{{ m.csrf() }}<button class="btn" type="submit">{{ m.icon("sparkles") }}Load demo data</button></form>
   </div>
   {% endcall %}
 </div>

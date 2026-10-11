@@ -54,12 +54,16 @@ MIN_WINDOW_SIZE = (960, 640)
 LOG_FILE_BYTES = 1_000_000
 LOG_FILE_BACKUPS = 2
 LOCK_FILE = "desktop.lock"
+SERVE_LOCK_FILE = "serve-{pid}.lock"  # held by `openberry serve` (serve_lock)
 SECRET_KEY_FILE = "desktop-secret-key"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 HEALTHZ_APP = "openberry"  # /healthz answers {"ok": true, "app": "openberry"} (web/app.py)
 # First arguments handed to the command line (cli.main), so the packaged app's executable also works
 # as `openberry`: Claude Desktop can start `OpenBerry mcp`, and CI can run `OpenBerry desktop --smoke`.
-CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "demo", "rescore", "init-db", "--version", "-h", "--help"})
+# Any other first argument that isn't an option goes there too, so a typo or a removed command gets
+# argparse's "invalid choice" instead of starting the app.
+CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "rescore", "init-db", "backup", "restore",
+                          "remove-sample", "--version", "-h", "--help"})
 
 
 class DesktopError(RuntimeError):
@@ -106,8 +110,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         import multiprocessing
 
         multiprocessing.freeze_support()  # a packaged Windows app must not re-launch itself for child processes
+    config.private_files()  # the data folder, database, backups and logs: for this user only
     args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] in CLI_COMMANDS:
+    if args and (args[0] in CLI_COMMANDS or not args[0].startswith("-")):  # options (macOS's -psn_...) start the app
         from . import cli
 
         # The windowed executable has no console: `OpenBerry serve` would crash in uvicorn's log setup
@@ -135,7 +140,26 @@ def exit_after(grace: float, code: int) -> threading.Timer:
     return timer
 
 
+EMAIL_EXIT_EXTRA = 5.0  # seconds on top of the email loop's own stop timeout (web/app.py EMAIL_STOP_TIMEOUT)
+
+
+def email_grace() -> float:
+    """How long to wait before stopping the process: while an email is being sent, long enough for the mail server's
+    answer to be recorded (so it is never sent twice, nor shown as "may have been sent"), else 0."""
+    try:
+        from .services import email_in_progress
+        from .web.app import EMAIL_STOP_TIMEOUT
+    except Exception:  # pragma: no cover - a broken install: nothing to wait for
+        return 0.0
+    return EMAIL_STOP_TIMEOUT + EMAIL_EXIT_EXTRA if email_in_progress() else 0.0
+
+
 def _hard_exit(code: int) -> None:
+    if wait := email_grace():
+        log.warning("closing while an email was being sent: waiting up to %.0f seconds for it", wait)
+        deadline = time.monotonic() + wait
+        while email_grace() and time.monotonic() < deadline:
+            time.sleep(0.2)
     log.warning("OpenBerry did not exit within %.0f seconds of closing: stopping it", EXIT_GRACE)
     for handler in logging.getLogger().handlers:
         with contextlib.suppress(Exception):
@@ -161,7 +185,7 @@ def configure_logging(home: Path) -> Path | None:
     if getattr(sys, "frozen", False) or not (_usable(sys.stdout) and _usable(sys.stderr)):
         path = home / "logs" / "desktop.log"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            config.private_dir(path.parent)
             file_handler = RotatingFileHandler(path, maxBytes=LOG_FILE_BYTES, backupCount=LOG_FILE_BACKUPS,
                                                encoding="utf-8")
         except OSError:
@@ -211,7 +235,7 @@ class InstanceLock:
         if self._file is not None:
             return True
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            config.private_dir(self.path.parent)
             fh = open(self.path, "a+b")  # noqa: SIM115 (kept open while the lock is held)
         except OSError as exc:  # can't lock in this folder: start anyway, as without the lock
             log.warning("could not open %s (%s): not checking for another running OpenBerry", self.path, exc)
@@ -253,14 +277,9 @@ def _unlock_windows(fh: IO[bytes]) -> None:
     msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def app_is_running(home: Path) -> bool:
-    """True while an OpenBerry desktop app serves `home`: a process holds its desktop.lock.
-
-    A desktop.json left behind by a crash, a force quit or a power cut names a server that is gone;
-    this tells it apart without connecting anywhere. When the lock file can't be opened it can't
-    tell, and says True (desktop.json is then trusted, as without the lock).
-    """
-    probe = InstanceLock(home / LOCK_FILE)
+def _held(path: Path) -> bool:
+    """True while a process holds the lock on `path`. When the file can't be opened it can't tell, and says True."""
+    probe = InstanceLock(path)
     if not probe.acquire():
         return True
     if not probe.held:
@@ -269,10 +288,32 @@ def app_is_running(home: Path) -> bool:
     return False
 
 
+def app_is_running(home: Path) -> bool:
+    """True while an OpenBerry desktop app serves `home`: a process holds its desktop.lock.
+
+    A desktop.json left behind by a crash, a force quit or a power cut names a server that is gone;
+    this tells it apart without connecting anywhere. When the lock file can't be opened it can't
+    tell, and says True (desktop.json is then trusted, as without the lock).
+    """
+    return _held(home / LOCK_FILE)
+
+
+def serve_lock(home: Path) -> InstanceLock:
+    """The lock `openberry serve` holds while it runs (cli._serve), so a restore can tell it runs: it sends emails.
+    One file per process, OPENBERRY_HOME/serve-<pid>.lock, so two can run at once. Each deletes its own as it stops."""
+    return InstanceLock(home / SERVE_LOCK_FILE.format(pid=os.getpid()))
+
+
+def serve_is_running(home: Path) -> bool:
+    """True while an `openberry serve` serves `home`: a process holds one of its serve-*.lock files (one a crash left
+    behind is free)."""
+    return any(_held(path) for path in home.glob(SERVE_LOCK_FILE.format(pid="*")))
+
+
 def write_state(home: Path, url: str) -> None:
     """Write OPENBERRY_HOME/desktop.json for this process's server (atomically: readers never see half a file)."""
     path = home / DESKTOP_STATE_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
+    config.private_dir(path.parent)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps({"url": url, "pid": os.getpid(), "version": __version__}), encoding="utf-8")
@@ -310,13 +351,16 @@ def is_openberry_health(data: Any) -> bool:
 
 
 def answers_like_openberry(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
-    """True if `url`/healthz answers as OpenBerry's does."""
+    """True if `url`/healthz answers as OpenBerry's does, healthy or not (503: its database has a problem, which its
+    pages then explain)."""
     import httpx
 
     try:
         # trust_env=False: never send a local address through an HTTP(S)_PROXY.
         resp = httpx.get(f"{url}/healthz", timeout=timeout, trust_env=False)
-        return resp.status_code == 200 and is_openberry_health(resp.json())
+        data = resp.json()
+        return (resp.status_code == 200 and is_openberry_health(data)) or (
+            resp.status_code == 503 and isinstance(data, dict) and data.get("app") == HEALTHZ_APP)
     except (httpx.HTTPError, ValueError):
         return False
 
@@ -416,7 +460,7 @@ def persistent_secret_key(home: Path) -> str:
             return key
     key = secrets.token_hex(32)
     try:
-        home.mkdir(parents=True, exist_ok=True)
+        config.private_dir(home)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # readable by this user only
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(key)
@@ -438,6 +482,9 @@ class DashboardServer:
 
     def stop(self, timeout: float = STOP_TIMEOUT) -> None:
         self.server.should_exit = True
+        if grace := email_grace():  # the server's shutdown waits for the email loop: give it the time it needs
+            log.warning("closing while an email was being sent: waiting up to %.0f seconds for it", grace)
+            timeout = max(timeout, grace)
         self.thread.join(timeout)
         if self.thread.is_alive():
             log.warning("the server did not stop within %.0f seconds", timeout)
@@ -636,12 +683,39 @@ def _run_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Eve
         lock.release()
 
 
+def open_data(settings: Settings) -> None:
+    """Create or upgrade the database and check it (PRAGMA quick_check) before the window opens, so a problem with it
+    is shown in a window of its own (show_error) with what to do: a file a newer OpenBerry wrote, an upgrade that
+    couldn't save a copy first, a damaged file."""
+    import sqlite3
+
+    from . import backups, db
+
+    path = settings.db_path
+    try:
+        db.prepare(path)
+        problem = db.quick_check(path)
+    except db.DatabaseProblem as exc:
+        raise DesktopError(str(exc)) from exc
+    except sqlite3.DatabaseError as exc:
+        if (text := db.problem_text(exc, path)) and not text.startswith(db.DAMAGED):
+            raise DesktopError(text) from exc
+        problem = str(exc)
+    if problem:
+        raise DesktopError(
+            f"OpenBerry's data file is damaged (SQLite says: {problem[:200]}). Restore a backup: close this window, "
+            f"open a terminal and run openberry-cli restore with a backup file, such as the newest one in "
+            f"{backups.folder(path).resolve()}. Your data is in {Path(path).resolve().parent}.")
+
+
 def _serve_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Event | None) -> None:
     """Start this process's server, show it, and stop it when the person is done."""
     sock = bind_port(ports)
     url = socket_url(sock)
     try:
-        server = start_server(desktop_settings(url, home), sock)
+        settings = desktop_settings(url, home)
+        open_data(settings)
+        server = start_server(settings, sock)
     except BaseException:
         sock.close()
         raise
@@ -693,6 +767,7 @@ def smoke(home: Path, ports: Sequence[int]) -> int:
     settings = desktop_settings(url, home)
     settings.scheduler_enabled = False  # a check must not start anyone's scheduled scans
     try:
+        open_data(settings)
         server = start_server(settings, sock)
     except BaseException:
         sock.close()

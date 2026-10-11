@@ -1,0 +1,35 @@
+From: MicrosoftExchange329e71ec88ae4615bbc36ab6ce41109e@gulfbank.example
+To: sam@acme-mail.example
+Subject: Undeliverable: Airport transfers for your Dubai office
+Date: Mon, 12 Oct 2026 09:05:00 +0000
+Message-ID: <exchange-ndr-1@gulfbank.example>
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="ndr"
+
+--ndr
+Content-Type: text/plain; charset="utf-8"
+
+Your message to {lead} couldn't be delivered.
+The email address wasn't found at the destination domain.
+
+--ndr
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns;DB9PR01MB1234.eurprd01.prod.outlook.com
+
+Final-recipient: RFC822; {lead}
+Action: failed
+Status: 5.1.10
+Diagnostic-code: smtp;550 5.1.10 RESOLVER.ADR.RecipientNotFound; Recipient not found by SMTP address lookup
+
+--ndr
+Content-Type: message/rfc822
+
+From: Sam Rahman <sam@acme-mail.example>
+To: {lead}
+Subject: Airport transfers for your Dubai office
+Message-ID: {ours}
+
+Hi.
+
+--ndr--

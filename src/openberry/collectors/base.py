@@ -37,9 +37,14 @@ class CollectContext:
     settings: Settings
     warnings: list[str] = field(default_factory=list)
     max_items: int = 200  # per collector per scan, keeps us polite to free APIs
+    # What happened, for the scan stats ("businesses": 40, "no_website": 6...). Not problems: those are warnings.
+    counts: dict[str, int] = field(default_factory=dict)
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
+
+    def count(self, name: str, n: int = 1) -> None:
+        self.counts[name] = self.counts.get(name, 0) + n
 
 
 class Collector(ABC):
@@ -47,6 +52,8 @@ class Collector(ABC):
     label: ClassVar[str]                      # human label for the dashboard
     signal_types: ClassVar[tuple[str, ...]]   # types this collector can emit
     requires: ClassVar[str]                   # what the company must configure, shown in the UI
+    # services.run_scan cancels collect() after this many seconds, losing what it found. None: the default (120).
+    timeout_seconds: ClassVar[float | None] = None
 
     @abstractmethod
     def is_configured(self, company: Company) -> bool:
@@ -59,6 +66,10 @@ class Collector(ABC):
     def enabled_for(self, company: Company) -> bool:
         enabled = set(company.signals.enabled_types)
         return self.is_configured(company) and any(t in enabled for t in self.signal_types)
+
+    def usage(self) -> dict[str, Any] | None:
+        """Paid-API usage to show with the collector (dashboard Sources card, get_company_profile), or None."""
+        return None
 
 
 # --------------------------------------------------------------------------------------

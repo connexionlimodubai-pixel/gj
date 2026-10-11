@@ -1,0 +1,11 @@
+From: Burj View Concierge <concierge@burjviewhotel.example>
+To: Sam Rahman <sam@acme-mail.example>
+Subject: RE: Airport transfers for your guests
+Date: Mon, 12 Oct 2026 14:31:09 +0400
+Message-ID: <html-table-1@burjviewhotel.example>
+MIME-Version: 1.0
+In-Reply-To: <d9ea70a0498506c38a0344322d51bdda@acme-mail.example>
+References: <d9ea70a0498506c38a0344322d51bdda@acme-mail.example>
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>Dear Sam,</p><p>Please arrange the following transfer:</p><table border=1><tr><td>Guest</td><td>Mr. John Carter</td></tr><tr><td>Flight</td><td>BA 107</td></tr><tr><td>Arrival</td><td>15 Oct 19:40, DXB T1</td></tr><tr><td>Drop-off</td><td>Burj View Hotel</td></tr></table><p>Best regards,<br>Concierge Desk</p></body></html>

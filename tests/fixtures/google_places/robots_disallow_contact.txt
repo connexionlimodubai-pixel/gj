@@ -1,0 +1,8 @@
+# Gulf Law Partners
+User-agent: *
+Allow: /
+Disallow: /en/contact
+Crawl-delay: 10
+
+User-agent: GPTBot
+Disallow: /

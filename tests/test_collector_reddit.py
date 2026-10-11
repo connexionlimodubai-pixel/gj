@@ -21,7 +21,7 @@ from openberry.services import ingest
 
 FIXTURES = Path(__file__).parent / "fixtures" / "reddit"
 NOW = datetime.now(timezone.utc)
-TOKEN = json.loads((FIXTURES / "token.json").read_text())["access_token"]
+TOKEN = json.loads((FIXTURES / "token.json").read_text(encoding="utf-8"))["access_token"]
 UA = f"python:openberry:{__version__} (+https://github.com/connexionlimodubai-pixel/gj)"
 SEARCH_PARAMS = {"sort": "new", "t": "month", "type": "link", "limit": "50", "raw_json": "1"}
 RATE_HEADERS = {"x-ratelimit-used": "4", "x-ratelimit-remaining": "96.0", "x-ratelimit-reset": "412"}
@@ -33,7 +33,7 @@ RATE_HEADERS = {"x-ratelimit-used": "4", "x-ratelimit-remaining": "96.0", "x-rat
 
 def listing(name: str) -> dict[str, Any]:
     """Load a Listing fixture and shift its times so the newest post is one hour old."""
-    data = json.loads((FIXTURES / name).read_text())
+    data = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
     children = data["data"]["children"]
     shift = (NOW.timestamp() - 3600) - max(c["data"]["created_utc"] for c in children)
     for child in children:
@@ -176,7 +176,8 @@ async def test_token_request_and_site_wide_searches(company):
     # Competitors first, then keywords; one query per term site-wide, multi-word terms quoted.
     assert [r.url.params["q"] for r in fake.searches] == ["Blacklane", '"Careem Business"', "chauffeur",
                                                          '"corporate travel"']
-    for request, q in zip(fake.searches, ["Blacklane", '"Careem Business"', "chauffeur", '"corporate travel"']):
+    for request, q in zip(fake.searches, ["Blacklane", '"Careem Business"', "chauffeur", '"corporate travel"'],
+                          strict=True):
         assert request.method == "GET"
         assert request.url.scheme == "https" and request.url.host == "oauth.reddit.com"
         assert request.url.path == "/search"
@@ -343,9 +344,9 @@ async def test_no_paging_once_page_reaches_older_posts(company):
 # --------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("response, expected", [
-    (lambda r: httpx.Response(401, json=json.loads((FIXTURES / "token_401.json").read_text())),
+    (lambda r: httpx.Response(401, json=json.loads((FIXTURES / "token_401.json").read_text(encoding="utf-8"))),
      "Reddit: access token request failed (HTTP 401: check REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET); skipped this scan."),
-    (lambda r: httpx.Response(403, text=(FIXTURES / "blocked_403.html").read_text(), headers={"content-type": "text/html"}),
+    (lambda r: httpx.Response(403, text=(FIXTURES / "blocked_403.html").read_text(encoding="utf-8"), headers={"content-type": "text/html"}),
      "Reddit: access token request failed (HTTP 403: blocked, or the app is not approved for Data API access); "
      "skipped this scan."),
     (lambda r: httpx.Response(200, text="<html>maintenance</html>"),
@@ -386,7 +387,7 @@ async def test_token_is_cached_and_dropped_after_401(company):
 
 
 async def test_blocked_403_html_stops_the_scan(company):
-    blocked = (FIXTURES / "blocked_403.html").read_text()
+    blocked = (FIXTURES / "blocked_403.html").read_text(encoding="utf-8")
     fake = FakeReddit(search=lambda request: httpx.Response(403, text=blocked, headers={"content-type": "text/html"}))
     out, ctx = await run(site_wide(company), fake)
     assert out == [] and len(fake.searches) == 1
@@ -395,7 +396,7 @@ async def test_blocked_403_html_stops_the_scan(company):
 
 
 async def test_private_or_missing_subreddit_is_skipped(company):
-    private = json.loads((FIXTURES / "private_403.json").read_text())
+    private = json.loads((FIXTURES / "private_403.json").read_text(encoding="utf-8"))
 
     def search(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/r/secretclub/search":

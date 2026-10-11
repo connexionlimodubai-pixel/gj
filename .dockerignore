@@ -1,5 +1,6 @@
 .venv
 .git
+.github
 data
 *.db
 *.db-*
@@ -8,3 +9,7 @@ data
 __pycache__
 dist
 build
+tests
+scripts
+docs
+packaging

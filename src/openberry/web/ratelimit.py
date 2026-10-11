@@ -1,4 +1,4 @@
-"""In-memory rate limits for the endpoints anonymous visitors can reach: login, public
+"""In-memory rate limits for the endpoints anonymous visitors can reach: login, wrong API tokens, public
 registration and the website auto-fill it uses.
 
 Counts live in the app's process (`app.state.limits`), which matches how OpenBerry runs: one
@@ -97,6 +97,8 @@ class RateLimit:
 class Limits:
     """The app's limits (`app.state.limits`)."""
 
+    # Wrong API tokens (/api and /mcp together): 20 per client per 10 minutes, then 429 until the oldest one expires.
+    token_failures: RateLimit = field(default_factory=lambda: RateLimit(per_client=20, window=600))
     # Failed logins: 5 per client per 10 minutes, then 429 until the oldest one expires.
     # Everyone's failures together also lengthen each failed attempt's delay (see auth.login).
     login_failures: RateLimit = field(default_factory=lambda: RateLimit(per_client=5, window=600))
@@ -105,6 +107,10 @@ class Limits:
     # Anonymous registrations and the website look-ups their form makes.
     register: RateLimit = field(default_factory=lambda: RateLimit(per_client=5, window=60, total=30))
     site_summary: RateLimit = field(default_factory=lambda: RateLimit(per_client=5, window=60, total=30))
+    # The Mailbox page's Send test email (to the user's own address only) and Check inbox: 5 tests and 10 checks in
+    # 10 minutes, for everyone together.
+    test_email: RateLimit = field(default_factory=lambda: RateLimit(per_client=5, window=600, total=5))
+    inbox_check: RateLimit = field(default_factory=lambda: RateLimit(per_client=10, window=600, total=10))
 
 
 def limits(request: Request) -> Limits:

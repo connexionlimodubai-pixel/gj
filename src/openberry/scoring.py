@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .models import COMPANY_SIZES, ICP, SENIORITIES, SIGNAL_TYPES
+from .models import COMPANY_SIZES, ICP, PROSPECT_TYPES, SENIORITIES, SIGNAL_TYPES
 
 # Weights of each ICP criterion. Criteria the company left empty are skipped and the
 # rest re-normalised, so a sparse ICP still produces a meaningful 0-100 score.
@@ -33,6 +33,9 @@ STACKING_WINDOW_DAYS = 30
 HOT_THRESHOLD = 70
 WARM_THRESHOLD = 45
 DISQUALIFIED_MAX_SCORE = 15  # excluded keyword, never-contact company or disqualified status
+# Signal types that say where a lead was found, not that it wants anything: they add their small value but never
+# count toward signal stacking (otherwise being on Google Maps would boost every real signal by 15%).
+NON_INTENT_TYPES = frozenset(PROSPECT_TYPES)
 
 # Common location aliases so "UAE" matches "Dubai, United Arab Emirates" etc.
 LOCATION_ALIASES: dict[str, tuple[str, ...]] = {
@@ -322,7 +325,7 @@ def intent(signals: list[SignalPoint], weights: dict[str, int] | None = None,
         if s.account_level:
             value *= ACCOUNT_SIGNAL_FACTOR
         total += value
-        if age <= STACKING_WINDOW_DAYS:
+        if age <= STACKING_WINDOW_DAYS and s.type not in NON_INTENT_TYPES:
             recent_types.add(s.type)
         label = SIGNAL_TYPES.get(s.type, SIGNAL_TYPES["custom"])[0]
         where = " (company)" if s.account_level else ""

@@ -57,6 +57,9 @@
       <ul class="nav">
         <li><a href="/companies"{% if active == "companies" %} aria-current="page"{% endif %}>{{ m.icon("board") }}Registration board</a></li>
         <li><a href="/register"{% if active == "register" %} aria-current="page"{% endif %}>{{ m.icon("plus") }}Register company</a></li>
+        <li><a href="/keys"{% if active == "keys" %} aria-current="page"{% endif %}>{{ m.icon("key") }}API keys</a></li>
+        <li><a href="/mailbox"{% if active == "mailbox" %} aria-current="page"{% endif %}>{{ m.icon("mail") }}Mailbox</a></li>
+        <li><a href="/data"{% if active == "data" %} aria-current="page"{% endif %}>{{ m.icon("database") }}Your data</a></li>
         <li><a href="/help"{% if active == "help" %} aria-current="page"{% endif %}>{{ m.icon("plug") }}Connect Claude</a></li>
       </ul>
     </nav>
@@ -86,11 +89,18 @@
       {% endfor %}
     </div>
     {% endif %}
+    {% if sample_banner %}
+    <div class="sample-banner" role="note">
+      {{ m.icon("info", 18) }}
+      <p>{{ sample_banner.text }}</p>
+      <a class="btn btn-sm" href="/c/{{ company.id }}/sample">{{ m.icon("trash", 14) }}{{ sample_banner.button }}</a>
+    </div>
+    {% endif %}
     {% block content %}{% endblock %}
   </div>
   <footer class="footer">
     <p>OpenBerry {{ version }} · free and open source · <a href="{{ DOCS_URL }}" target="_blank" rel="noopener noreferrer">Documentation</a>{% if show_nav %} · <a href="/help">Connect Claude &amp; API</a>{% endif %}</p>
-    <p class="muted">OpenBerry drafts; nothing is sent until you approve it.</p>
+    <p class="muted">OpenBerry drafts; nothing is sent until it is approved.</p>
   </footer>
 </main>
 </body>

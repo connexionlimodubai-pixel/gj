@@ -1,0 +1,27 @@
+From: Mail Delivery System <Mailer-Daemon@hostinger.com>
+To: Sam Rahman <sam@acme-mail.example>
+Subject: Warning: message 1tXyZ-0006Ef-4E delayed 24 hours
+Date: Mon, 12 Oct 2026 14:31:09 +0400
+Message-ID: <E1tXyZ-0006Gh-5F@mx1.hostinger.com>
+MIME-Version: 1.0
+In-Reply-To: <1c295a88d04c718c023c45e96bfae437@acme-mail.example>
+References: <1c295a88d04c718c023c45e96bfae437@acme-mail.example>
+Auto-Submitted: auto-replied
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+This message was created automatically by mail delivery software.
+A message that you sent has not yet been delivered to one or more of its
+recipients after more than 24 hours on the queue on mx1.hostinger.com.
+
+The message identifier is:     1tXyZ-0006Ef-4E
+The subject of the message is: Airport transfers for your guests
+
+The address to which the message has not yet been delivered is:
+
+  sales@karama-hotel-apartments.example
+    Delay reason: SMTP error from remote mail server after RCPT TO:<sales@karama-hotel-apartments.example>:
+    451 4.7.1 Greylisted, try again later
+
+No action is required on your part. Delivery attempts will continue for some time, and this warning may be
+repeated at intervals if the message remains undelivered.

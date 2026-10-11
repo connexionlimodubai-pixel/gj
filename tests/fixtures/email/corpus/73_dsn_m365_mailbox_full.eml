@@ -1,0 +1,34 @@
+From: Microsoft Outlook <MicrosoftExchange329e71ec88ae4615bbc36ab6ce41109e@difclegal.onmicrosoft.com>
+To: Sam Rahman <sam@acme-mail.example>
+Subject: Undeliverable: Airport transfers for your guests
+Date: Mon, 12 Oct 2026 14:31:09 +0400
+Message-ID: <dsn_m365_mailbox_full@VI1PR02MB9876.eurprd02.prod.outlook.com>
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary="dsnb"
+
+--dsnb
+Content-Type: text/plain; charset=utf-8
+
+Your message could not be delivered.
+
+--dsnb
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; VI1PR02MB9876.eurprd02.prod.outlook.com
+Arrival-Date: Mon, 12 Oct 2026 10:02:11 +0400
+
+Final-Recipient: rfc822; ceo@difc-legal-partners.example
+Action: failed
+Status: 5.2.2
+Diagnostic-Code: smtp;554 5.2.2 mailbox full; STOREDRV.Deliver.Exception:QuotaExceededException.MapiExceptionShutoffQuotaExceeded
+
+--dsnb
+Content-Type: text/rfc822-headers
+
+From: Sam Rahman <sam@acme-mail.example>
+To: ceo@difc-legal-partners.example
+Subject: Airport transfers for your guests
+Date: Mon, 12 Oct 2026 10:02:11 +0400
+Message-ID: <bd511765257f1a2607c55dbed5159745@acme-mail.example>
+
+--dsnb--

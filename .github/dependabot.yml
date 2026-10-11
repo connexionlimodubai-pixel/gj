@@ -1,0 +1,15 @@
+# Proposes updates for the pinned GitHub Actions (commit SHAs in .github/workflows) and the Docker base images
+# (digests in the Dockerfile). Python packages are locked in uv.lock and updated with `uv lock --upgrade`.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

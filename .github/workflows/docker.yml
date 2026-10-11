@@ -1,0 +1,97 @@
+# Builds the server image (Dockerfile) and runs it the way docker-compose.yml does: its Python packages must be exactly
+# the ones in uv.lock, it must refuse to start without a password, and with one it must turn healthy.
+# Every action is pinned to a commit (the comment names its version; Dependabot proposes updates).
+name: Docker image
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "Caddyfile"
+      - ".dockerignore"
+      - "src/**"
+      - "uv.lock"
+      - "pyproject.toml"
+      - "packaging/docker_check.py"
+      - ".github/workflows/docker.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "Caddyfile"
+      - ".dockerignore"
+      - "src/**"
+      - "uv.lock"
+      - "pyproject.toml"
+      - "packaging/docker_check.py"
+      - ".github/workflows/docker.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    name: Build and run the image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+
+      - name: Check the compose file
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose --profile ollama config --quiet
+          docker compose --profile caddy config --quiet
+
+      - name: Build the image
+        run: docker compose build
+
+      - name: Its packages are the ones in uv.lock
+        run: python3 packaging/docker_check.py openberry:latest
+
+      - name: It refuses to start without a password
+        run: |
+          if output=$(docker run --rm openberry:latest 2>&1); then
+            echo "$output"
+            echo "::error::the image started on 0.0.0.0 without a password"
+            exit 1
+          fi
+          echo "$output"
+          grep -q "OpenBerry has no password" <<< "$output"
+
+      - name: Start it with a password, as docker compose does
+        run: |
+          secret() { python3 -c "import secrets; print(secrets.token_urlsafe(32))"; }
+          {
+            echo "OPENBERRY_PASSWORD=$(secret)"
+            echo "OPENBERRY_SECRET_KEY=$(secret)"
+            echo "OPENBERRY_API_TOKEN=$(secret)"
+          } > .env
+          docker compose up -d --no-build
+
+      - name: It turns healthy
+        run: |
+          status=starting
+          for attempt in $(seq 1 45); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' openberry)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          docker compose logs
+          [ "$status" = healthy ] || { echo "::error::the container is $status"; exit 1; }
+          curl -fsS http://127.0.0.1:8000/healthz | grep -q '"ok":true'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/companies)" = 401
+
+      - name: Stop it
+        if: always()
+        run: docker compose down -v

@@ -161,5 +161,85 @@
 {%- endmacro %}
 
 {% macro sent_via(msg) -%}
-{% set label = msg|sent_via %}{% if label %}<span class="pill pill-sent-via">{{ icon("bot" if msg.sent_via == "agent" else "sparkles", 12) }}{{ label }}</span>{% endif %}
+{% set label = msg|sent_via %}{% if label %}<span class="pill pill-sent-via">{{ icon({"agent": "bot", "smtp": "mail"}.get(msg.sent_via, "sparkles"), 12) }}{{ label }}</span>{% endif %}
+{%- endmacro %}
+
+{# Email sending (web/mail.py email_status): what OpenBerry does with an email from the user's mailbox. `info` is
+   email.info[msg.id]: queued | sending | held or waiting (with the reason) | auto (auto-approved, not allowed) |
+   unknown | failed | bounced. #}
+{% macro email_pill(info) -%}
+{% if info %}
+{% if info.state == "queued" %}<span class="pill pill-email-queued">{{ icon("mail", 12) }}Queued for your mailbox</span>
+{% elif info.state == "sending" %}<span class="pill pill-email-queued">{{ icon("send", 12) }}Sending…</span>
+{% elif info.state == "unknown" %}<span class="pill pill-email-problem">{{ icon("alert", 12) }}May have been sent</span>
+{% elif info.state == "failed" %}<span class="pill pill-email-problem">{{ icon("alert", 12) }}Not sent</span>
+{% elif info.state == "bounced" %}<span class="pill pill-email-problem">{{ icon("alert", 12) }}Bounced</span>
+{% elif info.state == "auto" %}<span class="pill pill-email-held">{{ icon("pause", 12) }}Waits for your OK</span>
+{% endif %}
+{% endif %}
+{%- endmacro %}
+
+{# The lines under an email: why it isn't emailed now, what to do with one that may have been sent or failed, and
+   the footer OpenBerry adds when it sends it (footer: "" while email sending is off). #}
+{% macro email_line(msg, info, footer, next_url) -%}
+{% if info and info.state in ("held", "waiting", "auto") %}
+<p class="email-line email-line-held">{{ icon("pause", 14) }}<span>{% if info.state == "auto" %}Auto-approved: approve it yourself to send it from your mailbox, or allow auto-approved emails on the <a href="/c/{{ msg.company_id }}/outreach#email">Email sending card</a>.{% elif info.state == "waiting" %}Approved. It goes out when OpenBerry can send again: {{ info.reason }}.{% else %}Not emailed now: {{ info.reason }}.{% endif %}</span></p>
+{% elif info and info.state in ("unknown", "failed", "bounced") %}
+<div class="email-line email-line-problem">{{ icon("alert", 14) }}<span>{% if info.state == "unknown" %}{{ maybe_sent_text(info.saves_sent) }}{% elif info.state == "bounced" %}{{ info.reason or "It bounced." }}{% else %}Not sent: {{ info.reason or "no details" }}{% endif %}</span>{% if info.state != "bounced" and (msg.status == "approved" or info.state == "unknown") %}{{ email_actions(msg, next_url, info.dead) }}{% endif %}</div>
+{% endif %}
+{% if footer and msg.channel == "email" and msg.direction == "outbound" and msg.status in ("draft", "approved") and not msg.email_state %}
+<div class="email-footer-preview"><span class="label-sm">Added when sent</span><div class="email-footer-text">{{ footer }}</div></div>
+{% endif %}
+{%- endmacro %}
+
+{# An email that may have been sent. While OpenBerry saves the Sent copies itself (Save a copy: every preset but
+   Gmail), it couldn't for this one, so the Sent folder can't tell: a reply or bounce settles it, else Mark sent. #}
+{% macro maybe_sent_text(saves_sent) -%}
+{% if saves_sent %}It may have been sent: the connection broke while your mail server was receiving it. OpenBerry saves your Sent copies itself and couldn't for this one, so your Sent folder can't tell. A reply or a bounce settles it by itself; if unsure, choose Mark sent (Send again may make it arrive twice).{% else %}It may have been sent: the connection broke while your mail server was receiving it. Check your mailbox's Sent folder, then choose Mark sent or Send again.{% endif %}
+{%- endmacro %}
+
+{# A reply whose words look like an opt-out (repo.record_inbound): it stopped the lead's emails; the user says whether
+   to never email them again. #}
+{% macro opt_out_hint(msg, next_url, who="") -%}
+<div class="email-line email-line-hint" role="status">{{ icon("alert", 14) }}<span><strong>Looks like an opt-out{% if who %} from {{ who }}{% endif %}:</strong> “<bdi>{{ msg.opt_out_hint }}</bdi>”. The reply stopped this lead's emails, but OpenBerry wasn't sure it asks never to be emailed again. You decide.</span>
+<span class="email-actions">
+<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/opt-out" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm" type="submit" name="action" value="confirm" data-confirm="Never email this lead again? Their address goes on your never-email list, for every company, and the lead is disqualified.">{{ icon("ban", 14) }}Never email again</button></form>
+<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/opt-out" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="dismiss">{{ icon("check", 14) }}Not an opt-out</button></form>
+</span>
+</div>
+{%- endmacro %}
+
+{# dead: it failed because the address doesn't exist (it is on the never-email list): Try again can't work. #}
+{% macro email_actions(msg, next_url, dead=false) -%}
+<span class="email-actions">
+{% if msg.email_state == "unknown" %}
+<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/email" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm" type="submit" name="action" value="mark_sent">{{ icon("check", 14) }}Mark sent</button></form>
+<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/email" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="send_again" data-confirm="Send it again? If it did go out the first time, it arrives twice.">{{ icon("refresh", 14) }}Send again</button></form>
+{% elif msg.email_state == "failed" and dead %}
+<a class="btn btn-sm" href="/c/{{ msg.company_id }}/leads/{{ msg.lead_id }}#edit-profile">{{ icon("edit", 14) }}Fix the address</a>
+{% elif msg.email_state == "failed" %}
+<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/email" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm" type="submit" name="action" value="retry">{{ icon("refresh", 14) }}Try again</button></form>
+{% endif %}
+<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="skip">Skip</button></form>
+</span>
+{%- endmacro %}
+
+{% macro approved_via(msg) -%}
+{% if msg.approved_via == "auto" and msg.status in ("approved", "sent", "replied") %}<span class="pill pill-auto-approved" title="Approved automatically after its review window: nobody approved it by hand">{{ icon("clock", 12) }}Auto-approved</span>{% endif %}
+{%- endmacro %}
+
+{# A draft's auto-approve line (repo.auto_approve_states), with Hold or "Let it auto-approve". On the Outreach page
+   the forms keep the user's place across the reload (data-keep-scroll). On the lead page the button belongs to the
+   draft's edit form (form_id), so text typed there is saved with it, not lost. A draft that can't be approved yet
+   can be held too: once the reason goes away, it would wait a new review window and be approved. #}
+{% macro auto_line(msg, auto, next_url, keep_scroll=false, form_id="") -%}
+{% if auto and auto.state != "off" %}
+<div class="auto-line auto-{{ auto.state }}">
+{% if auto.state == "waiting" %}{{ icon("clock", 14) }}<span>Approves automatically at <time datetime="{{ auto.at|iso_dt }}">{{ auto.at|abs_dt }}</time> ({{ auto.at|ago }})</span>
+{% elif auto.state == "held" %}{{ icon("pause", 14) }}<span>On hold: approve it yourself</span>
+{% else %}{{ icon("ban", 14) }}<span>Not approved automatically for now: {{ auto.reason }}</span>{% endif %}
+{% set button %}{% if auto.state == "held" %}<button class="btn btn-sm btn-ghost" type="submit" name="action" value="release"{% if form_id %} form="{{ form_id }}"{% endif %}>{{ icon("play", 14) }}Let it auto-approve</button>{% else %}<button class="btn btn-sm btn-ghost" type="submit" name="action" value="hold"{% if form_id %} form="{{ form_id }}"{% endif %}>{{ icon("pause", 14) }}Hold</button>{% endif %}{% endset %}
+{% if form_id %}{{ button }}{% else %}<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}"{% if keep_scroll %} data-keep-scroll{% endif %}>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}">{{ button }}</form>{% endif %}
+</div>
+{% endif %}
 {%- endmacro %}

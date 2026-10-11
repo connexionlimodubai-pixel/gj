@@ -86,7 +86,8 @@ def healthz(url: str) -> Any:
 
 
 def assert_stopped(url: str) -> None:
-    with pytest.raises(httpx.ConnectError):
+    # Nothing listens any more. Windows retries a refused connection for about two seconds: a timeout there.
+    with pytest.raises((httpx.ConnectError, httpx.ConnectTimeout)):
         httpx.get(f"{url}/healthz", timeout=2, trust_env=False)
 
 
@@ -234,8 +235,9 @@ def lock_holder(home: Path) -> Iterator[desktop.InstanceLock]:
 # --------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("argv", [
-    ["serve", "--port", "9000"], ["mcp"], ["scan", "--company", "1"], ["demo"], ["rescore"], ["init-db"],
+    ["serve", "--port", "9000"], ["mcp"], ["scan", "--company", "1"], ["rescore"], ["init-db"], ["remove-sample"],
     ["--version"], ["-h"], ["--help"], ["desktop", "--smoke"],
+    ["demo"], ["scna"],  # removed or mistyped commands too: the command line refuses them, the app doesn't start
 ])
 def test_the_app_executable_also_runs_cli_commands(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
@@ -243,6 +245,27 @@ def test_the_app_executable_also_runs_cli_commands(argv: list[str], monkeypatch:
     monkeypatch.setattr(desktop, "run", lambda *a, **k: pytest.fail("the app must not start"))
     desktop.main(argv)
     assert calls == [argv]
+
+
+@pytest.mark.parametrize("argv", [["demo"], ["scna"], ["demo", "--help"]])
+def test_unknown_commands_exit_2_without_starting_the_app(argv: list[str], monkeypatch: pytest.MonkeyPatch,
+                                                         capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(desktop, "run", lambda *a, **k: pytest.fail("the app must not start"))
+    with pytest.raises(SystemExit) as exc:
+        desktop.main(argv)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert f"invalid choice: '{argv[0]}'" in err
+    # `openberry-cli demo` from an old guide or script also says why it's gone and what to do instead.
+    assert ("The demo was removed in OpenBerry 0.2.0. Register your company" in err) is (argv[0] == "demo")
+
+
+def test_a_finder_argument_alone_still_starts_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs: list[Any] = []
+    monkeypatch.setattr(cli, "main", lambda argv: pytest.fail("not a CLI command"))
+    monkeypatch.setattr(desktop, "run", lambda args, stop=None: runs.append(args) or 0)
+    desktop.main(["-psn_0_1"])  # what older macOS Finders pass to a double-clicked app
+    assert runs[0].ignored == ["-psn_0_1"]
 
 
 def test_other_arguments_start_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -281,6 +304,56 @@ def test_exit_after_ends_a_process_that_lingers(monkeypatch: pytest.MonkeyPatch)
     timer = desktop.exit_after(0.05, 3)
     assert timer.daemon  # never keeps the process alive itself
     assert exited.wait(5) and codes == [3]
+
+
+@pytest.fixture
+def email_being_sent(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], None]]:
+    """An email handed to the mail server right now (services.send_next_email holds this flag); call the returned
+    function when the server has answered."""
+    from openberry import services
+
+    monkeypatch.setattr(web_app, "EMAIL_STOP_TIMEOUT", 3.0)
+    services._sending_now.set()
+    yield services._sending_now.clear
+    services._sending_now.clear()
+
+
+def test_closing_waits_for_an_email_being_sent_before_stopping_the_process(
+        monkeypatch: pytest.MonkeyPatch, email_being_sent: Callable[[], None],
+        caplog: pytest.LogCaptureFixture) -> None:
+    """WP5.6: the forced exit after closing waits (up to the email loop's stop timeout + EMAIL_EXIT_EXTRA) for the
+    mail server's answer to be recorded, so the email is neither sent twice nor left as "may have been sent"."""
+    exits: list[float] = []
+    monkeypatch.setattr(os, "_exit", lambda code: exits.append(time.monotonic()))
+    assert desktop.email_grace() == 3.0 + desktop.EMAIL_EXIT_EXTRA
+    answered = threading.Timer(0.4, email_being_sent)
+    started = time.monotonic()
+    answered.start()
+    with caplog.at_level(logging.WARNING, logger="openberry.desktop"):
+        desktop._hard_exit(0)
+    assert exits and exits[0] - started >= 0.35 and exits[0] - started < 3
+    assert "closing while an email was being sent" in caplog.text
+    exits.clear()
+    started = time.monotonic()
+    desktop._hard_exit(0)  # nothing being sent: no wait
+    assert exits and exits[0] - started < 0.1 and desktop.email_grace() == 0
+
+
+def test_stopping_the_server_gives_an_email_being_sent_the_time_it_needs(
+        email_being_sent: Callable[[], None]) -> None:
+    """WP5.6: the server's shutdown waits for the email loop, so DashboardServer.stop waits as long, not STOP_TIMEOUT."""
+    done = threading.Event()
+    thread = threading.Thread(target=done.wait, args=(0.5,), daemon=True)  # a shutdown that takes 0.5 seconds
+    thread.start()
+    server = desktop.DashboardServer(url="http://127.0.0.1:1", server=types.SimpleNamespace(should_exit=False),
+                                     thread=thread)
+    server.stop(timeout=0.05)
+    assert server.server.should_exit and not thread.is_alive()
+    email_being_sent()
+    slow = threading.Thread(target=threading.Event().wait, args=(1.0,), daemon=True)
+    slow.start()
+    desktop.DashboardServer(url="", server=types.SimpleNamespace(should_exit=False), thread=slow).stop(timeout=0.05)
+    assert slow.is_alive()  # nothing being sent: the usual timeout
 
 
 def test_a_finished_app_process_really_exits(tmp_path: Path) -> None:
@@ -534,6 +607,18 @@ def test_app_is_running_follows_the_lock(home: Path) -> None:
     assert desktop.app_is_running(home) is False
     assert holder.acquire()  # the probe left the lock free for the next app
     holder.release()
+
+
+def test_serve_is_running_follows_its_lock(home: Path) -> None:
+    """P2-RST-6: `openberry serve` holds serve-<pid>.lock while it runs, so a restore can tell (it sends emails)."""
+    assert desktop.serve_is_running(home) is False
+    lock = desktop.serve_lock(home)
+    assert lock.acquire()
+    assert desktop.serve_is_running(home) is True and desktop.app_is_running(home) is False
+    lock.release()
+    assert desktop.serve_is_running(home) is False  # a file a crash left behind is free
+    assert lock.acquire()  # the probe left it free
+    lock.release()
 
 
 def test_a_dead_apps_desktop_json_is_ignored_everywhere(home: Path) -> None:
@@ -891,9 +976,10 @@ def test_packaged_app_tells_claude_to_run_its_own_cli(client: TestClient, settin
     # No console executable next to the app: the app's own executable runs CLI commands too.
     assert pages.mcp_launch(db_path) == {"command": str(app), "args": ["mcp"], "env": {"OPENBERRY_DB": db_path},
                                          "docker": False}
-    (macos / "openberry-cli").write_text("")
+    cli = macos / ("openberry-cli.exe" if sys.platform == "win32" else "openberry-cli")
+    cli.write_text("")
     assert _desktop_config(client.get("/help").text) == {
-        "command": str(macos / "openberry-cli"), "args": ["mcp"], "env": {"OPENBERRY_DB": db_path}}
+        "command": str(cli), "args": ["mcp"], "env": {"OPENBERRY_DB": db_path}}
 
     with monkeypatch.context() as m:  # Windows: openberry-cli.exe next to OpenBerry.exe
         m.setattr(sys, "executable", str(tmp_path / "OpenBerry.exe"))

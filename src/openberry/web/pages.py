@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -18,14 +19,14 @@ from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
 from starlette.responses import RedirectResponse, Response
 
-from .. import repo, services
+from .. import backups, repo, sample_cleanup, services
 from ..config import get_settings
-from ..models import SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
-from . import charts, forms, scans
+from ..models import EMAIL_SETTINGS, PROSPECT_TYPES, SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
+from . import charts, forms, mail, scans
 from .auth import LoginRequired, checked_form, public_registration_open, require_login
 from .ratelimit import client_key, limits, retry_header
 from .session import COMPANY_KEY, flash, is_logged_in, remember_company, safe_next
-from .ui import LEAD_SOURCES, as_utc, choice, int_param, page_info, render
+from .ui import LEAD_SOURCES, as_utc, choice, int_param, page_info, plural, render
 
 router = APIRouter(dependencies=[Depends(require_login)], include_in_schema=False)
 public_router = APIRouter(include_in_schema=False)
@@ -145,11 +146,39 @@ def run_summary(run: ScanRun) -> dict[str, Any]:
     duration = None
     if run.finished_at:
         duration = max(0, int((run.finished_at - run.started_at).total_seconds()))
+    places = collectors.get("google_places")
     return {
         "run": run, "signals_new": stats.get("signals_new"), "leads_new": stats.get("leads_new"),
         "errors": errors, "warnings": warnings, "duration": duration, "note": stats.get("note", ""),
         "collectors": sorted(collectors),
+        "places": places_summary(places.get("counts") or {}) if isinstance(places, dict) else "",
     }
+
+
+# Google Maps collector counts -> how the scan history names the businesses it skipped.
+PLACES_SKIPS = (("no_website", "without a website"), ("robots", "blocked by robots.txt"),
+                ("unreachable", "unreachable"), ("excluded", "excluded (yours, a competitor or never contact)"),
+                ("already_handled", "found before"), ("not_checked", "not checked in time"))
+
+
+def places_summary(counts: dict[str, Any]) -> str:
+    """One plain line about what Google Maps did in a scan (the collector's counts), "" when it did nothing."""
+    def n(key: str) -> int:
+        value = counts.get(key)
+        return value if isinstance(value, int) else 0
+
+    sentences = []
+    if n("searches"):
+        sentences.append(f"{plural(n('searches'), 'search', 'searches')}, "
+                         f"{plural(n('businesses'), 'business', 'businesses')} found, {n('added'):,} added.")
+    if skipped := [f"{n(key):,} {label}" for key, label in PLACES_SKIPS if n(key)]:
+        sentences.append("Skipped: " + ", ".join(skipped) + ".")
+    if n("searches_not_due"):
+        sentences.append(f"{plural(n('searches_not_due'), 'search', 'searches')} not due yet: each search runs at "
+                         "most once a week.")
+    if n("searches_waiting"):
+        sentences.append(f"{plural(n('searches_waiting'), 'search', 'searches')} waiting for the next scan.")
+    return "Google Maps: " + " ".join(sentences) if sentences else ""
 
 
 def _new_people(stats: dict[str, Any]) -> str:
@@ -187,6 +216,7 @@ def kpi_tiles(company_id: int, stats: dict[str, Any]) -> list[dict[str, Any]]:
 FIELD_LABELS = {
     "job_boards": "job boards of target accounts", "rss_feeds": "RSS / Atom feeds", "sec_queries": "SEC EDGAR queries",
     "news_queries": "news queries", "hiring_keywords": "hiring keywords", "github_repos": "GitHub repositories",
+    "places_queries": "Google Maps searches",
 }
 _FIELD_KEY = re.compile(r"\b(" + "|".join(FIELD_LABELS) + r")\b")
 
@@ -198,6 +228,8 @@ def sources_panel(company: Company) -> list[dict[str, Any]]:
         row["requires"] = _FIELD_KEY.sub(lambda m: FIELD_LABELS[m.group(1)], row["requires"])
         if row["name"] == "reddit" and not (settings.reddit_client_id and settings.reddit_client_secret):
             row["setup_url"] = "/help#server-sources"  # needs the server admin's API app, not a profile field
+        if row["name"] == "google_places" and company.signals.places_queries and not settings.google_places_key:
+            row["setup_url"] = "/keys#google-maps"  # the searches are set; the key is missing
     s = company.signals
     claude_inputs = bool(s.influencers or s.competitor_pages or s.events)
     rows.append({
@@ -210,7 +242,7 @@ def sources_panel(company: Company) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------------------
-# Home, demo, company switcher, registration board
+# Home, company switcher, registration board
 # --------------------------------------------------------------------------------------
 
 @router.get("/")
@@ -223,15 +255,6 @@ def home(request: Request) -> Response:
     return redirect(f"/c/{target.id}")
 
 
-@router.post("/demo")
-def load_demo(request: Request, form: FormData = Depends(checked_form)) -> Response:
-    from ..seed import seed_demo
-
-    company_id = seed_demo()
-    flash(request, "Demo data loaded. Everything here is fictional; delete the demo company when you're done.")
-    return redirect(f"/c/{company_id}")
-
-
 @router.get("/switch")
 def switch_company(company: str = "") -> Response:
     company_id = int_param(company, default=0, low=0)
@@ -241,10 +264,13 @@ def switch_company(company: str = "") -> Response:
 @router.get("/companies")
 def companies_board(request: Request) -> Response:
     cards = []
+    samples = sample_cleanup.sample_company_ids()
     for company in repo.list_companies():
         stats = repo.company_stats(company.id)
+        plan = sample_cleanup.cleanup_plan(company.id) if company.id in samples else None
         cards.append({"company": company, "leads": stats["leads_total"], "hot": stats["tiers"]["hot"],
-                      "signals_7d": stats["signals_7d"]})
+                      "signals_7d": stats["signals_7d"],
+                      "sample": sample_cleanup.banner_text(plan) if plan else ""})  # the pill's tooltip
     return render(request, "companies.html", {"cards": cards, "active": "companies", "title": "Registration board"})
 
 
@@ -296,7 +322,7 @@ def unstable_location(command: str) -> str:
     Translocation), and Windows runs an app opened inside a zip file from a temporary folder: both
     folders disappear, and Claude Desktop's config would point at nothing.
     """
-    if "/AppTranslocation/" in command:
+    if "/AppTranslocation/" in command.replace(os.sep, "/"):
         return MOVE_TO_APPLICATIONS
     temp = os.path.normcase(os.path.realpath(_temp_dir()))
     if os.path.normcase(os.path.realpath(command)).startswith(temp.rstrip(os.sep) + os.sep):
@@ -330,7 +356,8 @@ def mcp_launch(db_path: str) -> dict[str, Any]:
 @router.get("/help")
 def help_page(request: Request) -> Response:
     settings = get_settings()
-    companies = repo.list_companies()
+    fictional = sample_cleanup.fictional_company_ids()
+    example = next((c for c in repo.list_companies() if c.id not in fictional), None)  # the prompts name a real one
     launch = mcp_launch(str(settings.db_path.resolve()))
     desktop = {"mcpServers": {"openberry": {"command": launch["command"], "args": launch["args"],
                                             **({"env": launch["env"]} if launch["env"] else {})}}}
@@ -340,12 +367,13 @@ def help_page(request: Request) -> Response:
     packaged = bool(getattr(sys, "frozen", False))
     return render(request, "help.html", {
         "active": "help", "title": "Connect Claude & API", "db_path": str(settings.db_path.resolve()),
-        "api_token_set": bool(settings.api_token), "example_company": companies[0].id if companies else 1,
+        "api_token_set": bool(settings.api_token), "example_company": example.id if example else None,
         "http_mcp": settings.http_mcp_enabled, "launch": launch, "launch_shell": shell_line(
             [launch["command"], *launch["args"]]), "docker_shell": shell_line(DOCKER_MCP),
         "desktop_config": json.dumps(desktop, indent=2, ensure_ascii=False),
         "page_url": page_url, "base_url_differs": page_url != settings.base_url.rstrip("/"),
         "reddit_ready": bool(settings.reddit_client_id and settings.reddit_client_secret),
+        "google_maps_ready": bool(settings.google_places_key),
         "packaged": packaged, "install_warning": unstable_location(launch["command"]) if packaged else "",
     })
 
@@ -382,16 +410,20 @@ def as_pending_review(data: CompanyIn) -> CompanyIn:
     """An anonymous registration waits, paused, until the operator reviews and activates it.
 
     The scheduler skips paused companies, and the outbound URLs a visitor could choose (RSS feeds,
-    alert webhooks) are dropped: the operator adds them while reviewing the profile. The public
-    form doesn't show those fields.
+    alert webhooks) are dropped: the operator adds them while reviewing the profile. Google Maps searches
+    are dropped too: a visitor must not spend the operator's Google quota. The public form doesn't show
+    those fields.
     """
     return data.model_copy(update={
         "status": "paused",
-        "signals": data.signals.model_copy(update={"rss_feeds": []}),
+        "signals": data.signals.model_copy(update={"rss_feeds": [], "places_queries": []}),
         "notify": data.notify.model_copy(update={"slack_webhook_url": "", "discord_webhook_url": ""}),
-        # Only the operator turns on AI agent sending (the public form doesn't show it).
+        # Only the operator turns on AI agent sending, auto-approve and email sending (the public form shows none).
         "outreach": data.outreach.model_copy(update={
-            "agent_sending": False, "agent_daily_limit": OutreachConfig.model_fields["agent_daily_limit"].default}),
+            "agent_sending": False, "agent_daily_limit": OutreachConfig.model_fields["agent_daily_limit"].default,
+            "auto_approve": False, "auto_approve_hours": OutreachConfig.model_fields["auto_approve_hours"].default,
+            "auto_approve_since": None,
+            **{key: OutreachConfig().model_dump()[key] for key in EMAIL_SETTINGS}}),
     })
 
 
@@ -441,8 +473,9 @@ def dashboard(request: Request, company_id: int) -> Response:
     remember_company(request, company_id)
     stats = repo.company_stats(company_id)
     top_leads, _ = repo.list_leads(company_id, kind="person", sort="score", limit=8)
-    recent, _ = repo.list_signals(company_id, limit=10)
+    recent, _ = repo.list_signals(company_id, limit=10, exclude_types=PROSPECT_TYPES)  # intent, not prospects
     runs = repo.list_scan_runs(company_id, limit=6)
+    email = mail.email_status(company)
     return render(request, "dashboard.html", {
         "company": company, "active": "dashboard", "title": company.name,
         "stats": stats, "kpis": kpi_tiles(company_id, stats),
@@ -450,7 +483,8 @@ def dashboard(request: Request, company_id: int) -> Response:
         "top_leads": top_leads, "recent": recent, "signal_leads": leads_by_id(s.lead_id for s in recent),
         "followups": repo.followups_due(company_id)[:6], "sources": sources_panel(company),
         "runs": [run_summary(r) for r in runs], "scan": scans.status(company_id),
-        "prompts": claude_prompts(company_id), "agent": agent_status(company),
+        "prompts": claude_prompts(company_id), "agent": agent_status(company), "email": email,
+        "hint_leads": leads_by_id(m.lead_id for m in email["hints"]),
     })
 
 
@@ -489,13 +523,27 @@ def signals_page(request: Request, company_id: int, type: str = "", source: str 
 # Outreach queue
 # --------------------------------------------------------------------------------------
 
+def auto_approve_status(company: Company, due: dict[str, Any]) -> dict[str, Any]:
+    """Auto-approve for the Outreach page's card, from repo.auto_approve_due's result (run as the page opened)."""
+    out = company.outreach
+    return {
+        "enabled": out.auto_approve, "hours": out.auto_approve_hours, "paused": company.status != "active",
+        "waiting": due["waiting"], "held": due["held"], "blocked": due["blocked"],
+        "next_at": _as_datetime(due["next_at"]),
+    }
+
+
 @router.get("/c/{company_id}/outreach")
 def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Response:
     company = repo.get_company(company_id)
     remember_company(request, company_id)
+    # Approve what is due first, so the page is current even with the scheduler off (OPENBERRY_SCHEDULER=false).
+    due = repo.auto_approve_due(company_id)
     tab = choice(tab, dict(OUTREACH_TABS)) or "drafts"
     counts = repo.company_stats(company_id)["messages"]
-    replies = repo.list_messages(company_id, direction="inbound", limit=200)
+    # A colleague's note also put on the other leads it may be about is one reply: listed once (each lead's page has it).
+    replies = [m for m in repo.list_messages(company_id, direction="inbound", limit=200)
+               if m.generated_by != repo.INBOX_COPY]
     followups = repo.followups_due(company_id)
     tab_counts = {"drafts": counts["draft"], "approved": counts["approved"], "sent": counts["sent"],
                   "replies": len(replies), "followups": len(followups)}
@@ -507,6 +555,8 @@ def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Res
         status = {"drafts": "draft", "approved": "approved", "sent": "sent"}[tab]
         messages = repo.list_messages(company_id, status=status, direction="outbound", limit=200)
     agent = agent_status(company)
+    repo.expire_email_claims()  # an email stuck since a crash shows as "may have been sent", not "sending"
+    email = mail.email_status(company, messages)
     return render(request, "outreach.html", {
         "company": company, "active": "outreach", "title": "Outreach", "tab": tab, "tabs": OUTREACH_TABS,
         "tab_counts": tab_counts, "messages": messages, "followups": followups,
@@ -515,14 +565,74 @@ def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Res
         "agent_queued_ids": {item["message_id"] for item in agent["items"]},
         "agent_leads": leads_by_id(s["lead_id"] for s in agent["skipped"][:AGENT_SKIPPED_SHOWN]),
         "agent_skipped_shown": AGENT_SKIPPED_SHOWN,
+        "auto": auto_approve_status(company, due),
+        "auto_states": repo.auto_approve_states(company, messages) if company.outreach.auto_approve else {},
+        "email": email, "email_leads": leads_by_id(mail.email_lead_ids(email)),
     })
+
+
+def _auto_hours(raw: Any) -> int | None:
+    """The submitted review window, or None when it isn't a whole number of hours in the allowed range."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    low, high = forms.AUTO_APPROVE_HOURS_RANGE
+    return int(text) if text.isdecimal() and low <= int(text) <= high else None
+
+
+def hours_text(hours: int) -> str:
+    return f"{hours} hour{'' if hours == 1 else 's'}"
+
+
+@router.post("/c/{company_id}/outreach/auto-approve")
+def auto_approve_settings(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Turn auto-approve on or off and set its review window. Turning it off always works.
+
+    Turning it on, or making the window shorter, starts every draft's window again from now (auto_approve_since):
+    drafts already waiting are never approved at once.
+    """
+    company = repo.get_company(company_id)
+    back = f"/c/{company_id}/outreach#auto-approve"
+    turn_on = str(form.get("auto_approve") or "").strip().lower() in forms.TRUTHY
+    raw_hours = form.get("auto_approve_hours")
+    hours = _auto_hours(raw_hours)
+    if not turn_on:
+        patch: dict[str, Any] = {"auto_approve": False}
+        if hours is not None:
+            patch["auto_approve_hours"] = hours
+        repo.update_company(company_id, {"outreach": patch})
+        flash(request, "Auto-approve is off. Drafts wait for you to approve them.", "info")
+        return redirect(back)
+    if hours is None and isinstance(raw_hours, str) and raw_hours.strip():
+        low, high = forms.AUTO_APPROVE_HOURS_RANGE
+        flash(request, f"The review window must be a whole number of hours from {low} to {high}. Nothing was "
+                       "changed.", "error")
+        return redirect(back)
+    hours = hours or company.outreach.auto_approve_hours
+    was_on = company.outreach.auto_approve
+    shorter = was_on and hours < company.outreach.auto_approve_hours
+    patch = {"auto_approve": True, "auto_approve_hours": hours}
+    if not was_on or shorter:
+        patch["auto_approve_since"] = repo.iso()
+    repo.update_company(company_id, {"outreach": patch})
+    paused = "" if company.status == "active" else " The company is paused: nothing is approved until you activate it."
+    if was_on:
+        already = f" Drafts you already have get {hours_text(hours)} from now." if shorter else ""
+        flash(request, f"Review window saved: drafts are approved {hours_text(hours)} after they're written or "
+                       f"last edited.{already}{paused}")
+    else:
+        agent = " With AI agent sending on, your agent may then send the LinkedIn ones." if (
+            company.outreach.agent_sending) else ""
+        flash(request, f"Auto-approve is on: drafts you don't approve, hold or skip are approved {hours_text(hours)} "
+                       f"after they're written or last edited. Drafts you already have get {hours_text(hours)} from "
+                       f"now.{agent}"
+                       f"{paused}")
+    return redirect(back)
 
 
 def _agent_limit(raw: Any) -> int | None:
     """The submitted daily limit, or None when it isn't a whole number in the allowed range."""
     text = raw.strip() if isinstance(raw, str) else ""
     low, high = forms.AGENT_LIMIT_RANGE
-    return int(text) if text.isdigit() and low <= int(text) <= high else None
+    return int(text) if text.isdecimal() and low <= int(text) <= high else None
 
 
 @router.post("/c/{company_id}/outreach/agent")
@@ -619,9 +729,71 @@ def settings_status(request: Request, company_id: int, form: FormData = Depends(
 
 @router.post("/c/{company_id}/delete")
 def company_delete(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Delete the company, after a backup of the whole database (backups.delete_company): nothing goes without it."""
     company = repo.get_company(company_id)
-    repo.delete_company(company_id)
+    try:
+        backups.delete_company(company_id)
+    except ValueError as exc:  # one of its emails is being sent right now
+        flash(request, str(exc), "error")
+        return redirect(f"/c/{company_id}/settings")
+    except (OSError, sqlite3.Error) as exc:
+        flash(request, f"Nothing was deleted: OpenBerry could not save a backup of your data first ({exc}).", "error")
+        return redirect(f"/c/{company_id}/settings#danger-zone")
     if request.session.get(COMPANY_KEY) == company_id:
         request.session.pop(COMPANY_KEY, None)
-    flash(request, f"Deleted {company.name} and all of its leads, signals and messages.", "info")
+    flash(request, f"Deleted {company.name} and all of its leads, signals and messages. A backup of your data was "
+          "saved first (Your data).", "info")
     return redirect("/companies")
+
+
+# --------------------------------------------------------------------------------------
+# Sample data an older version left (sample_cleanup): the banner's confirmation page
+# --------------------------------------------------------------------------------------
+
+OTHER_LEADS_SHOWN = 50
+
+
+def _render_sample(request: Request, plan: sample_cleanup.CleanupPlan, *, status_code: int = 200,
+                   changed: bool = False) -> Response:
+    leads = plan.lead_lists(other_max=OTHER_LEADS_SHOWN)
+    return render(request, "sample_cleanup.html", {
+        "company": plan.company, "active": "sample", "title": "Remove sample data", "plan": plan,
+        "sample_leads": leads["sample"], "touched_leads": leads["touched"], "other_leads": leads["other"],
+        "changed": changed, "banner_text": sample_cleanup.banner_text(plan),
+    }, status_code=status_code)
+
+
+@router.get("/c/{company_id}/sample")
+def sample_page(request: Request, company_id: int) -> Response:
+    """Exactly what removing the sample data would remove, and what stays. Removes nothing."""
+    repo.get_company(company_id)
+    plan = sample_cleanup.cleanup_plan(company_id)
+    if plan is None:
+        raise repo.NotFound(f"company {company_id} has no sample data")
+    remember_company(request, company_id)
+    return _render_sample(request, plan)
+
+
+@router.post("/c/{company_id}/sample")
+def sample_remove(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Remove what the confirmation page listed (its plan token), or nothing with 409 if the plan changed since."""
+    company = repo.find_company(company_id)
+    if company is None:  # e.g. the button clicked twice
+        flash(request, "The sample company is already deleted.", "info")
+        return redirect("/companies")
+    try:
+        done = sample_cleanup.remove(company_id, str(form.get("plan") or ""))
+    except sample_cleanup.PlanChanged as exc:
+        if exc.plan is None:
+            flash(request, "The sample data is already removed.", "info")
+            return redirect(f"/c/{company_id}")
+        return _render_sample(request, exc.plan, status_code=409, changed=True)
+    if done.company_deleted:
+        if request.session.get(COMPANY_KEY) == company_id:
+            request.session.pop(COMPANY_KEY, None)
+        flash(request, f"Deleted the sample company {company.name}."
+              + (" A backup of your data was saved first." if done.backup else ""), "success")
+        return redirect("/companies")
+    flash(request, f"Removed {plural(done.removed_leads, 'untouched sample lead')}. The company and its other "
+          f"{plural(done.kept_leads, 'lead')} stay.", "success")
+    return redirect(f"/c/{company_id}")

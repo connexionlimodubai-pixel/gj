@@ -1,0 +1,28 @@
+From: "Omar Haddad" <{lead}>
+To: "Sam Rahman" <sam@acme-mail.example>
+Subject: RE: Airport transfers for your Dubai office
+Date: Mon, 12 Oct 2026 11:00:00 +0000
+Message-ID: <DB9PR01MB1234@eurprd01.prod.outlook.com>
+In-Reply-To: {ours}
+References: <older@acme-mail.example> {ours}
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset="us-ascii"
+
+Hello Sam, please call me next week.
+
+From: Sam Rahman <sam@acme-mail.example>
+Sent: Monday, October 12, 2026 9:02 AM
+To: Omar Haddad <{lead}>
+Subject: Airport transfers for your Dubai office
+
+Hi Omar, ... Reply "unsubscribe" and we won't email you again.
+
+--b1
+Content-Type: text/html; charset="us-ascii"
+
+<html><body><div class="elementToProof">Hello Sam, please call me next week.</div><div id="appendonsend"></div><hr style="display:inline-block;width:98%"><div id="divRplyFwdMsg" dir="ltr"><font face="Calibri"><b>From:</b> Sam Rahman &lt;sam@acme-mail.example&gt;<br><b>Sent:</b> Monday, October 12, 2026 9:02 AM<br><b>To:</b> Omar Haddad<br><b>Subject:</b> Airport transfers for your Dubai office</font><div>&nbsp;</div></div><div class="BodyFragment"><font size="2"><div>Hi Omar, ... Reply "unsubscribe" and we won't email you again.</div></font></div></body></html>
+
+--b1--

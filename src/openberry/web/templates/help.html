@@ -43,13 +43,20 @@
   <section class="card" aria-labelledby="h-prompts">
     <h2 id="h-prompts" class="title-icon">{{ m.icon("message") }}Things to ask Claude</h2>
     <ul class="prompt-list">
-      {% for text in [
+      {% if example_company is none %}
+      {% set prompts = [
+          "Use openberry's onboard_company prompt: interview me about my company, then register it on OpenBerry.",
+        ] %}
+      {% else %}
+      {% set prompts = [
           "Use openberry: list my companies and show what's missing from company " ~ example_company ~ "'s profile.",
           "Use the openberry tools: read company " ~ example_company ~ "'s profile, run a signal scan, then show me the 10 hottest leads with why they're hot.",
           "Find decision-makers for the account leads of company " ~ example_company ~ " and add them.",
           "Draft LinkedIn connection notes for all hot leads of company " ~ example_company ~ " that have no message yet.",
           "Write my weekly pipeline report for company " ~ example_company ~ ".",
         ] %}
+      {% endif %}
+      {% for text in prompts %}
       <li><div class="prompt"><p id="help-prompt-{{ loop.index }}">{{ text }}</p>{{ m.copy_button("#help-prompt-" ~ loop.index, "Copy", "btn btn-sm btn-ghost") }}</div></li>
       {% endfor %}
     </ul>
@@ -63,7 +70,9 @@
       <li><strong>Reddit</strong> ({{ "set up" if reddit_ready else "not set up" }}): create a Reddit API app and set <code>REDDIT_CLIENT_ID</code>, <code>REDDIT_CLIENT_SECRET</code> and <code>REDDIT_USERNAME</code>. Commercial use needs Reddit's agreement.</li>
       <li><strong>SEC EDGAR</strong>: <code>OPENBERRY_CONTACT_EMAIL</code>, or a contact e-mail in the company profile (the SEC asks for one).</li>
       <li><strong>GitHub</strong> (optional): <code>GITHUB_TOKEN</code> raises the limit from 60 to 5,000 requests an hour.</li>
+      <li><strong>Google Maps</strong> ({{ "set up" if google_maps_ready else "not set up" }}): add your key on the <a href="/keys#google-maps">API keys</a> page. No restart needed.</li>
     </ul>
+    <p class="small">To let OpenBerry email the emails you approve from your own mailbox, connect it on the <a href="/mailbox">Mailbox</a> page, then turn on email sending on a company's Outreach page. Claude never sends email and never sees the password; it can read the status with <code>get_email_status</code>.</p>
   </section>
 
   <section class="card span-all" aria-labelledby="h-api">
@@ -77,7 +86,8 @@
               ("GET", "/api/companies", "List registered companies"),
               ("POST", "/api/companies", "Register a company (registration-board JSON)"),
               ("GET", "/api/companies/{id}", "One company profile"),
-              ("PATCH", "/api/companies/{id}", "Update part of a profile, e.g. {\"icp\": {\"locations\": [\"UAE\"]}}. AI agent sending is turned on and resumed on the Outreach page only"),
+              ("PATCH", "/api/companies/{id}", "Update part of a profile, e.g. {\"icp\": {\"locations\": [\"UAE\"]}}. AI agent sending and email sending are turned on and resumed on the Outreach page only"),
+              ("GET", "/api/companies/{id}/email-status", "Email sending from your mailbox: on or off, limits, queue, problems (read-only)"),
               ("GET", "/api/companies/{id}/leads", "Leads; filters: tier, status, kind, source, search, min_score, sort, limit, offset"),
               ("POST", "/api/companies/{id}/leads", "Add a lead (merged with an existing one when it matches)"),
               ("GET", "/api/leads/{id}", "One lead with its signals and messages"),
@@ -93,7 +103,7 @@
         </tbody>
       </table>
     </div>
-    <div class="code-block"><pre id="curl-example">curl -s "{{ page_url }}/api/companies/{{ example_company }}/leads?tier=hot" \
+    <div class="code-block"><pre id="curl-example">curl -s "{{ page_url }}/api/companies{% if example_company is not none %}/{{ example_company }}/leads?tier=hot{% endif %}" \
   -H "Authorization: Bearer $OPENBERRY_API_TOKEN"</pre>{{ m.copy_button("#curl-example", "Copy", "btn btn-sm btn-ghost") }}</div>
   </section>
 </div>

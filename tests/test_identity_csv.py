@@ -217,21 +217,19 @@ def _profiles(company_id: int) -> set[tuple[str, ...]]:
     return {tuple(getattr(lead, f) for f in fields) for lead in repo.list_leads(company_id, limit=5000)[0]}
 
 
-def test_export_reimports_without_shifting_columns():
-    from openberry.seed import seed_demo
-
-    demo_id = seed_demo()
-    repo.upsert_lead(demo_id, LeadIn(
+def test_export_reimports_without_shifting_columns(sample_company):
+    sample_id = sample_company
+    repo.upsert_lead(sample_id, LeadIn(
         full_name="Priya Nair", title="Event Manager", lead_company="Events, Inc. Dubai", location="Dubai, UAE",
         linkedin_url="https://www.linkedin.com/in/priya-nair-events", email="priya@events.example",
         phone="+971 50 123 4567"))
-    exported = export_leads_csv(repo.list_leads(demo_id, limit=5000)[0])
+    exported = export_leads_csv(repo.list_leads(sample_id, limit=5000)[0])
     # Cells like "'+ Title matches 'Executive Assistant' | ..." made csv.Sniffer guess quotechar="'".
     assert "'+ Title matches '" in exported
     other = repo.create_company(CompanyIn(name="Second Co"))
     stats = import_leads_csv(other.id, exported)
-    assert stats["errors"] == [] and stats["created"] == len(_profiles(demo_id))
-    assert _profiles(other.id) == _profiles(demo_id)
+    assert stats["errors"] == [] and stats["created"] == len(_profiles(sample_id))
+    assert _profiles(other.id) == _profiles(sample_id)
 
 
 def test_export_reimport_merges_collector_leads_and_strips_formula_escape(company):

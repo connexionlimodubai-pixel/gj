@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import sqlite3
@@ -269,6 +270,94 @@ class UpgradeBackupFailed(DatabaseProblem):
                          "can write to that folder, then open OpenBerry again.")
 
 
+# --------------------------------------------------------------------------------------
+# Database errors in plain words (the dashboard's error page, the desktop app, the logs)
+# --------------------------------------------------------------------------------------
+
+DISK_FULL = "Your disk is full, so OpenBerry can't save anything. Free some space, then try again."
+DAMAGED = "OpenBerry's data file is damaged: restore a backup (Your data)."
+BUSY = "The database is busy, try again in a moment."
+DAMAGED_WORDS = ("malformed", "not a database", "disk i/o error")
+
+
+def log_location() -> str:
+    """Where this process's log goes: the desktop app's log file, else the terminal or service that runs it."""
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            return handler.baseFilename
+    return "the window or terminal where OpenBerry runs"
+
+
+def is_disk_full(exc: BaseException | None) -> bool:
+    text = str(exc).lower()
+    return (isinstance(exc, OSError) and exc.errno == errno.ENOSPC) or (
+        isinstance(exc, (OSError, sqlite3.Error)) and ("disk is full" in text or "no space left" in text))
+
+
+def problem_text(exc: BaseException, path: Path | None = None) -> str | None:
+    """A database error in plain words, naming the data folder and the log file; None for any other error."""
+    text = str(exc).lower()
+    code = str(getattr(exc, "sqlite_errorname", "") or "")
+    if is_disk_full(exc) or code.startswith("SQLITE_FULL"):
+        base = DISK_FULL
+    elif isinstance(exc, sqlite3.DatabaseError) and (code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB", "SQLITE_IOERR"))
+                                                     or any(w in text for w in DAMAGED_WORDS)):
+        base = DAMAGED
+    elif isinstance(exc, sqlite3.OperationalError) and (code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED"))
+                                                        or "locked" in text or "busy" in text):
+        base = BUSY
+    else:
+        return None
+    return f"{base} {_where(path)}"
+
+
+def _where(path: Path | None = None) -> str:
+    return f"Your data is in {Path(path or db_path()).resolve().parent}. Details are in {log_location()}."
+
+
+def damaged_text(path: Path | None = None) -> str:
+    return f"{DAMAGED} {_where(path)}"
+
+
+_reported: set[str] = set()
+
+
+def report_once(logger: logging.Logger, what: str, exc: BaseException) -> None:
+    """Log a database problem (a full disk, a damaged or too new file) once, with its traceback, rather than on every
+    scheduler tick or request until it is fixed. Repeats go to the debug level."""
+    key = f"{type(exc).__name__}: {exc}"
+    if key in _reported:
+        logger.debug("%s: %s (again)", what, key)
+        return
+    _reported.add(key)
+    logger.error("%s: %s", what, exc, exc_info=exc)
+
+
+def forget_reported() -> None:
+    """Things work again: log the next problem, even one seen before."""
+    _reported.clear()
+
+
+_checked: dict[str, str] = {}
+
+
+def quick_check(path: Path | None = None) -> str:
+    """PRAGMA quick_check, once per process and file: "" when the file is sound (or doesn't exist yet), else what
+    SQLite found wrong."""
+    path = Path(path or db_path())
+    if str(path) == ":memory:" or not path.is_file():
+        return ""
+    key = str(path.resolve())
+    if key not in _checked:
+        try:
+            with contextlib.closing(sqlite3.connect(path, timeout=30)) as conn:
+                rows = [str(r[0]) for r in conn.execute("PRAGMA quick_check(5)")]
+            _checked[key] = "" if rows == ["ok"] else "; ".join(rows)
+        except sqlite3.DatabaseError as exc:
+            _checked[key] = str(exc)
+    return _checked[key]
+
+
 def backup_to(dest: Path, source: Path | None = None) -> Path:
     """Copy the database (`source`, else the configured one) to `dest` with SQLite's backup API.
 
@@ -439,5 +528,6 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 
 def reset_init_cache() -> None:
-    """Forget which DB files were initialised (tests switch DB paths)."""
+    """Forget which DB files were initialised and checked (tests switch DB paths; a restore swaps the file)."""
     _initialized.clear()
+    _checked.clear()

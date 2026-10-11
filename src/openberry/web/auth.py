@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import ipaddress
+from collections.abc import AsyncIterator
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -73,13 +74,17 @@ def public_registration_open(request: Request) -> bool:
     return get_settings().public_registration and not is_logged_in(request)
 
 
-async def checked_form(request: Request) -> FormData:
-    """Parse the submitted form and verify its CSRF token (403 when missing or wrong)."""
+async def checked_form(request: Request) -> AsyncIterator[FormData]:
+    """Parse the submitted form and verify its CSRF token (403 when missing or wrong). The form is closed after the
+    request, which deletes an uploaded file's temporary copy."""
     form = await request.form()
-    token = form.get("csrf_token") or request.headers.get("x-csrf-token")
-    if not csrf_valid(request, token):
-        raise HTTPException(403, "This form has expired. Reload the page and try again.")
-    return form
+    try:
+        token = form.get("csrf_token") or request.headers.get("x-csrf-token")
+        if not csrf_valid(request, token):
+            raise HTTPException(403, "This form has expired. Reload the page and try again.")
+        yield form
+    finally:
+        await form.close()
 
 
 def _bearer_ok(request: Request, settings: Settings) -> bool:

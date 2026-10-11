@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from fastapi import Request
 from fastapi.templating import Jinja2Templates
 from starlette.responses import Response
 
-from .. import __version__, repo, sample_cleanup
+from .. import __version__, db, repo, sample_cleanup
 from ..collectors import google_places
 from ..config import get_settings
 from ..models import (
@@ -350,6 +351,15 @@ templates = Jinja2Templates(env=_build_env())
 ASSET_VERSION = _asset_version()
 
 
+def _nav_companies() -> list[Company]:
+    """The company switcher's list. Pages that don't need the database (Your data, API keys, Mailbox) still show,
+    without it, when the database can't be read: Your data's automatic backups stay downloadable."""
+    try:
+        return repo.list_companies()
+    except (sqlite3.Error, db.DatabaseProblem):
+        return []
+
+
 def render(request: Request, name: str, context: dict[str, Any] | None = None, *, status_code: int = 200,
            public: bool = False, headers: dict[str, str] | None = None) -> Response:
     """Render a page with the shared shell context (nav, flashes, CSRF token, mode flags).
@@ -371,7 +381,7 @@ def render(request: Request, name: str, context: dict[str, Any] | None = None, *
         public=public,
         logged_in=logged_in,
         auth_enabled=bool(settings.password),
-        nav_companies=repo.list_companies() if show_nav else [],
+        nav_companies=_nav_companies() if show_nav else [],
         flashes=pop_flashes(request),
         csrf_token=csrf_token(request),
         asset_version=ASSET_VERSION,

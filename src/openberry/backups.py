@@ -17,6 +17,7 @@ import contextlib
 import logging
 import os
 import re
+import shutil
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ DAILY_DAYS = 7
 DAILY_WEEKS = 4
 DAILY_EVERY = timedelta(hours=23)  # the scheduler ticks every few minutes: "a day" without drifting later each day
 CLOCK_SLACK = timedelta(minutes=5)  # a daily snapshot dated later than this (the clock went back) doesn't count
+RESTORE_LOCK_TIMEOUT = 2.0  # seconds a restore waits for another program to finish writing
 LABELS = {
     MANUAL: "Backup you made", DAILY: "Daily", BEFORE_DELETE: "Before a company was deleted",
     BEFORE_RESTORE: "Before a restore", PRE_UPGRADE: "Before an update",
@@ -275,24 +277,45 @@ def _app_running() -> bool:
 CLOSE_FIRST = "Close OpenBerry and quit Claude Desktop (right-click its icon by the clock, Quit), then try again."
 
 
+def _busy(exc: sqlite3.Error) -> bool:
+    text = str(exc).lower()
+    return isinstance(exc, sqlite3.OperationalError) and ("locked" in text or "busy" in text)
+
+
+def _raw_copy(live: Path, now: datetime | None) -> Path:
+    """Keep a damaged file (and its -wal) as it is: SQLite can't read it to make a proper copy."""
+    target = folder(live)
+    target.mkdir(parents=True, exist_ok=True)
+    n = 1
+    while (dest := target / snapshot_name(BEFORE_RESTORE, now, n=n)).exists():
+        n += 1
+    shutil.copy2(live, dest)
+    wal = live.with_name(live.name + "-wal")
+    if wal.exists():
+        shutil.copy2(wal, dest.with_name(dest.name + "-wal"))
+    prune(BEFORE_RESTORE, live, now=now)
+    return dest
+
+
 def _set_aside(live: Path, now: datetime | None) -> Path:
     """Snapshot the live data while holding its write lock, then fold its -wal file into it (a checkpoint), so
-    deleting the -wal loses nothing. RestoreRefused while another program writes or reads it."""
+    deleting the -wal loses nothing. RestoreRefused while another program writes or reads it. A damaged file is kept
+    as it is (that is often why a backup is restored)."""
     busy = RestoreRefused("Another program is using your data right now. " + CLOSE_FIRST)
-    conn = sqlite3.connect(live, timeout=2, isolation_level=None)
+    conn = sqlite3.connect(live, timeout=RESTORE_LOCK_TIMEOUT, isolation_level=None)
     try:
         try:
             conn.execute("BEGIN EXCLUSIVE")
-        except sqlite3.OperationalError as exc:
-            raise busy from exc
-        try:
-            previous = snapshot(BEFORE_RESTORE, source=live, now=now)
-        finally:
-            conn.execute("ROLLBACK")
-        try:
+            try:
+                previous = snapshot(BEFORE_RESTORE, source=live, now=now)
+            finally:
+                conn.execute("ROLLBACK")
             blocked = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
-        except sqlite3.OperationalError as exc:
-            raise busy from exc
+        except sqlite3.DatabaseError as exc:
+            if _busy(exc):
+                raise busy from exc
+            log.warning("the data being replaced is damaged (%s): keeping its files as they are", exc)
+            return _raw_copy(live, now)
         if blocked:
             raise busy
     finally:

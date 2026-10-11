@@ -585,7 +585,7 @@ async def test_report_plan_and_export(sample_company):
         assert not csv_result.is_error
         csv_text = csv_result.content[0].text
         lines = csv_text.strip().splitlines()
-        assert lines[0].startswith("id,full_name,title") and len(lines) - 1 == report["hot_leads_total"]
+        assert lines[0].startswith("id,kind,full_name,title") and len(lines) - 1 == report["hot_leads_total"]
 
 
 def test_build_prospecting_plan(company):

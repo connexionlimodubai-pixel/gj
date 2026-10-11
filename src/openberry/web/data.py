@@ -93,7 +93,9 @@ def _remove_stale_downloads(folder: Path) -> None:
 
 
 def _fresh_copy() -> Path:
-    db_file = db.prepare()
+    db_file = db.db_path()
+    with contextlib.suppress(db.DatabaseProblem):  # a file a newer version wrote can still be backed up as it is
+        db.prepare(db_file)
     folder = db_file.resolve().parent
     _remove_stale_downloads(folder)
     fd, name = tempfile.mkstemp(prefix=DOWNLOAD_PREFIX, suffix=".db", dir=folder)

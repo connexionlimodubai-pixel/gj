@@ -265,6 +265,9 @@ Task Manager (Windows: Ctrl+Shift+Esc).
 - **The app doesn't open, or closes straight away.** Read `.openberry/logs/desktop.log`. The last lines say why.
 - **"This data was saved by a newer OpenBerry".** You opened an older version after a newer one updated your data.
   Open the newer version, or [restore a backup](#restore-a-backup) made with this version.
+- **"OpenBerry's data file is damaged".** [Restore a backup](#restore-a-backup), for example the newest one in
+  `.openberry/backups`. The restore keeps the damaged file there too.
+- **"Your disk is full".** OpenBerry can't save anything until there is free space. Free some, then try again.
 - **Windows: it opens in the browser instead of a window.** Install the
   [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - **Windows: "Smart App Control blocked an app that may be unsafe".** There is no *Run anyway* button for

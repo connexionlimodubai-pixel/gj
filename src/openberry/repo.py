@@ -675,8 +675,8 @@ def refresh_identity_keys(conn: sqlite3.Connection | None = None) -> int:
 _LEAD_SORTS = {
     "score": "score DESC, last_signal_at DESC, id DESC",
     "recent": "created_at DESC, id DESC",
-    "signal": "last_signal_at IS NULL, last_signal_at DESC, score DESC",
-    "name": "full_name COLLATE NOCASE, lead_company COLLATE NOCASE",
+    "signal": "last_signal_at IS NULL, last_signal_at DESC, score DESC, id DESC",
+    "name": "full_name COLLATE NOCASE, lead_company COLLATE NOCASE, id",
 }
 
 
@@ -714,6 +714,22 @@ def list_leads(company_id: int, *, tier: str | None = None, status: str | None =
         rows = c.execute(f"SELECT * FROM leads WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",
                          [*params, limit, max(0, int(offset))]).fetchall()
     return [_lead_from_row(r) for r in rows], total
+
+
+def iter_leads(company_id: int, *, page_size: int = 1000, **filters: Any) -> Iterator[list[Lead]]:
+    """Every lead matching list_leads' filters, in its order, page by page and with no limit, read in one transaction:
+    an export sees the leads as they were when it started, however many there are and whatever a scan adds meanwhile.
+    Use it from one thread (one SQLite connection)."""
+    with connect() as c:
+        c.execute("BEGIN")  # a read transaction: every page comes from the same snapshot
+        offset = 0
+        while True:
+            page, _ = list_leads(company_id, **filters, limit=page_size, offset=offset, conn=c)
+            if page:
+                yield page
+            if len(page) < page_size:
+                return
+            offset += len(page)
 
 
 def contacts_at_account(lead: Lead, conn: sqlite3.Connection | None = None) -> list[Lead]:

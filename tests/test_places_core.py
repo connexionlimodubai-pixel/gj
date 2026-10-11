@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from contextlib import ExitStack, closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -129,9 +130,10 @@ def test_reserve_api_call_is_atomic_across_processes(settings, tmp_path: Path):
     src = str(Path(openberry.__file__).resolve().parents[1])
     env = {**__import__("os").environ, "PYTHONPATH": src}
     args = [str(settings.db_path), str(tmp_path / "missing.env")]
-    procs = [subprocess.Popen([sys.executable, "-c", CHILD, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, env=env) for _ in range(2)]
-    outputs = [p.communicate(timeout=120) for p in procs]
+    with ExitStack() as stack:  # the pipes are closed even if a child times out
+        procs = [stack.enter_context(subprocess.Popen([sys.executable, "-c", CHILD, *args], stdout=subprocess.PIPE,
+                                                      stderr=subprocess.PIPE, text=True, env=env)) for _ in range(2)]
+        outputs = [p.communicate(timeout=120) for p in procs]
     assert all(p.returncode == 0 for p in procs), outputs
     assert sum(int(out.strip()) for out, _ in outputs) == 50
     assert repo.api_usage(SERVICE, 50).used == 50
@@ -280,5 +282,5 @@ def test_first_connections_wait_for_the_database_to_be_set_up(tmp_path):
     threading.Timer(0.5, lambda: writer.execute("COMMIT")).start()
     assert db.init_db(path) == path  # waited for the writer instead of failing with "database is locked"
     writer.close()
-    with sqlite3.connect(path) as check:
+    with closing(sqlite3.connect(path)) as check:
         assert check.execute("PRAGMA journal_mode").fetchone()[0] == "wal"

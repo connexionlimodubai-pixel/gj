@@ -218,13 +218,19 @@ async def test_claude_gets_it_as_a_tool_error(too_new):
 
 
 def test_the_dashboard_shows_it_on_its_error_page(client, too_new):
-    for path in ("/", "/companies", "/data"):
+    for path in ("/", "/companies", "/c/1"):
         resp = client.get(path)
         assert resp.status_code == 503 and TOO_NEW.format(too_new) in resp.text
         assert "can&#39;t open your data" in resp.text and resp.headers["x-content-type-options"] == "nosniff"
         assert "default-src 'self'" in resp.headers["content-security-policy"]
     resp = client.get("/api/companies")
     assert resp.status_code == 503 and resp.json() == {"detail": TOO_NEW.format(too_new)}
+    resp = client.get("/healthz")
+    assert resp.status_code == 503 and resp.json() == {"ok": False, "app": "openberry", "db": TOO_NEW.format(too_new)}
+    # Your data still opens, and its backups can still be downloaded: the file is backed up as it is.
+    assert client.get("/data").status_code == 200
+    copy = client.get("/data/backup")
+    assert copy.status_code == 200 and copy.content.startswith(b"SQLite format 3")
 
 
 def test_the_desktop_app_shows_it_in_a_window(settings, too_new, tmp_path, monkeypatch):
@@ -522,7 +528,8 @@ def test_restore_refuses_while_the_app_is_open(settings, tmp_path, monkeypatch):
     assert backups.restore(backup).previous is not None  # closed: it works
 
 
-def test_restore_refuses_while_another_program_writes(settings, tmp_path):
+def test_restore_refuses_while_another_program_writes(settings, tmp_path, monkeypatch):
+    monkeypatch.setattr(backups, "RESTORE_LOCK_TIMEOUT", 0.2)
     a_company()
     backup = db.backup_to(tmp_path / "b.db")
     writer = sqlite3.connect(settings.db_path, isolation_level=None)
@@ -534,6 +541,18 @@ def test_restore_refuses_while_another_program_writes(settings, tmp_path):
         writer.execute("ROLLBACK")
         writer.close()
     assert [c.name for c in repo.list_companies()] == ["Acme Chauffeurs"]
+
+
+def test_restore_replaces_a_damaged_file_and_keeps_it(settings, tmp_path):
+    a_company()
+    backup = db.backup_to(tmp_path / "b.db")
+    live = settings.db_path
+    raw = bytearray(live.read_bytes())
+    raw[:100] = b"\x00" * 100  # "file is not a database"
+    live.write_bytes(bytes(raw))
+    done = backups.restore(backup, app_running=lambda: False)
+    assert done.previous is not None and done.previous.read_bytes()[:100] == b"\x00" * 100  # kept as it was
+    assert [c.name for c in repo.list_companies()] == ["Acme Chauffeurs"] and integrity(live) == "ok"
 
 
 def test_restore_refused_on_the_command_line_exits_with_the_reason(settings, tmp_path):

@@ -313,13 +313,16 @@ def is_openberry_health(data: Any) -> bool:
 
 
 def answers_like_openberry(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
-    """True if `url`/healthz answers as OpenBerry's does."""
+    """True if `url`/healthz answers as OpenBerry's does, healthy or not (503: its database has a problem, which its
+    pages then explain)."""
     import httpx
 
     try:
         # trust_env=False: never send a local address through an HTTP(S)_PROXY.
         resp = httpx.get(f"{url}/healthz", timeout=timeout, trust_env=False)
-        return resp.status_code == 200 and is_openberry_health(resp.json())
+        data = resp.json()
+        return (resp.status_code == 200 and is_openberry_health(data)) or (
+            resp.status_code == 503 and isinstance(data, dict) and data.get("app") == HEALTHZ_APP)
     except (httpx.HTTPError, ValueError):
         return False
 
@@ -640,14 +643,28 @@ def _run_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Eve
 
 
 def open_data(settings: Settings) -> None:
-    """Create or upgrade the database before the window opens, so a problem with it is shown in a window of its own
-    (show_error) with what to do: a file a newer OpenBerry wrote, an upgrade that couldn't save a copy first."""
-    from . import db
+    """Create or upgrade the database and check it (PRAGMA quick_check) before the window opens, so a problem with it
+    is shown in a window of its own (show_error) with what to do: a file a newer OpenBerry wrote, an upgrade that
+    couldn't save a copy first, a damaged file."""
+    import sqlite3
 
+    from . import backups, db
+
+    path = settings.db_path
     try:
-        db.prepare(settings.db_path)
+        db.prepare(path)
+        problem = db.quick_check(path)
     except db.DatabaseProblem as exc:
         raise DesktopError(str(exc)) from exc
+    except sqlite3.DatabaseError as exc:
+        if (text := db.problem_text(exc, path)) and not text.startswith(db.DAMAGED):
+            raise DesktopError(text) from exc
+        problem = str(exc)
+    if problem:
+        raise DesktopError(
+            f"OpenBerry's data file is damaged (SQLite says: {problem[:200]}). Restore a backup: close this window, "
+            f"open a terminal and run openberry-cli restore with a backup file, such as the newest one in "
+            f"{backups.folder(path).resolve()}. Your data is in {Path(path).resolve().parent}.")
 
 
 def _serve_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Event | None) -> None:

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -451,6 +452,8 @@ def refresh_saved_settings(settings: Settings | None = None) -> bool:
 MIN_PASSWORD_CHARS = 12
 MIN_SECRET_CHARS = 32
 SECRET_COMMAND = 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+SHORT_TOKEN_WARNING = (f"OPENBERRY_API_TOKEN is shorter than {MIN_SECRET_CHARS} characters, which makes it easier to "
+                       f"guess. To make one: {SECRET_COMMAND}")
 
 
 def is_loopback(host: str) -> bool:
@@ -503,14 +506,32 @@ def start_check(settings: Settings, host: str, environ: Any = None) -> StartChec
             "OPENBERRY_API_TOKEN is not set, so anyone who reaches OpenBerry can use its JSON API and /mcp. "
             + make)
     elif len(token) < MIN_SECRET_CHARS:
-        check.warnings.append(f"OPENBERRY_API_TOKEN is shorter than {MIN_SECRET_CHARS} characters, which makes it "
-                              f"easier to guess. {make}")
+        check.warnings.append(SHORT_TOKEN_WARNING)
     base = urlsplit(settings.base_url)
     if base.scheme == "http" and base.hostname and not is_loopback(base.hostname):
         check.warnings.append(
             f"OPENBERRY_BASE_URL is {settings.base_url}: over http:// the password and the login cookie cross the "
             "network unencrypted. Put OpenBerry behind an HTTPS proxy and set OPENBERRY_BASE_URL to its https:// "
             "address.")
+    return check
+
+
+def mcp_start_check(settings: Settings, host: str) -> StartCheck:
+    """What is unsafe about `openberry mcp --http` on `host`. Nothing on a loopback address. Elsewhere it needs
+    OPENBERRY_API_TOKEN, even with OPENBERRY_ALLOW_NO_PASSWORD: its tools read, change and delete all the data, and
+    without a token only the Host check guards it, which stops DNS rebinding but not another computer (it can send
+    any Host)."""
+    check = StartCheck()
+    if is_loopback(host):
+        return check
+    if not settings.api_token:
+        check.refusals.append(
+            f"The MCP server has no API token, and on {host} other computers can reach it. Its tools read, change and "
+            "delete all your data, so it needs one there, even with OPENBERRY_ALLOW_NO_PASSWORD=true. Set "
+            f"OPENBERRY_API_TOKEN ({MIN_SECRET_CHARS} characters or more), or use --host 127.0.0.1. To make one: "
+            f"{SECRET_COMMAND}")
+    elif len(settings.api_token) < MIN_SECRET_CHARS:
+        check.warnings.append(SHORT_TOKEN_WARNING)
     return check
 
 
@@ -522,8 +543,27 @@ PRIVATE_UMASK = 0o077
 
 
 def private_files() -> None:
-    """Files and folders this process creates are for this user only (Linux, macOS, Docker; Windows ignores it)."""
+    """Files and folders this process creates are for this user only (Linux, macOS, Docker; Windows ignores it).
+
+    The data folder (OPENBERRY_HOME) and its .env file are made private too when they exist and this user owns them:
+    an older version, or a text editor, may have left them readable by every account.
+    """
     os.umask(PRIVATE_UMASK)
+    if os.name != "nt":
+        _owner_only(OPENBERRY_HOME, 0o700, folder=True)
+        _owner_only(settings_file(), 0o600, folder=False)
+
+
+def _owner_only(path: Path, mode: int, folder: bool) -> None:
+    """chmod `path` to `mode` when it is a folder (or a file) this user owns. Errors are ignored: OpenBerry still
+    starts."""
+    try:
+        st = path.stat()
+        if (st.st_uid == os.getuid() and stat.S_ISDIR(st.st_mode) == folder
+                and stat.S_IMODE(st.st_mode) != mode):
+            path.chmod(mode)
+    except OSError:
+        pass
 
 
 def private_dir(path: Path) -> Path:

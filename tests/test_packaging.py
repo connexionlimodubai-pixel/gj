@@ -848,6 +848,21 @@ def test_compose_runs_the_app_hardened() -> None:
     assert re.fullmatch(r"ollama/ollama:\d+\.\d+\.\d+", ollama)
 
 
+def test_compose_builds_the_new_code_after_an_update() -> None:
+    """With `build:` and `image:`, compose builds only when the image is missing: after `git pull`, a plain
+    `docker compose up -d` would go on running the old openberry:latest."""
+    yaml = pytest.importorskip("yaml")
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    app = compose["services"]["openberry"]
+    assert app["build"] == "." and app["image"] == "openberry:latest" and app["pull_policy"] == "build"
+    command = "git pull && docker compose up -d --build"
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert command in readme.split("### With Docker", 1)[1].split("\n## ", 1)[0]
+    notes = release_notes.section(release_notes.CHANGELOG.read_text(encoding="utf-8"), "0.2.0")
+    [docker_step] = [line for line in notes.split("\n") if line.startswith("6. **Docker:**")]
+    assert command in docker_step
+
+
 def test_compose_caddy_profile_puts_https_in_front_of_the_app() -> None:
     """README "Run it on a server": `docker compose --profile caddy up -d` (CI checks it with `docker compose config`)."""
     yaml = pytest.importorskip("yaml")
@@ -866,7 +881,7 @@ def test_compose_caddy_profile_puts_https_in_front_of_the_app() -> None:
     assert "{$OPENBERRY_BASE_URL} {" in caddyfile and "reverse_proxy openberry:8000" in caddyfile
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     section = readme.split("## Run it on a server", 1)[1].split("\n## ", 1)[0]
-    for text in ("docker compose --profile caddy up -d", "OPENBERRY_BASE_URL=https://", "OPENBERRY_PASSWORD=",
+    for text in ("docker compose --profile caddy up -d", "OPENBERRY_BASE_URL=https://", "OPENBERRY_PASSWORD='",
                  "OPENBERRY_SECRET_KEY=", "OPENBERRY_API_TOKEN=", "OPENBERRY_TRUSTED_PROXIES=172.16.0.0/12",
                  'secrets.token_urlsafe(32)', "127.0.0.1"):
         assert text in section, text

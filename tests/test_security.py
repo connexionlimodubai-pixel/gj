@@ -150,6 +150,40 @@ def test_the_server_command_refuses_for_real(tmp_path: Path) -> None:
     assert not (tmp_path / "openberry.db").exists()
 
 
+@pytest.mark.parametrize("password, allow_no_password", [("", False), ("", True), (STRONG, False)])
+def test_mcp_over_http_on_a_network_address_needs_an_api_token(
+        settings: Settings, no_uvicorn: list[dict[str, Any]], password: str, allow_no_password: bool) -> None:
+    """Without a token only the Host check guards it, and any computer can send `Host: localhost`. Its tools read,
+    change and delete everything, so OPENBERRY_ALLOW_NO_PASSWORD doesn't open it."""
+    settings.password, settings.allow_no_password = password, allow_no_password
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["mcp", "--http", "--host", "0.0.0.0"])
+    message = str(exc.value.code)
+    assert message.startswith("openberry mcp: ") and "0.0.0.0" in message
+    assert "OPENBERRY_API_TOKEN" in message and "32 characters" in message and "--host 127.0.0.1" in message
+    assert "OPENBERRY_ALLOW_NO_PASSWORD" in message and config.SECRET_COMMAND in message
+    assert no_uvicorn == []
+
+
+def test_mcp_over_http_with_a_token_starts_and_warns_about_a_short_one(
+        settings: Settings, no_uvicorn: list[dict[str, Any]], caplog: pytest.LogCaptureFixture) -> None:
+    settings.api_token = "short"
+    with caplog.at_level(logging.WARNING):
+        cli.main(["mcp", "--http", "--host", "0.0.0.0"])
+        assert no_uvicorn[-1]["host"] == "0.0.0.0"
+        assert "OPENBERRY_API_TOKEN is shorter than 32 characters, which makes it easier to guess" in caplog.text
+        caplog.clear()
+        settings.api_token = TOKEN
+        cli.main(["mcp", "--http", "--host", "0.0.0.0"])
+    assert len(no_uvicorn) == 2 and "OPENBERRY_API_TOKEN" not in caplog.text
+
+
+def test_mcp_over_http_on_loopback_needs_no_token(settings: Settings, no_uvicorn: list[dict[str, Any]]) -> None:
+    cli.main(["mcp", "--http"])
+    [options] = no_uvicorn
+    assert options["host"] == "127.0.0.1" and options["port"] == 8001
+
+
 # ======================================================================================
 # 7.3 Wrong bearer tokens are throttled (/api and /mcp)
 # ======================================================================================
@@ -266,6 +300,53 @@ def test_the_desktop_app_sets_a_private_umask_and_private_logs(tmp_path: Path, m
     finally:
         logging.basicConfig(force=True, handlers=[logging.NullHandler()])
     assert mode(tmp_path / "home") == 0o700 and mode(tmp_path / "home" / "logs") == 0o700
+
+
+@posix_only
+def test_an_older_data_folder_and_its_env_file_are_made_private_at_start(
+        tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """0.1.x left ~/.openberry at 0755 and a .env written by hand (tokens, passwords) at 0644. A database folder of
+    the user's own choosing (OPENBERRY_DB) keeps its permissions."""
+    from openberry import desktop
+
+    home, shared = tmp_path / "home", tmp_path / "shared"
+    monkeypatch.setattr(config, "OPENBERRY_HOME", home)
+    monkeypatch.delenv("OPENBERRY_ENV_FILE")
+    monkeypatch.setattr(desktop, "run", lambda args, stop=None: 0)
+    settings.db_path = shared / "openberry.db"
+    for start in (lambda: cli.main(["init-db"]), lambda: desktop.main(["--no-window"])):
+        for folder in (home, shared):
+            folder.mkdir(exist_ok=True)
+            folder.chmod(0o755)
+        (home / ".env").write_text("GITHUB_TOKEN=x\n", encoding="utf-8")
+        (home / ".env").chmod(0o644)
+        start()
+        assert mode(home) == 0o700 and mode(home / ".env") == 0o600
+        assert mode(shared) == 0o755
+
+
+@posix_only
+def test_another_accounts_data_folder_is_left_alone_and_a_failed_chmod_never_stops_the_start(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    home.chmod(0o755)
+    (home / ".env").write_text("", encoding="utf-8")
+    (home / ".env").chmod(0o644)
+    monkeypatch.setattr(config, "OPENBERRY_HOME", home)
+    monkeypatch.delenv("OPENBERRY_ENV_FILE")
+    uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+    config.private_files()
+    assert mode(home) == 0o755 and mode(home / ".env") == 0o644
+
+    def refuse(path: Path, mode: int) -> None:
+        raise PermissionError(1, "Operation not permitted", str(path))
+
+    monkeypatch.setattr(os, "getuid", lambda: uid)
+    monkeypatch.setattr(Path, "chmod", refuse)
+    config.private_files()  # no error: OpenBerry starts anyway
+    assert mode(home) == 0o755
 
 
 @posix_only

@@ -6,6 +6,8 @@ services:
   openberry:
     build: .
     image: openberry:latest
+    # Built on every `docker compose up`, so after `git pull` it runs the new code, not the image built before.
+    pull_policy: build
     container_name: openberry
     restart: unless-stopped
     env_file: .env

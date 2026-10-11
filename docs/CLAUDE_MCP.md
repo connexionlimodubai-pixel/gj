@@ -47,9 +47,12 @@ claude mcp add --transport http openberry http://127.0.0.1:8000/mcp \
   --header "Authorization: Bearer $OPENBERRY_API_TOKEN"
 ```
 On a server behind Caddy ([Run it on a server](../README.md#run-it-on-a-server)), use `https://your.domain/mcp`.
-Without a token (local mode) it only answers on localhost and the host of `OPENBERRY_BASE_URL`; add other host names or a
-LAN IP to `OPENBERRY_ALLOWED_HOSTS`. You can also use stdio through the container: `docker exec -i openberry openberry mcp`.
-A standalone HTTP server, with the same auth, is `openberry mcp --http --port 8001`.
+Without a token (local mode) it only answers to localhost (127.0.0.1, ::1), the host of `OPENBERRY_BASE_URL` and
+`OPENBERRY_ALLOWED_HOSTS`. That only blocks DNS-rebinding attacks from websites: another computer can send any host name.
+To use `/mcp` from another computer, set `OPENBERRY_API_TOKEN`.
+You can also use stdio through the container: `docker exec -i openberry openberry mcp`.
+A standalone HTTP server, with the same auth, is `openberry mcp --http --port 8001`. On an address other than 127.0.0.1
+(`--host 0.0.0.0`) it refuses to start without `OPENBERRY_API_TOKEN`.
 
 ## 2. Tools
 

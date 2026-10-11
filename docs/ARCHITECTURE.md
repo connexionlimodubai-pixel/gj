@@ -154,8 +154,8 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
 
 - **Local mode** (no `OPENBERRY_PASSWORD`): there is no login, and it is meant for `127.0.0.1`. The dashboard and `/api` only answer to
   `localhost`, IP addresses, the host of `OPENBERRY_BASE_URL` and `OPENBERRY_ALLOWED_HOSTS`. Without `OPENBERRY_API_TOKEN`, `/mcp` is
-  stricter: only localhost/127.0.0.1/::1, the host of `OPENBERRY_BASE_URL` and `OPENBERRY_ALLOWED_HOSTS` (add a LAN IP there to
-  use it). This blocks DNS-rebinding attacks.
+  stricter: only localhost/127.0.0.1/::1, the host of `OPENBERRY_BASE_URL` and `OPENBERRY_ALLOWED_HOSTS`. This blocks DNS-rebinding
+  attacks from websites. It is not access control: another computer can send any `Host`, so using `/mcp` from one needs the token.
   Browser requests that change data must carry the dashboard's CSRF token, so other websites can't drive the API.
 - **Server mode:** set `OPENBERRY_PASSWORD` and `OPENBERRY_SECRET_KEY`. The dashboard then requires login and every form is CSRF-protected.
   The JSON API and `/mcp` require `Authorization: Bearer $OPENBERRY_API_TOKEN`. Session cookies are `Secure` when `OPENBERRY_BASE_URL` is https.
@@ -165,7 +165,9 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
 - **Start-up checks** (`config.start_check`): `openberry serve` on an address other than loopback refuses to start
   without `OPENBERRY_PASSWORD` (unless `OPENBERRY_ALLOW_NO_PASSWORD=true`) or with one shorter than 12 characters. It warns
   when the secret key or the API token is missing or shorter than 32 characters, and when `OPENBERRY_BASE_URL` is `http://`
-  on a network address. On 127.0.0.1 nothing changes. `OPENBERRY_TRUSTED_PROXIES` sets uvicorn's `forwarded_allow_ips`.
+  on a network address. On 127.0.0.1 nothing changes. `openberry mcp --http` on such an address refuses to start without
+  `OPENBERRY_API_TOKEN`, even with `OPENBERRY_ALLOW_NO_PASSWORD=true` (`config.mcp_start_check`), and warns about one shorter
+  than 32 characters. `OPENBERRY_TRUSTED_PROXIES` sets uvicorn's `forwarded_allow_ips`.
   The access log is off (it would hold every lead search's query string).
 - **On a server:** the compose `caddy` profile puts Caddy in front (the `Caddyfile` serves `OPENBERRY_BASE_URL` and
   forwards to `openberry:8000`), with a Let's Encrypt certificate, `http://` redirected to `https://`, and OpenBerry's
@@ -173,6 +175,8 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   README, "Run it on a server".
 - **Files:** `openberry` and the desktop app run with umask 077. The data folder, `logs/` and `backups/` are created with
   mode 0700, and the database, its `-wal` and `-shm` and every backup are set to 0600 (Linux, macOS, Docker's `/data`).
+  At start (`config.private_files`) an existing data folder (`OPENBERRY_HOME`) is set to 0700 and its `.env` to 0600 when
+  the user owns them, so a folder an older version made is private too. A failed chmod never stops the start.
 - **Headers:** a strict CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: same-origin`, `Permissions-Policy` and
   `Cross-Origin-Opener-Policy: same-origin` on every response, error pages included; `Cache-Control: no-store` on everything
   but `/static`; HSTS when `OPENBERRY_BASE_URL` is https. `/api/openapi.json` needs a login or the API token in server mode.

@@ -59,8 +59,15 @@ def _mcp(args: argparse.Namespace) -> None:
     import uvicorn
     from fastapi import FastAPI
 
-    from .config import get_settings
+    from .config import get_settings, mcp_start_check
     from .mcp_server import mount_http
+
+    settings = get_settings()
+    check = mcp_start_check(settings, args.host)  # refuses a host other computers reach without an API token
+    if check.refusals:
+        sys.exit("openberry mcp: " + " ".join(check.refusals))
+    for warning in check.warnings:
+        logging.getLogger(__name__).warning("%s", warning)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -71,7 +78,7 @@ def _mcp(args: argparse.Namespace) -> None:
 
     app = FastAPI(lifespan=lifespan)
     app.state.lifespan_hooks = []
-    mount_http(app, get_settings())
+    mount_http(app, settings)
     print(f"MCP endpoint: http://{args.host}:{args.port}/mcp", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

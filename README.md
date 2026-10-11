@@ -85,6 +85,9 @@ docker compose up -d      # → http://127.0.0.1:8000
 ```
 Inside the container OpenBerry listens on all addresses, so it refuses to start without a password. If only you can
 reach it (compose publishes it on 127.0.0.1), you can set `OPENBERRY_ALLOW_NO_PASSWORD=true` instead.
+Docker reads `$name` in `.env` as a variable: put a password with a `$` in it in single quotes,
+`OPENBERRY_PASSWORD='...'`. To update to a new version: `git pull && docker compose up -d --build` (your data stays in
+the `openberry-data` volume).
 For a server that other people reach, see [Run it on a server](#run-it-on-a-server).
 
 ## Connect Claude (the AI SDR)
@@ -181,12 +184,14 @@ HTTPS, so the password and the login cookie never cross the internet in plain te
 3. `cp .env.example .env`, then set these in `.env`:
    ```
    OPENBERRY_BASE_URL=https://leads.example.com
-   OPENBERRY_PASSWORD=your-password
+   OPENBERRY_PASSWORD='your-password'
    OPENBERRY_SECRET_KEY=the-first-line
    OPENBERRY_API_TOKEN=the-second-line
    OPENBERRY_TRUSTED_PROXIES=172.16.0.0/12,192.168.0.0/16
    TZ=Asia/Dubai
    ```
+   Keep the single quotes around the password: without them Docker reads `$name` in it as a variable, and the
+   password you type would not work.
 4. Start it: `docker compose --profile caddy up -d`. Open `https://leads.example.com` and log in.
 
 What you get:
@@ -213,10 +218,10 @@ or in the environment. See [`.env.example`](.env.example) for the other settings
 |---|---|
 | `OPENBERRY_PASSWORD`, `OPENBERRY_SECRET_KEY` | Dashboard login. **Required** if anyone but you can reach the server: `openberry serve` on an address other than 127.0.0.1 refuses to start without a password of 12 characters or more |
 | `OPENBERRY_ALLOW_NO_PASSWORD=true` | Start on such an address without a password anyway: when something in front of OpenBerry asks for a login, or Docker publishes it on 127.0.0.1 only |
-| `OPENBERRY_API_TOKEN` | Bearer token for `/api` and the HTTP MCP endpoint `/mcp` |
+| `OPENBERRY_API_TOKEN` | Bearer token for `/api` and the HTTP MCP endpoint `/mcp`. Needed to use `/mcp` from another computer: `openberry mcp --http` on an address other than 127.0.0.1 refuses to start without one |
 | `OPENBERRY_TRUSTED_PROXIES` | Behind a reverse proxy: its address or network (comma separated, `*` for any), so `X-Forwarded-For` gives each visitor's own address |
 | `OPENBERRY_BASE_URL` | Public URL of the dashboard: links in Claude replies, an allowed host name, and Secure login cookies when it starts with `https://` |
-| `OPENBERRY_ALLOWED_HOSTS` | Extra host names to answer to in local mode (no password), e.g. a LAN IP so `/mcp` works there |
+| `OPENBERRY_ALLOWED_HOSTS` | Extra host names to answer to in local mode (no password). This only blocks DNS-rebinding attacks from websites, not another computer: to use `/mcp` from one, set `OPENBERRY_API_TOKEN` |
 | `OPENBERRY_PUBLIC_REGISTRATION=true` | Let clients fill in the registration form themselves (agency intake). Their companies wait, paused, for your review |
 | `OPENBERRY_CONTACT_EMAIL` | Contact e-mail for SEC EDGAR's required User-Agent |
 | `OPENBERRY_GOOGLE_PLACES_KEY` | Google Maps API key for the Google Maps businesses source. Desktop users can paste it on the **API keys** page instead |
@@ -235,7 +240,7 @@ or in the environment. See [`.env.example`](.env.example) for the other settings
 openberry serve [--host 0.0.0.0 --port 8000]   # dashboard + /mcp + background scheduler
 openberry desktop [--no-window]                # the dashboard in its own window (uv sync --extra desktop), else the browser
 openberry mcp                                  # MCP over stdio (what Claude Desktop runs)
-openberry mcp --http --port 8001               # standalone MCP over HTTP (bearer token)
+openberry mcp --http --port 8001               # standalone MCP over HTTP (needs OPENBERRY_API_TOKEN on a --host other than 127.0.0.1)
 openberry scan [--company 1] [--source hackernews]
 openberry rescore | init-db
 openberry backup [PATH]                        # a consistent copy of the database, safe while OpenBerry runs

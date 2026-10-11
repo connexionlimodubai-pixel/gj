@@ -22,7 +22,8 @@ removes the demo. It also changes how your data is stored (database version 3 to
    (**Remove sample leads** if you made it your own company). The next page shows what goes and what stays, and
    nothing is removed until you confirm. Its fictional people are never contacted in the meantime.
 6. **Docker:** the container no longer starts without a password. Set `OPENBERRY_PASSWORD` (12 characters or more)
-   in `.env`, or `OPENBERRY_ALLOW_NO_PASSWORD=true` if only you can reach it.
+   in `.env`, in single quotes if it has a `$` in it, or `OPENBERRY_ALLOW_NO_PASSWORD=true` if only you can reach it.
+   Then update with `git pull && docker compose up -d --build`.
 
 Step-by-step help: [docs/DESKTOP.md](https://github.com/connexionlimodubai-pixel/gj/blob/main/docs/DESKTOP.md#upgrading-from-01x).
 
@@ -62,10 +63,12 @@ Step-by-step help: [docs/DESKTOP.md](https://github.com/connexionlimodubai-pixel
 - **Still no login on your own computer.** The desktop app and `openberry serve` on 127.0.0.1 work as before. On an
   address other computers can reach (Docker included), `openberry serve` refuses to start without
   `OPENBERRY_PASSWORD` (12 characters or more), unless you set `OPENBERRY_ALLOW_NO_PASSWORD=true`. It warns about a
-  missing or short secret key or API token, and about an `http://` address on a network.
+  missing or short secret key or API token, and about an `http://` address on a network. `openberry mcp --http` on
+  such an address refuses to start without `OPENBERRY_API_TOKEN`, even with `OPENBERRY_ALLOW_NO_PASSWORD=true`.
 - 20 wrong API tokens in 10 minutes from one address get "429 Too Many Requests". `OPENBERRY_TRUSTED_PROXIES` gives
-  each visitor their own login limit behind a reverse proxy. The data folder, the database and the backups can be
-  read by your user account only (Linux, macOS and Docker). More security headers, and no lead searches in the logs.
+  each visitor their own login limit behind a reverse proxy. The data folder, its `.env` file, the database and the
+  backups can be read by your user account only (Linux, macOS and Docker), also when an older version made them.
+  More security headers, and no lead searches in the logs.
 - Data saved by a newer OpenBerry is refused ("This data was saved by a newer OpenBerry") instead of damaged.
 - Deleting a lead, a message or a company keeps the record of the emails sent, so nobody is emailed twice.
 

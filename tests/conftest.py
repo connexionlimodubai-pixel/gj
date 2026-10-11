@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import os
+import socket
+import threading
+import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -71,3 +76,55 @@ def sample_company() -> int:
     from sample_data import seed_sample_company
 
     return seed_sample_company()
+
+
+# --------------------------------------------------------------------------------------
+# Real-browser tests (test_*_browser.py): the dashboard in a thread, and a Chromium for Playwright
+# --------------------------------------------------------------------------------------
+
+@pytest.fixture
+def base_url(settings) -> Iterator[str]:
+    import uvicorn
+
+    from openberry.web.app import create_app
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(create_app(settings), log_level="warning", lifespan="on"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "uvicorn did not start"
+        time.sleep(0.02)
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(10)
+        sock.close()
+
+
+@pytest.fixture
+def browser() -> Iterator[Any]:
+    """Playwright's own Chromium, else any Chromium in PLAYWRIGHT_BROWSERS_PATH; skipped without one."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    candidates: list[str | None] = [None]
+    root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if root:
+        candidates += sorted(str(p) for p in Path(root).glob("chromium-*/chrome-*/chrome"))
+    with sync_api.sync_playwright() as pw:
+        found = None
+        for executable in candidates:
+            try:
+                found = pw.chromium.launch(executable_path=executable)
+                break
+            except sync_api.Error:
+                continue
+        if found is None:
+            pytest.skip("no Chromium for Playwright")
+        try:
+            yield found
+        finally:
+            found.close()

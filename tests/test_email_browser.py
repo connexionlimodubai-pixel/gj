@@ -15,7 +15,7 @@ from openberry.models import LeadIn
 
 pytest.importorskip("playwright.sync_api")
 
-from test_keep_scroll_browser import DESKTOP, base_url, browser  # noqa: E402,F401  (fixtures)
+DESKTOP = {"width": 1280, "height": 860}  # the base_url and browser fixtures are in conftest.py
 
 
 def logged_in_page(browser: Any, base_url: str, viewport: dict[str, int] = DESKTOP) -> Any:

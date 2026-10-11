@@ -340,15 +340,16 @@ def _set_aside(live: Path, now: datetime | None) -> tuple[Path, bool]:
 
 def _keep_email_history(incoming: Path, previous: Path, damaged: bool) -> bool:
     """repo.keep_email_history from `previous`, read-only. A damaged file's copy that can't be read is skipped, with a
-    warning, and the restore goes on: returns False. Any other error stops the restore. Reading `previous` makes -wal
-    and -shm files next to it: those are deleted after."""
+    warning, and the restore goes on: returns False. That is also a file that opens but has a damaged table (what the
+    dashboard calls a damaged data file). Any other error, a full disk say, stops the restore. Reading `previous` makes
+    -wal and -shm files next to it: those are deleted after."""
     from . import repo
 
     made = [p for p in (previous.with_name(previous.name + s) for s in ("-wal", "-shm")) if not p.exists()]
     try:
         repo.keep_email_history(incoming, previous)
     except sqlite3.Error as exc:
-        if not damaged:
+        if not (damaged or (db.problem_text(exc) or "").startswith(db.DAMAGED)):
             raise
         log.warning("could not read the damaged data being replaced (%s): its opt-outs, never-email list and record "
                     "of sent emails are not kept", exc)
@@ -380,12 +381,15 @@ def restore(backup: Path, *, app_running: Callable[[], bool] | None = None, now:
     live = Path(db.db_path())
     if str(live) == ":memory:":
         raise RestoreRefused("There is no data file to restore into.")
-    if backup.exists() and live.exists() and os.path.samefile(backup, live):
-        raise RestoreRefused(f"{backup} is the data file OpenBerry uses now: choose a backup.")
-    version = check_backup_file(backup)
-    if (app_running or _app_running)():
-        raise RestoreRefused("OpenBerry is open. " + CLOSE_FIRST)
-    private_dir(live.parent)
+    try:
+        if backup.exists() and live.exists() and os.path.samefile(backup, live):
+            raise RestoreRefused(f"{backup} is the data file OpenBerry uses now: choose a backup.")
+        version = check_backup_file(backup)
+        if (app_running or _app_running)():
+            raise RestoreRefused("OpenBerry is open. " + CLOSE_FIRST)
+        private_dir(live.parent)
+    except OSError as exc:  # the backup's folder can't be read (a network drive that is offline), say
+        raise RestoreRefused(f"The restore stopped before your data was replaced ({exc}).") from exc
     incoming = live.with_name(f".{live.name}.restore-{os.getpid()}.tmp")
     previous: Path | None = None
     kept = False

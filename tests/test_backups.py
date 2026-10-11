@@ -599,6 +599,39 @@ def test_restore_replaces_a_damaged_file_and_keeps_it(settings, tmp_path, monkey
     assert [p.name for p in backups.folder().iterdir()] == [previous.name]
 
 
+def test_restore_replaces_a_file_with_a_damaged_table(settings, tmp_path, monkeypatch, capsys):
+    """The usual damage: the file opens, but a table in it is malformed, and the dashboard says to restore a backup.
+    Reading the email history from it failed, and that stopped the restore: nothing could be restored."""
+    a_company()
+    backup = db.backup_to(tmp_path / "b.db")
+    live = settings.db_path
+    with closing(sqlite3.connect(live)) as c:
+        root = c.execute("SELECT rootpage FROM sqlite_master WHERE name = 'messages'").fetchone()[0]
+        size = c.execute("PRAGMA page_size").fetchone()[0]
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    raw = bytearray(live.read_bytes())
+    raw[(root - 1) * size] = 0xFF  # not a kind of page SQLite knows: "database disk image is malformed"
+    live.write_bytes(bytes(raw))
+    monkeypatch.setattr(backups, "_app_running", lambda: False)
+    cli.main(["restore", str(backup)])
+    assert [c.name for c in repo.list_companies()] == ["Acme Chauffeurs"] and integrity(live) == "ok"
+    assert "were not kept" in capsys.readouterr().out
+
+
+def test_a_backup_path_that_cant_be_read_is_refused_and_nothing_changes(settings, tmp_path, monkeypatch):
+    """An error reading the backup's path (a name too long here; a network drive that is offline, say) came out of
+    restore() before the copy, and `openberry restore` said the backup was in place."""
+    a_company()
+    before = counts(settings.db_path)
+    monkeypatch.setattr(backups, "_app_running", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["restore", str(tmp_path / ("b" * 300 + ".db"))])
+    said = str(exc.value.code)
+    assert said.startswith("openberry restore: ") and said.endswith(" Nothing was changed.")
+    assert "in place" not in said
+    assert counts(settings.db_path) == before and snaps() == []
+
+
 def test_an_interruption_right_after_the_swap_leaves_sending_off(settings, tmp_path, monkeypatch):
     """UPG-1: sending was turned off after the swap, so Ctrl-C or a power cut just after it left the backup in place
     with sending on. Now the copy is ready (upgraded, sending off) before it takes the live file's place."""

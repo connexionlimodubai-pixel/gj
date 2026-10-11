@@ -1044,6 +1044,7 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
         if subject is not None:
             updates["subject"] = subject.strip()
         edits = dict(updates)  # the text changes, before the status ones are added
+        changed = (edits.get("body", msg.body), edits.get("subject", msg.subject)) != (msg.body, msg.subject)
         if status is not None:
             if status not in MESSAGE_STATUSES:
                 raise ValueError(f"status must be one of {', '.join(MESSAGE_STATUSES)}")
@@ -1056,8 +1057,7 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
             # toward the connection-request limits, which count every request sent, by its sent_at).
             if (status == "sent" or (status == "replied" and msg.direction == "outbound")) and not msg.sent_at:
                 updates["sent_at"] = iso()
-        elif (msg.status == "approved" and msg.direction == "outbound"
-              and (updates.get("body", msg.body), updates.get("subject", msg.subject)) != (msg.body, msg.subject)):
+        elif msg.status == "approved" and msg.direction == "outbound" and changed:
             # An approval covers the exact text (an AI agent may send approved LinkedIn messages as they are):
             # changed text is a draft again until someone approves it, e.g. with status="approved" in the same call.
             # It isn't held: like any edited draft, it waits a full window before auto-approve (if on) approves it.
@@ -1068,6 +1068,11 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
         if updates:
             sets = ", ".join(f"{k} = ?" for k in updates)
             c.execute(f"UPDATE messages SET {sets}, updated_at = ? WHERE id = ?", [*updates.values(), iso(), message_id])
+        if changed and msg.channel == "email" and msg.direction == "outbound" and msg.sent_at is None and c.execute(
+                "SELECT 1 FROM email_events WHERE message_id = ? AND kind = 'unknown'", (message_id,)).fetchone():
+            # Back in the queue after Send again: something that comes back for the first copy no longer makes this
+            # text sent (record_inbound).
+            _email_event(c, msg.company_id, msg.lead_id, message_id, "edited", EDITED_AFTER_MAYBE_SENT)
         if status in ("sent", "replied"):
             lead = get_lead(msg.lead_id, conn=c)
             order = list(LEAD_STATUSES)
@@ -1508,9 +1513,10 @@ def company_stats(company_id: int, now: datetime | None = None, conn: sqlite3.Co
         for r in c.execute("SELECT status, COUNT(*) n FROM messages WHERE company_id = ? AND direction = 'outbound' "
                            "GROUP BY status", (company_id,)):
             messages[r["status"]] = r["n"]
-        # Replies leads sent us (log_reply) are inbound messages; the statuses above are our outbound ones.
-        messages["received"] = count("SELECT COUNT(*) FROM messages WHERE company_id = ? AND direction = 'inbound'",
-                                     company_id)
+        # Replies leads sent us (log_reply) are inbound messages; the statuses above are our outbound ones. A colleague's
+        # note also put on the other leads it may be about counts once (record_inbound).
+        messages["received"] = count("SELECT COUNT(*) FROM messages WHERE company_id = ? AND direction = 'inbound' "
+                                     "AND generated_by != ?", company_id, INBOX_COPY)
 
         start = (now - timedelta(days=13)).date()
         by_day = {(start + timedelta(days=i)).isoformat(): 0 for i in range(14)}
@@ -2362,6 +2368,8 @@ EMAIL_LOCAL_TZ: tzinfo | None = None
 _EMAIL_COUNTED = ("direction = 'outbound' AND channel = 'email' AND ((sent_via = 'smtp' AND sent_at > ?) "
                   "OR (email_state IN ('claimed', 'data', 'unknown') AND email_claimed_at > ?))")
 EMAIL_BUSY = "This email is being sent right now. Try again in a minute."
+EDITED_AFTER_MAYBE_SENT = ("The first copy may have arrived with the old text. If the lead answers it, this email "
+                           "stops and isn't marked sent.")
 EMAIL_ONE_AT_A_TIME = "another email to this lead or its address goes first (one email at a time)"
 ADDRESS_REPLIED = "this address replied through another lead, so answer them yourself"
 ADDRESS_REPLIED_DELETED = "this address replied before (through a lead deleted since), so answer them yourself"
@@ -3099,18 +3107,24 @@ def record_email_sent(message_id: int, header_id: str, address: str = "", now: d
     failures in a row.
     """
     now = _utc(now or utcnow())
-    stamp = iso(now)
     with _write_locked(conn) as c:
-        cur = c.execute("UPDATE messages SET status = 'sent', sent_at = ?, sent_via = 'smtp', email_state = 'sent', "
-                        "email_claim = '', send_error = '', updated_at = ? WHERE id = ? AND email_message_id = ? "
-                        "AND sent_at IS NULL", (stamp, stamp, message_id, header_id))
-        msg = get_message(message_id, conn=c)
-        if cur.rowcount == 1:
-            c.execute("UPDATE leads SET status = 'contacted', updated_at = ? WHERE id = ? "
-                      "AND status IN ('new', 'qualified')", (stamp, msg.lead_id))
-            if address:
-                _save_mailbox(c, mailbox_key_for(address), now, failures=0)
-        return msg
+        if _record_sent(c, get_message(message_id, conn=c), header_id, iso(now), now) and address:
+            _save_mailbox(c, mailbox_key_for(address), now, failures=0)
+        return get_message(message_id, conn=c)
+
+
+def _record_sent(c: sqlite3.Connection, msg: Message, header_id: str, sent_at: str, now: datetime) -> bool:
+    """The email went out from the mailbox at `sent_at` (record_email_sent, or record_inbound when something came
+    back for one that may have been sent): it is sent, and a new or qualified lead moves to contacted, so its
+    follow-ups come due. Only once, and only for the email with this Message-ID. True when it was recorded now."""
+    cur = c.execute("UPDATE messages SET status = 'sent', sent_at = ?, sent_via = 'smtp', email_state = 'sent', "
+                    "email_claim = '', send_error = '', updated_at = ? WHERE id = ? AND email_message_id = ? "
+                    "AND sent_at IS NULL", (sent_at, iso(now), msg.id, header_id))
+    if cur.rowcount != 1:
+        return False
+    c.execute("UPDATE leads SET status = 'contacted', updated_at = ? WHERE id = ? AND status IN ('new', 'qualified')",
+              (iso(now), msg.lead_id))
+    return True
 
 
 def record_email_failure(message_id: int, claim: str, kind: str, text: str, address: str = "",
@@ -3392,10 +3406,10 @@ def record_opt_out(lead_id: int, source: str, detail: str = "", message_id: int 
         return updated
 
 
-# Emailed in the lookback: sent (also by hand), or may have been sent, also once Send again put it back in the queue
-# (its first copy may have arrived).
-_EMAILED_SQL = ("(m.sent_at > ? OR (m.email_claimed_at > ? AND (m.email_state = 'unknown' OR (m.email_state = '' "
-                "AND m.id IN (SELECT message_id FROM email_events WHERE kind = 'unknown')))))")
+# Emailed in the lookback: sent (also by hand), or may have been sent, also once Send again put it back in the queue,
+# whatever happened to it since (a re-send that failed, Try again, an edit): its first copy may have arrived.
+_EMAILED_SQL = ("(m.sent_at > ? OR (m.email_claimed_at > ? AND (m.email_state = 'unknown' "
+                "OR m.id IN (SELECT message_id FROM email_events WHERE kind = 'unknown'))))")
 
 
 def inbound_index(now: datetime | None = None, own_domains: Iterable[str] = (),
@@ -3509,6 +3523,22 @@ NO_REPLY_TEXT = "(The reply had no text of its own.)"
 LOOKS_LIKE_OPT_OUT = "Looks like an opt-out"
 UNSUBSCRIBE_BUTTON = "Unsubscribed with their mail app's Unsubscribe button"
 NOT_AN_OPT_OUT = "You said this reply isn't an opt-out"
+INBOX_COPY = "inbox_copy"  # generated_by of a colleague's note also put on the other leads it may be about
+
+
+def _went_out_at(c: sqlite3.Connection, msg: Message, now: datetime) -> str | None:
+    """When an email that may have been sent went out, now that something came back for it: when it was claimed, and
+    after Send again no later than its "may have been sent" (a re-send claimed since may have failed). None when it
+    isn't one, or its text was changed since then (an "edited" event): the lead never got that text."""
+    if msg.sent_at is not None or msg.email_state in EMAIL_IN_FLIGHT:
+        return None
+    claimed = _utc(msg.email_claimed_at) if msg.email_claimed_at else now
+    if msg.email_state == "unknown":
+        return iso(claimed)
+    maybe = c.execute("SELECT MAX(u.created_at) FROM email_events u WHERE u.message_id = ? AND u.kind = 'unknown' "
+                      "AND NOT EXISTS (SELECT 1 FROM email_events e WHERE e.message_id = u.message_id "
+                      "AND e.kind = 'edited' AND e.id > u.id)", (msg.id,)).fetchone()[0]
+    return iso(min(claimed, _when(maybe))) if maybe else None
 
 
 def _stop_sequence(c: sqlite3.Connection, lead_id: int) -> None:
@@ -3550,14 +3580,10 @@ def record_inbound(inbound: mailer.Inbound, key: str, now: datetime | None = Non
             if kind == mailer.OPT_OUT and not inbound.token:  # someone else's words: the user decides
                 kind, hint = mailer.REPLY, inbound.opt_out
         message_id = msg.id if msg is not None else None
-        # Something came back for it: it went out. Also the first copy of one that Send again put back in the queue
-        # (it keeps its Message-ID), so it isn't sent a second time.
-        if msg is not None and (msg.email_state == "unknown" or (
-                msg.email_state == "" and msg.email_claimed_at is not None and msg.sent_at is None)):
-            stamp = iso(_utc(msg.email_claimed_at) if msg.email_claimed_at else now)
-            c.execute("UPDATE messages SET status = CASE WHEN status IN ('approved', 'draft') THEN 'sent' ELSE status "
-                      "END, sent_at = COALESCE(sent_at, ?), sent_via = 'smtp', email_state = 'sent', send_error = '' "
-                      "WHERE id = ?", (stamp, msg.id))
+        # Something came back for it: it went out, and is recorded as any sent email is. Also the first copy of one that
+        # Send again put back in the queue (it keeps its Message-ID), so it isn't sent a second time.
+        if msg is not None and (went_out := _went_out_at(c, msg, now)) is not None and _record_sent(
+                c, msg, msg.email_message_id or "", went_out, now):
             _email_event(c, lead.company_id, lead.id, msg.id, "resolved", "It went out: something came back for it",
                          now=now)
         detail = inbound.subject
@@ -3604,9 +3630,10 @@ def record_inbound(inbound: mailer.Inbound, key: str, now: datetime | None = Non
                 if not inbound.token:
                     # Their note on this lead's page too, flagged the same way so the user decides for each lead.
                     # Every check (follow-ups, auto-approve, agent and email sending) then sees a reply. The lead's
-                    # status stays: one reply moves one lead to Replied.
+                    # status stays: one reply moves one lead to Replied, and a copy (INBOX_COPY) isn't counted as
+                    # another reply received.
                     note = create_message(other_id, inbound.text or NO_REPLY_TEXT, channel="email", status="received",
-                                          direction="inbound", generated_by="inbox", conn=c)
+                                          direction="inbound", generated_by=INBOX_COPY, conn=c)
                     c.execute("UPDATE messages SET email_from = ?, opt_out_hint = ? WHERE id = ?",
                               (normalize_email(inbound.from_email), hint[:300] if kind == mailer.REPLY else "",
                                note.id))

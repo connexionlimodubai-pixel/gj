@@ -119,7 +119,7 @@
         {% if msg.direction == "inbound" %}
         {% set colleague = msg.email_from and msg.email_from != lead.email|lower|trim %}
         <article class="bubble bubble-in" id="msg-{{ msg.id }}">
-          <header class="bubble-head">{{ m.icon("reply", 14) }}<strong>{% if colleague %}<bdi>{{ msg.email_from }}</bdi> wrote about {{ lead.full_name or lead.lead_company or "this lead" }}{% else %}{{ lead.full_name or "Lead" }} replied{% endif %}</strong><span class="muted">· {{ msg.channel|channel_label }}{% if msg.generated_by == "inbox" %} · found in your inbox{% endif %} · {{ m.when(msg.sent_at or msg.created_at) }}</span></header>
+          <header class="bubble-head">{{ m.icon("reply", 14) }}<strong>{% if colleague %}<bdi>{{ msg.email_from }}</bdi> wrote about {{ lead.full_name or lead.lead_company or "this lead" }}{% else %}{{ lead.full_name or "Lead" }} replied{% endif %}</strong><span class="muted">· {{ msg.channel|channel_label }}{% if msg.generated_by in ("inbox", "inbox_copy") %} · found in your inbox{% endif %} · {{ m.when(msg.sent_at or msg.created_at) }}</span></header>
           <div class="bubble-body" dir="auto">{{ msg.body }}</div>
           {% if msg.opt_out_hint %}{{ m.opt_out_hint(msg, lead_url ~ "#msg-" ~ msg.id) }}{% endif %}
         </article>

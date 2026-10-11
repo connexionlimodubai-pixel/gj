@@ -238,12 +238,13 @@ def scan_status_label(status: str) -> str:
 
 # Message.sent_via -> who recorded the send, shown next to sent messages ("" = the user, shown as nothing).
 SENT_VIA_LABELS = {"agent": "Sent by AI agent", "claude": "Marked sent by Claude", "smtp": "Sent from your mailbox"}
-# email_events.kind -> what the lead page's timeline says (repo.record_inbound, record_email_failure, resolve_email).
+# email_events.kind -> what the lead page's timeline says (repo.record_inbound, record_email_failure, resolve_email,
+# update_message).
 EMAIL_EVENT_LABELS = {
     "reply": "Replied", "auto_reply": "Automatic reply (out of office)", "bounce": "Bounced: the address doesn't work",
     "soft_bounce": "Delivery delayed", "policy_reject": "Refused by their mail server",
     "opt_out": "Asked not to be emailed", "send_failed": "Sending failed", "unknown": "May have been sent",
-    "resolved": "Resolved", "opt_out_hint": "Looks like an opt-out",
+    "resolved": "Resolved", "opt_out_hint": "Looks like an opt-out", "edited": "Text changed",
 }
 
 

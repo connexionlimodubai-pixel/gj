@@ -100,6 +100,24 @@ def lina_sent(company: Company, **fields: Any) -> tuple[int, Message]:
     return lina, message
 
 
+def maybe_sent(company: Company, box, **outreach: Any) -> tuple[int, Message]:
+    """Lina's step 1 may have been sent: the connection broke while the server was receiving it, at NOW."""
+    turn_on(company, **outreach)
+    lina = lead(company, LINA, full_name="Lina Noor")
+    msg = approved(lina)
+    box.fail["data"] = smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+    assert send(NOW)["status"] == mailer.UNKNOWN
+    box.fail.clear()
+    return lina, repo.get_message(msg.id)
+
+
+def re_send_blocked(box, when: datetime) -> None:
+    """The re-send after Send again fails for good: the provider's daily quota."""
+    box.fail["rcpt"] = (550, b"5.4.5 Daily user sending quota exceeded")
+    assert send(when)["status"] == mailer.PROVIDER_BLOCK
+    box.fail.clear()
+
+
 def deliver(world, name: str, folder: str = "INBOX", **extra: str) -> None:
     world.deliver(eml(name, lead=LINA, ours=OUR_ID, **extra), folder)
 
@@ -528,6 +546,108 @@ def test_a_reply_after_send_again_is_read_and_the_email_is_not_sent_twice(compan
     if answers_it:
         assert (stored.status, stored.email_state, stored.sent_at) == ("sent", "sent", NOW)
     assert send(NOW + timedelta(days=1)) == {"status": "idle"} and box.sent == []
+
+
+@pytest.mark.parametrize("how", ["provider_block", "retries"])
+def test_a_re_send_that_fails_after_send_again_keeps_the_lead_read(company, box, how):
+    """P2-INBOX-1: an email may have been sent, and the user chose Send again. The re-send fails for good: the
+    provider's daily quota, or 5 tries while the server can't be reached. Lina got the first copy, so her address and
+    her company's domain stay in the inbox check, also while the re-send is under way. Her new email and her PA's note
+    are read, and Try again sends nothing."""
+    lina, msg = maybe_sent(company, box)
+    evening = NOW + timedelta(hours=9)
+    services.check_inbox(now=evening)
+    repo.resolve_email(msg.id, "send_again", now=evening)
+    for state in ("claimed", "data"):
+        set_row(msg.id, email_state=state)
+        assert LINA in repo.inbound_index(now=evening)["leads"]
+    set_row(msg.id, email_state="")
+    when = NOW + timedelta(days=1)
+    if how == "provider_block":
+        re_send_blocked(box, when)
+    else:
+        box.fail["connect"] = ConnectionRefusedError("refused")
+        for _ in range(repo.EMAIL_MAX_ATTEMPTS):
+            assert send(when)["status"] == mailer.RETRY
+            when += timedelta(minutes=90)
+        box.fail.clear()
+    assert repo.get_message(msg.id).email_state == "failed"
+    index = repo.inbound_index(now=when)
+    assert LINA in index["leads"] and "gulfbank.example" in index["domains"]
+    box.deliver(reply("Hi Sam, got your note yesterday. Call me at 3pm.", sender=LINA, refers="",
+                      subject="Airport transfers", msg_id="lina-new"))
+    box.deliver(reply("Lina is travelling this week.", sender="pa@gulfbank.example", refers="", name="Huda",
+                      msg_id="pa-note"))
+    assert services.check_inbox(now=when + timedelta(minutes=5))["recorded"] == 2
+    assert repo.get_lead(lina).status == "replied"
+    later = when + timedelta(days=1)
+    repo.resolve_email(msg.id, "retry", now=later)
+    assert send(later) == {"status": "idle"} and box.sent == []
+
+
+@pytest.mark.parametrize("then", ["nothing", "send_again", "re_send_failed"])
+def test_an_auto_reply_to_a_maybe_sent_email_records_it_as_any_sent_email(company, box, then):
+    """P2-INBOX-3: an email may have been sent (also after Send again, and after a re-send that failed). Lina's
+    out-of-office answers it, so it went out. It is recorded as a sent email is: sent when it went out, from the
+    mailbox, and Lina is contacted, so step 2 comes due 3 days after it."""
+    lina, msg = maybe_sent(company, box, followup_days=[3])
+    when = NOW + timedelta(hours=9)
+    services.check_inbox(now=when)
+    if then != "nothing":
+        repo.resolve_email(msg.id, "send_again", now=when)
+    if then == "re_send_failed":
+        when = NOW + timedelta(days=1)
+        re_send_blocked(box, when)
+    box.deliver(eml("ooo_autosubmitted.eml", lead=LINA, ours=msg.email_message_id))
+    assert services.check_inbox(now=when + timedelta(minutes=5))["recorded"] == 1
+    stored = repo.get_message(msg.id)
+    assert (stored.status, stored.email_state, stored.sent_via, stored.sent_at) == ("sent", "sent", "smtp", NOW)
+    assert repo.get_lead(lina).status == "contacted"
+    assert repo.company_stats(company.id)["statuses"]["contacted"] == 1
+    assert repo.followups_due(company.id, now=NOW + timedelta(days=3) - timedelta(minutes=1)) == []
+    assert [d["lead"].id for d in repo.followups_due(company.id, now=NOW + timedelta(days=3))] == [lina]
+
+
+@pytest.mark.parametrize("then", ["edited", "edited_after_a_failed_re_send", "back_to_drafts"])
+def test_an_email_edited_after_send_again_is_never_recorded_sent_with_text_the_lead_never_got(company, box, then):
+    """P2-INBOX-4: an email may have been sent, the user chose Send again, then changed its text (also once a re-send
+    failed). Lina answers the first copy: her reply is logged and stops the email, which stays unsent: she never got
+    that text. The lead page says why. Approved again, it never goes, by the queue or the claim's own check. Set back
+    to draft without a change of text, it is recorded as sent."""
+    lina, msg = maybe_sent(company, box)
+    when = NOW + timedelta(hours=9)
+    services.check_inbox(now=when)
+    repo.resolve_email(msg.id, "send_again", now=when)
+    if then == "edited_after_a_failed_re_send":
+        when = NOW + timedelta(days=1)
+        re_send_blocked(box, when)
+    if then == "back_to_drafts":
+        repo.update_message(msg.id, status="draft")
+    else:
+        assert repo.update_message(msg.id, body="Completely new text the lead never got.").status == "draft"
+    box.deliver(reply("Thanks Sam, call me.", sender=LINA, refers=msg.email_message_id, msg_id="lina-answer"))
+    assert services.check_inbox(now=when + timedelta(minutes=5))["recorded"] == 1
+    assert repo.get_lead(lina).status == "replied"
+    stored = repo.get_message(msg.id)
+    if then == "back_to_drafts":
+        assert (stored.status, stored.email_state, stored.sent_at, stored.body) == ("sent", "sent", NOW, BODY)
+        return
+    assert (stored.status, stored.email_state, stored.sent_at) == ("skipped", "", None)
+    edits = repo.list_email_events(lead_id=lina, kinds=("edited",))  # on the lead page
+    assert [e["detail"] for e in edits] == [repo.EDITED_AFTER_MAYBE_SENT]
+    later = NOW + timedelta(days=2)
+    repo.update_message(msg.id, status="approved")
+    assert skip_reason(company, msg.id, now=later) == "the lead is marked Replied"
+    assert send(later) == {"status": "idle"} and box.sent == []
+    with db.connect() as c:  # the claim's own check, should the queue's be bypassed
+        assert repo._claim_email(c, repo.get_company(company.id, conn=c), msg.id, "x", FROM, "", later) is None
+    # Nor a new step 1 in its place, nor one through a new lead once Lina's is deleted.
+    repo.delete_message(msg.id)
+    approved(lina)
+    assert send(later) == {"status": "idle"}
+    repo.delete_lead(lina)
+    approved(lead(company, LINA))
+    assert send(later + timedelta(hours=1)) == {"status": "idle"} and box.sent == []
 
 
 # --------------------------------------------------------------------------------------

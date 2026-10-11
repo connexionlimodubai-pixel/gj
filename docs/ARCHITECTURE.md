@@ -66,11 +66,12 @@ A Python app stores everything, collects free public signals, scores leads, and 
   `sent`, `failed`, `unknown` = may have been sent, never retried automatically, `bounced`), `email_message_id` (the
   Message-ID header, set at the first claim and kept), `email_to`, `email_claim` and `email_claimed_at` (the sending
   worker's token and time), `email_attempts` and `send_error`. `sent_via = "smtp"`: OpenBerry sent it from the user's
-  mailbox. Replies found in the inbox are inbound messages with `generated_by = "inbox"`.
+  mailbox. Replies found in the inbox are inbound messages with `generated_by = "inbox"`. A colleague's note that may be
+  about several leads is on each of their pages: the copies have `generated_by = "inbox_copy"`, so it counts once.
 - **email_suppressions**: addresses never emailed again, for every company (`opt_out`, `bounce`, `manual`). They
   outlive the lead. **email_events**: what the sender and the inbox check did (reply, opt_out, bounce, soft_bounce,
-  policy_reject, auto_reply, send_failed, unknown, resolved); `inbound_key` (the inbox message's Message-ID, else its
-  folder and UID) handles each inbox message once. **email_mailbox**: one row per From address: its pause, failures
+  policy_reject, auto_reply, send_failed, unknown, resolved, edited = its text changed after Send again);
+  `inbound_key` (the inbox message's Message-ID, else its folder and UID) handles each inbox message once. **email_mailbox**: one row per From address: its pause, failures
   in a row, the last inbox check and the last UID read in each folder. Never a password.
 - **api_usage**: paid API calls per service and calendar month (UTC), the monthly cap on Google Maps searches.
 - **place_searches**: when each company last read every page of each Google Maps search (a search runs at most once a

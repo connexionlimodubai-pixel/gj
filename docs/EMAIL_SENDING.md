@@ -181,8 +181,10 @@ Mail about a lead is found by the email it answers (In-Reply-To, References), th
 else at the lead's company writes without answering an email (an assistant: "Lina is travelling, please remove her
 from your list"), the company's own domain, never a free-mail one like gmail.com. The lead's page then says who wrote.
 When it can't tell which of the people you emailed there it is about, it goes on each of their pages and none of them
-gets another email. Only the one emailed last moves to Replied.
-A reply to an email that **may have been sent** settles it: it was sent.
+gets another email. Only the one emailed last moves to Replied, and it counts as one reply in your numbers and on
+the Replies tab.
+A reply, an out-of-office or a bounce to an email that **may have been sent** settles it: it was sent, as if you had
+clicked **Mark sent**.
 
 - **A reply** is logged on the lead's page. The lead moves to Replied, and their drafts and approved messages are
   skipped (emails and LinkedIn).
@@ -228,7 +230,7 @@ Turn it on only if you trust every draft.
 | The provider refuses to send (spam, a limit, a suspended mailbox), also after it received the email | The email isn't sent and isn't counted as sent. The mailbox pauses for 24 hours, also when you save its settings or change the From address. Check your mailbox in the provider's webmail before you click **Try again**. |
 | The server can't be reached, or its name can't be found for a moment (Wi-Fi dropped) | Tries again after 5, 15, then 60 minutes. |
 | The address doesn't exist (also Microsoft 365's "Recipient address rejected", a domain that doesn't exist, or a group that takes no outside mail) | The email isn't sent and the address goes on the never-email list. Fix the address on the lead's page, or skip the email. |
-| The connection broke while the server was receiving the email | **May have been sent.** Check your mailbox's Sent folder, then choose **Mark sent** or **Send again** (it may then arrive twice). With **Save a copy** on (every preset but Gmail), OpenBerry puts the copy in Sent itself and couldn't for this email, so the Sent folder can't tell: choose **Mark sent** if unsure. A reply or bounce settles it by itself, also after **Send again** while the email waits to go out. The email can't be edited meanwhile. |
+| The connection broke while the server was receiving the email | **May have been sent.** Check your mailbox's Sent folder, then choose **Mark sent** or **Send again** (it may then arrive twice). With **Save a copy** on (every preset but Gmail), OpenBerry puts the copy in Sent itself and couldn't for this email, so the Sent folder can't tell: choose **Mark sent** if unsure. A reply or bounce settles it by itself, also after **Send again** (even if the re-send fails). The email can't be edited meanwhile. After **Send again** it can, and then a reply to the first copy only stops it: the lead never got the new text. |
 | OpenBerry closed while sending | The same: before the server received anything, the email is simply tried again; during, it may have been sent. |
 | A sent email couldn't be saved in OpenBerry's database | OpenBerry stops sending until you restart it, so nothing can go out twice. |
 | The computer's clock went back (dual-boot, a wrong time zone fixed) | A last inbox check or scan stamped in the future counts as old: the inbox is checked at once. The minutes between two emails count from the last email as recorded, so after a big jump back the next email may wait until the clock catches up. |

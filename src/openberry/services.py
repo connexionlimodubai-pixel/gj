@@ -347,20 +347,30 @@ def send_next_email(now: datetime | None = None) -> dict[str, Any]:
 
 
 def inbox_due(now: datetime | None = None) -> bool:
-    """A mailbox is connected and its inbox wasn't tried in the last INBOX_EVERY."""
+    """A mailbox is connected, its login isn't refused (a wrong password is never tried again by itself: providers
+    block an account that keeps trying one) and its inbox wasn't tried in the last INBOX_EVERY."""
     address = get_settings().mailbox_address()
     if not address:
         return False
-    tried = repo.mailbox_state(address)["inbox_tried_at"]
+    state = repo.mailbox_state(address)
+    if state["auth_failed"]:
+        return False
+    tried = state["inbox_tried_at"]
     return not tried or datetime.fromisoformat(tried) <= (now or repo.utcnow()) - INBOX_EVERY
+
+
+RECORD_FAILED = "OpenBerry couldn't save a message from your inbox ({detail}). It reads it again at the next check."
 
 
 def check_inbox(now: datetime | None = None) -> dict[str, Any]:
     """Read the inbox (and the junk folder) read-only for replies, opt-outs and bounces about OpenBerry's leads.
 
     Blocking (IMAP): run it in a worker thread. Each message is recorded once (repo.record_inbound); mail that is about
-    no lead is never read in full or stored. Returns {"status": "ok" | "failed" | "not_connected", "checked",
-    "recorded", "text"}.
+    no lead is never read in full or stored, nor is OpenBerry's own email coming back (a lead with the mailbox's own
+    address). A folder's position moves on only once every message in it was recorded: when one can't be (the
+    database is busy), the check fails, sending waits, and the next check reads it again. A refused login pauses the
+    mailbox (repo.pause_mailbox_login). Returns {"status": "ok" | "failed" | "not_connected", "checked", "recorded",
+    "text"}.
     """
     box = connected_mailbox()
     if box is None:
@@ -371,9 +381,13 @@ def check_inbox(now: datetime | None = None) -> dict[str, Any]:
     since = datetime.fromisoformat(previous["inbox_checked_at"]).date() - timedelta(days=1) \
         if previous["inbox_checked_at"] else now.date() - timedelta(days=1)
     index = repo.inbound_index(now)
+    own = {box.address, box.username.strip().lower(), box.reader[0].strip().lower()} - {""}
+    footers = [c.outreach.email_footer for c in repo.list_companies() if c.outreach.email_footer]
 
     def relevant(headers: Any) -> bool:
         facts = mailer.header_facts(headers)
+        if facts["message_id"] in index["ours"] or facts["from_email"] in own:
+            return False  # our own email came back (sent to the mailbox itself), or the test email
         return bool(facts["references"] & index["ours"] or facts["from_email"] in index["leads"] or facts["bounce"]
                     or facts["unsubscribe"])
 
@@ -382,17 +396,26 @@ def check_inbox(now: datetime | None = None) -> dict[str, Any]:
         with mailer.Inbox(box) as inbox:
             folders = inbox.folders()
             for folder in dict.fromkeys(f for f in (folders["inbox"], folders["junk"]) if f):
-                found, positions[folder] = inbox.fetch_new(folder, positions.get(folder), relevant, since=since)
+                found, position = inbox.fetch_new(folder, positions.get(folder), relevant, since=since)
                 for key, raw in found:
                     checked += 1
                     try:
-                        result = repo.record_inbound(mailer.classify_inbound(raw), key, now=now)
+                        inbound = mailer.classify_inbound(raw, footers)
                     except Exception:  # one unreadable message never stops the check
                         log.warning("inbox message %s skipped", key, exc_info=True)
                         continue
+                    try:  # a message without a Message-ID is known by its content wherever it is read again
+                        result = repo.record_inbound(inbound, mailer.content_key(raw), now=now)
+                    except Exception as exc:
+                        log.exception("inbox message %s couldn't be recorded", key)
+                        raise mailer.MailError(mailer.RETRY, RECORD_FAILED.format(
+                            detail=mailer.server_text(exc) or type(exc).__name__)) from exc
                     recorded += result["status"] == "recorded"
+                positions[folder] = position  # every message of this folder was handled
     except mailer.MailError as exc:
-        repo.save_inbox_check(box.address, False, exc.text, now=now)
+        if exc.kind == mailer.AUTH:
+            repo.pause_mailbox_login(box.address, exc.text, now=now)
+        repo.save_inbox_check(box.address, False, exc.text, positions=positions, now=now)
         return {"status": "failed", "text": exc.text, "kind": exc.kind}
     repo.save_inbox_check(box.address, True, positions=positions, now=now)
     return {"status": "ok", "checked": checked, "recorded": recorded}

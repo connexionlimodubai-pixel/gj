@@ -232,7 +232,7 @@
     <section class="card" aria-labelledby="email-side-title">
       <h2 id="email-side-title" class="card-title">Email address</h2>
       {% if suppression %}
-      <p class="small">{{ m.icon("ban", 14) }} {{ suppression.message[:1]|upper }}{{ suppression.message[1:] }}. OpenBerry never emails it, for any company.</p>
+      <p class="small">{{ m.icon("ban", 14) }} {% if suppression.reason == "opt_out" %}This address asked not to be emailed{% elif suppression.reason == "bounce" %}This address bounced: it doesn't exist{% else %}You marked this address as not to email{% endif %} ({{ (suppression.created_at ~ '')[:10] }}). OpenBerry never emails it, for any company.</p>
       {% if suppression.reason != "opt_out" %}<p class="small muted">Fixed the address, or want to email it again? Remove it from the list on the <a href="/mailbox#never-email">Mailbox page</a>.</p>{% endif %}
       {% else %}
       <form method="post" action="{{ lead_url }}/unsubscribe">{{ m.csrf() }}
@@ -262,7 +262,7 @@
     </section>
     {% endif %}
 
-    <section class="card">
+    <section class="card" id="edit-profile">
       <details class="profile-edit">
         <summary><span class="card-title">Edit profile</span>{{ m.icon("chevron-down", 16, "chev") }}</summary>
         <form method="post" action="{{ lead_url }}/profile" class="stack" data-keep-scroll>

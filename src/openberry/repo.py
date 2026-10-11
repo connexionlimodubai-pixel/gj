@@ -25,6 +25,7 @@ from .models import (
     AGENT_PAUSE_REASON_MAX,
     APPROVED_VIA_AUTO,
     AUTO_APPROVE_SETTINGS,
+    EMAIL_GAP_MIN,
     EMAIL_SETTINGS,
     LEAD_STATUSES,
     MESSAGE_CHANNELS,
@@ -240,6 +241,9 @@ def _company_from_row(row: sqlite3.Row) -> Company:
     data = dict(row)
     for key in _COMPANY_JSON:
         data[key] = _loads(data[key], [] if key in ("competitors", "best_customers") else {})
+    gap = data["outreach"].get("email_gap_minutes") if isinstance(data["outreach"], dict) else None
+    if isinstance(gap, int) and gap < EMAIL_GAP_MIN:  # saved before the 5-minute minimum
+        data["outreach"]["email_gap_minutes"] = EMAIL_GAP_MIN
     return Company.model_validate(data)
 
 
@@ -1836,6 +1840,8 @@ def update_message_as(message_id: int, via: str, *, status: str | None = None, b
     with _write_locked(conn) as c:
         before = get_message(message_id, conn=c)
         updated = update_message(message_id, status=status, body=body, subject=subject, conn=c)
+        if before.channel == "email" and (before.sent_via == "smtp" or before.email_state == "unknown"):
+            return updated  # sent from the mailbox (or maybe): it keeps sent_via "smtp" and stays counted
         if ((status == "sent" and before.status != "sent")
                 or (status == "replied" and before.direction == "outbound" and before.sent_at is None)):
             stamp = iso(_utc(now or utcnow()))
@@ -2181,8 +2187,17 @@ EMAIL_LOCAL_TZ: tzinfo | None = None
 _EMAIL_COUNTED = ("direction = 'outbound' AND channel = 'email' AND ((sent_via = 'smtp' AND sent_at > ?) "
                   "OR (email_state IN ('claimed', 'data', 'unknown') AND email_claimed_at > ?))")
 EMAIL_BUSY = "This email is being sent right now. Try again in a minute."
-EMAIL_ONE_AT_A_TIME = "another email to this lead goes first (one email per lead at a time)"
+EMAIL_ONE_AT_A_TIME = "another email to this lead or its address goes first (one email at a time)"
+ADDRESS_REPLIED = "this address replied through another lead, so answer them yourself"
+OWN_MAILBOX = "it is your own mailbox's address: use Send test email on the Mailbox page instead"
+UNSUBSCRIBED = "the lead asked not to be contacted (tagged unsubscribed)"
 STOPPED_BEFORE_DATA = "OpenBerry stopped before sending it. It will try again."
+DROPPED_TEXT = ("The connection to your mail server broke while it was receiving an email. OpenBerry waits a few "
+                "minutes before the next one.")
+# Someone who replied about this lead's email or address: the lead itself, or an email from another lead (any
+# company) with the same address. One mailbox is one recipient, whichever lead it was found through.
+_REPLIED_SQL = ("SELECT 1 FROM messages i WHERE i.direction = 'inbound' AND (i.lead_id = ? OR (i.channel = 'email' "
+                "AND i.lead_id IN (SELECT id FROM leads WHERE lower(trim(email)) = ?)))")
 
 
 def normalize_email(address: str) -> str:
@@ -2297,12 +2312,34 @@ def save_inbox_check(address: str, ok: bool, error: str = "", positions: dict[st
         _save_mailbox(c, normalize_email(address), now, **fields)
 
 
-def retry_mailbox(address: str | None = None, now: datetime | None = None,
-                  conn: sqlite3.Connection | None = None) -> None:
-    """Lift the mailbox's pause (the dashboard's Try again, or saving new mailbox settings)."""
+def retry_mailbox(address: str | None = None, now: datetime | None = None, auth_only: bool = False,
+                  conn: sqlite3.Connection | None = None) -> bool:
+    """Lift the mailbox's pause (the dashboard's Try again). auth_only (saving the mailbox settings, Check inbox):
+    only a refused login or settings problem is lifted; a provider's block and the waits after failures stay until
+    they run out or the user clicks Try again. True when a pause was lifted."""
+    now = _utc(now or utcnow())
+    address = _mailbox_address(address)
+    with _write_locked(conn) as c:
+        row = _mailbox_row(c, address)
+        until = _when(row["paused_until"])
+        waiting = until is not None and until > now
+        if auth_only:
+            if not row["auth_failed"]:
+                return False
+            _save_mailbox(c, address, now, auth_failed=0, **({} if waiting else {"pause_reason": ""}))
+            return True
+        _save_mailbox(c, address, now, paused_until=None, pause_reason="", auth_failed=0, failures=0)
+        return bool(row["auth_failed"]) or waiting
+
+
+def pause_mailbox_login(address: str, text: str, now: datetime | None = None,
+                        conn: sqlite3.Connection | None = None) -> None:
+    """The inbox refused the username or password: like a refused SMTP login, nothing is tried again (no inbox check,
+    no email) until the settings are saved or the user clicks Try again or Check inbox. Providers block an account
+    that keeps trying a wrong password."""
     now = _utc(now or utcnow())
     with _write_locked(conn) as c:
-        _save_mailbox(c, _mailbox_address(address), now, paused_until=None, pause_reason="", auth_failed=0, failures=0)
+        _save_mailbox(c, normalize_email(address), now, auth_failed=1, pause_reason=text[:SEND_ERROR_MAX])
 
 
 def _email_times(c: sqlite3.Connection, company_id: int | None, since: datetime) -> list[str]:
@@ -2383,19 +2420,27 @@ def _email_state(c: sqlite3.Connection, company: Company, now: datetime, address
     }
 
 
-def email_blocked_message(state: dict[str, Any]) -> str:
-    """Why OpenBerry sends no email for the company now, in plain words ("" when it may)."""
+def _clause(text: str) -> str:
+    """A sentence from elsewhere (a pause reason, a server's words) put inside another one: no final full stop."""
+    return " ".join((text or "").split()).rstrip(". ")
+
+
+def email_blocked_message(state: dict[str, Any], you: bool = False) -> str:
+    """Why OpenBerry sends no email for the company now, in plain words, without a final full stop ("" when it may).
+    you: written to the user (the dashboard), not about them (Claude, the API)."""
     reason = state.get("blocked_reason") or ""
     mailbox = state.get("mailbox") or {}
+    only = "Only you can" if you else "Only the user can"
     if reason == "disabled":
-        return ("Email sending is off for this company. Only the user can turn it on, on the dashboard's Outreach page "
+        return (f"Email sending is off for this company. {only} turn it on, on the dashboard's Outreach page "
                 "(Email sending)")
     if reason == "not_connected":
-        return "No mailbox is connected. The user connects one on the dashboard's Mailbox page"
+        return ("No mailbox is connected. Connect one on the Mailbox page" if you
+                else "No mailbox is connected. The user connects one on the dashboard's Mailbox page")
     if reason == "mailbox_paused":
-        return f"The mailbox is paused: {mailbox.get('pause_reason') or 'no details'}"
+        return f"The mailbox is paused: {_clause(mailbox.get('pause_reason')) or 'no details'}"
     if reason == "inbox_unchecked":
-        error = mailbox.get("inbox_error")
+        error = _clause(mailbox.get("inbox_error"))
         return ("Nothing is sent until OpenBerry has checked the inbox for replies and opt-outs in the last 30 minutes"
                 + (f" (the last check failed: {error})" if error else ""))
     if reason == "footer":
@@ -2403,8 +2448,9 @@ def email_blocked_message(state: dict[str, Any]) -> str:
     if reason == "company_paused":
         return "The company is paused"
     if reason == "paused":
-        return (f"Email sending is paused until {state['paused_until']} ({state['pause_reason'] or 'no details'}). "
-                "Only the user can resume it early, on the dashboard")
+        why = _clause(state["pause_reason"]) or "no details"
+        return (f"Email sending is paused until {state['paused_until']} ({why}). {only} resume it early, on the "
+                "dashboard")
     if reason == "daily_limit":
         when = f"; the next one can go out at {state['limit_frees_at']}" if state.get("limit_frees_at") else ""
         return f"The daily limit of {state['daily_limit']} emails in 24 hours is reached{when}"
@@ -2447,9 +2493,40 @@ def _never_contact_domain(company: Company, address: str) -> str:
     return ""
 
 
+def _email_threads(c: sqlite3.Connection, leads: Iterable[Lead]) -> dict[int, list[Message]]:
+    """Each lead's messages, plus the emails of every other lead (any company) with the same address, by lead id.
+
+    The address is who gets the email: a hotel's reservations@ found through two branches, or a person and their
+    company sharing info@, is one recipient. So "one email at a time", the step check, the follow-up wait and a
+    reply count over every email to that address."""
+    leads = list(leads)
+    addresses = {a for a in (normalize_email(lead.email) for lead in leads) if mailer.valid_address(a)}
+    ids = {lead.id for lead in leads}
+    by_address: dict[str, set[int]] = {}
+    if addresses:
+        marks = ", ".join("?" * len(addresses))
+        for r in c.execute(f"SELECT id, lower(trim(email)) AS address FROM leads WHERE lower(trim(email)) IN ({marks})",
+                           sorted(addresses)):
+            by_address.setdefault(r["address"], set()).add(r["id"])
+            ids.add(r["id"])
+    by_lead: dict[int, list[Message]] = {}
+    if ids:
+        marks = ", ".join("?" * len(ids))
+        for r in c.execute(f"SELECT * FROM messages WHERE lead_id IN ({marks}) ORDER BY id", sorted(ids)):
+            by_lead.setdefault(r["lead_id"], []).append(_message_from_row(r))
+    out: dict[int, list[Message]] = {}
+    for lead in leads:
+        others = by_address.get(normalize_email(lead.email), set()) - {lead.id}
+        out[lead.id] = [*by_lead.get(lead.id, []),
+                        *(m for other in sorted(others) for m in by_lead.get(other, []) if m.channel == "email")]
+    return out
+
+
 def _email_send_problem(company: Company, msg: Message, lead: Lead, thread: list[Message],
                         suppressed: dict[str, sqlite3.Row], now: datetime) -> str:
-    """Why OpenBerry must not send this email now ("" if it may), the company-wide switches and limits aside."""
+    """Why OpenBerry must not send this email now ("" if it may), the company-wide switches and limits aside.
+
+    `thread` is _email_threads': the lead's messages and the other emails to its address."""
     if msg.direction != "outbound" or msg.channel != "email" or msg.status != "approved":
         return "it is not an approved email"
     if msg.sent_at is not None:
@@ -2460,6 +2537,9 @@ def _email_send_problem(company: Company, msg: Message, lead: Lead, thread: list
         return ("it may have been sent already: check your mailbox's Sent folder, then choose Mark sent or Send "
                 "again")
     if msg.email_state == "failed":
+        if {normalize_email(lead.email), normalize_email(msg.email_to or "")} & set(suppressed):
+            # A hard bounce: trying again can't work while the address is on the never-email list.
+            return f"sending failed: {msg.send_error or 'no details'} Fix the address on the lead's page, or skip it"
         return f"sending failed: {msg.send_error or 'no details'} Choose Try again once it is fixed"
     if msg.email_state == "bounced":
         return "it bounced"
@@ -2468,14 +2548,25 @@ def _email_send_problem(company: Company, msg: Message, lead: Lead, thread: list
                 "the Email sending card")
     if not msg.subject.strip():
         return "it has no subject"
-    if "\n" in msg.subject or "\r" in msg.subject:
+    if mailer.subject_breaks(msg.subject):
         return "the subject has a line break"
     if lead.company_id != company.id:
         return "the lead belongs to another company"
     if problem := _lead_status_problem(lead):
         return problem
-    if any(m.direction == "inbound" for m in thread):
+    if "unsubscribed" in lead.tags:  # an opt-out sticks to the lead too, whatever address it gets later
+        return UNSUBSCRIBED
+    if any(m.direction == "inbound" and m.lead_id == lead.id for m in thread):
         return LEAD_REPLIED
+    if any(m.direction == "inbound" for m in thread):
+        return ADDRESS_REPLIED
+    # A follow-up never goes out as the first contact: an earlier step still waiting (a draft, or an approved
+    # LinkedIn message not sent yet) goes first, or is skipped. An earlier approved email waits in the queue itself.
+    earlier = [m.step for m in thread if m.lead_id == lead.id and m.direction == "outbound" and m.step < msg.step
+               and m.sent_at is None and m.email_state != "unknown"
+               and (m.status == "draft" or (m.status == "approved" and m.channel != "email"))]
+    if earlier:
+        return f"step {min(earlier)} to this lead isn't sent yet: send or skip it first"
     if problem := _excluded_problem(company, lead):
         return problem
     address = normalize_email(lead.email)
@@ -2487,12 +2578,15 @@ def _email_send_problem(company: Company, msg: Message, lead: Lead, thread: list
         return "it is a no-reply or system address"
     if address in suppressed:
         return suppression_message(suppressed[address])
+    # Sent, or may have been sent (a connection lost during DATA, even if the user skipped it afterwards).
     sent = [m for m in thread if m.id != msg.id and m.direction == "outbound"
-            and (m.status in ("sent", "replied") or m.sent_at is not None)]
-    if any(m.channel == "email" and m.step == msg.step for m in sent):
+            and (m.status in ("sent", "replied") or m.sent_at is not None or m.email_state == "unknown")]
+    if repeat := next((m for m in sent if m.channel == "email" and m.step == msg.step), None):
+        if repeat.lead_id != lead.id:
+            return f"step {msg.step} was already emailed to {address} through another lead"
         return f"step {msg.step} was already emailed to this lead"
-    sent_times = [_utc(m.sent_at) for m in sent if m.sent_at]
-    if sent_times:  # every message sent to the lead counts, on any channel
+    sent_times = [_utc(m.sent_at or m.email_claimed_at) for m in sent if m.sent_at or m.email_claimed_at]
+    if sent_times:  # every message sent to the lead counts, on any channel, and every email to its address
         due = max(sent_times) + timedelta(days=_followup_wait_days(company, max(m.step for m in sent)))
         if due > now:
             return f"the next message to this lead is not due before {iso(due)} (follow-up wait)"
@@ -2511,21 +2605,24 @@ def _email_queue(c: sqlite3.Connection, company: Company, now: datetime, address
     lead_ids = sorted({m.lead_id for m in rows})
     marks = ", ".join("?" * len(lead_ids))
     leads = {r["id"]: _lead_from_row(r) for r in c.execute(f"SELECT * FROM leads WHERE id IN ({marks})", lead_ids)}
-    threads: dict[int, list[Message]] = {}
-    for r in c.execute(f"SELECT * FROM messages WHERE lead_id IN ({marks}) ORDER BY id", lead_ids):
-        threads.setdefault(r["lead_id"], []).append(_message_from_row(r))
+    threads = _email_threads(c, leads.values())
     suppressed = _suppressions(c, [lead.email for lead in leads.values()])
-    waiting: set[int] = set()  # leads with an earlier approved email not sent yet: theirs go one at a time
+    # Addresses (else leads) with an earlier approved email not sent yet: theirs go one at a time.
+    waiting: set[str] = set()
     eligible: list[tuple[Message, Lead]] = []
     for msg in rows:
         lead = leads.get(msg.lead_id)
         if lead is None:
             continue
+        recipient = normalize_email(lead.email)
+        key = recipient or f"lead:{lead.id}"
         problem = _email_send_problem(company, msg, lead, threads.get(lead.id, []), suppressed, now)
-        if not problem and lead.id in waiting:
+        if not problem and address and recipient == address:
+            problem = OWN_MAILBOX  # it would come back to the inbox as this lead's "reply"
+        if not problem and key in waiting:
             problem = EMAIL_ONE_AT_A_TIME
         if msg.sent_at is None:
-            waiting.add(lead.id)
+            waiting.add(key)
         if problem:
             out["skipped"].append({"message_id": msg.id, "lead_id": lead.id, "reason": problem,
                                    "state": msg.email_state})
@@ -2651,12 +2748,15 @@ def _claim_email(c: sqlite3.Connection, company: Company, message_id: int, claim
         f"AND NOT EXISTS (SELECT 1 FROM messages WHERE email_state IN ('claimed', 'data')) "
         f"AND (SELECT COUNT(*) FROM messages WHERE company_id = ? AND {_EMAIL_COUNTED}) < ? "
         f"AND (SELECT COUNT(*) FROM messages WHERE {_EMAIL_COUNTED}) < ? "
-        f"AND NOT EXISTS (SELECT 1 FROM messages o WHERE o.lead_id = ? AND o.id != ? AND o.direction = 'outbound' "
-        f"AND o.channel = 'email' AND o.step = ? AND (o.status IN ('sent', 'replied') OR o.sent_at IS NOT NULL)) "
-        f"AND NOT EXISTS (SELECT 1 FROM messages i WHERE i.lead_id = ? AND i.direction = 'inbound') "
+        f"AND NOT EXISTS (SELECT 1 FROM messages o WHERE o.id != ? AND o.direction = 'outbound' "
+        f"AND o.channel = 'email' AND o.step = ? "
+        f"AND (o.lead_id = ? OR o.lead_id IN (SELECT id FROM leads WHERE lower(trim(email)) = ?)) "
+        f"AND (o.status IN ('sent', 'replied') OR o.sent_at IS NOT NULL OR o.email_state = 'unknown')) "
+        f"AND NOT EXISTS ({_REPLIED_SQL}) "
         f"AND NOT EXISTS (SELECT 1 FROM email_suppressions WHERE email = ?)",
         (claim, stamp, to, header_id, message_id, company.id, since, since, company.outreach.email_daily_limit,
-         since, since, MAILBOX_DAILY_MAX, lead.id, message_id, msg.step, lead.id, normalize_email(to)))
+         since, since, MAILBOX_DAILY_MAX, message_id, msg.step, lead.id, normalize_email(to), lead.id,
+         normalize_email(to), normalize_email(to)))
     if cur.rowcount != 1:
         return None
     references = tuple(r["email_message_id"] for r in c.execute(
@@ -2673,8 +2773,10 @@ def mark_email_data(message_id: int, claim: str, now: datetime | None = None,
     """Just before DATA: record that the server is about to receive the email (state "data"), if it may still go.
 
     False (and the claim is released, nothing counted) when the claim isn't this worker's any more, or the email
-    may no longer go: no longer approved (skipped, edited, the lead replied), email sending turned off or paused, the
-    company paused, the address suppressed. The worker then sends RSET instead of DATA: nothing is sent.
+    may no longer go. Every rule of the queue is checked again (the user may have acted while OpenBerry signed in to
+    the server): no longer approved (skipped, edited, the lead or its address replied), the lead's status, address or
+    tags changed, the never-contact list, the address suppressed, the auto-approved switch, email sending turned off
+    or paused, the company paused. The worker then sends RSET instead of DATA: nothing is sent.
     """
     now = _utc(now or utcnow())
     with _write_locked(conn) as c:
@@ -2683,12 +2785,13 @@ def mark_email_data(message_id: int, claim: str, now: datetime | None = None,
             return False
         msg = _message_from_row(row)
         company = get_company(msg.company_id, conn=c)
+        lead = get_lead(msg.lead_id, conn=c)
         cfg = company.outreach
         paused = cfg.email_paused_until is not None and _utc(cfg.email_paused_until) > now
-        stop = (msg.status != "approved" or msg.sent_at is not None or not cfg.email_sending or paused
-                or company.status != "active" or bool(_suppressions(c, [msg.email_to]))
-                or c.execute("SELECT 1 FROM messages WHERE lead_id = ? AND direction = 'inbound' LIMIT 1",
-                             (msg.lead_id,)).fetchone() is not None)
+        problem = _email_send_problem(company, msg.model_copy(update={"email_state": ""}), lead,
+                                      _email_threads(c, [lead]).get(lead.id, []), _suppressions(c, [lead.email]), now)
+        stop = (bool(problem) or normalize_email(lead.email) != normalize_email(msg.email_to or "")
+                or not cfg.email_sending or paused or company.status != "active")
         if stop:
             c.execute("UPDATE messages SET email_state = '', email_claim = '' WHERE id = ? AND email_claim = ?",
                       (message_id, claim))
@@ -2751,7 +2854,8 @@ def record_email_failure(message_id: int, claim: str, kind: str, text: str, addr
             set_state("", "")
         elif kind in (mailer.AUTH, mailer.CONFIG):
             set_state("", "")
-            _save_mailbox(c, address, now, auth_failed=1, paused_until=None, pause_reason=text)
+            # A provider's block or a wait after failures (paused_until) stays as it is.
+            _save_mailbox(c, address, now, auth_failed=1, pause_reason=text)
         elif kind in (mailer.RETRY, mailer.UNKNOWN):
             if kind == mailer.RETRY:
                 attempts = (row["email_attempts"] if row is not None else 0) + 1
@@ -2764,7 +2868,9 @@ def record_email_failure(message_id: int, claim: str, kind: str, text: str, addr
             if mailbox is not None:
                 failures = mailbox["failures"] + 1
                 pause = RETRY_PAUSES[min(failures, len(RETRY_PAUSES)) - 1]
-                reason = f"{failures} attempts failed in a row: {text}" if failures > 1 else text
+                # The mailbox's own words: what to do about the email itself (Mark sent or Send again) stays on it.
+                said = DROPPED_TEXT if kind == mailer.UNKNOWN else text
+                reason = f"{failures} attempts failed in a row: {said}" if failures > 1 else said
                 _save_mailbox(c, address, now, failures=failures, paused_until=iso(now + pause), pause_reason=reason)
         elif kind == mailer.BOUNCE:
             set_state("failed", text)
@@ -2936,21 +3042,32 @@ def suppressed_addresses(addresses: Iterable[str], conn: sqlite3.Connection | No
 
 def _unapprove_emails(c: sqlite3.Connection, lead_id: int) -> int:
     """The lead's address changed, or the lead left the pipeline: its approved emails go back to draft, held, and its
-    email drafts are held, so nothing goes to an address nobody approved (emails being sent right now aside)."""
+    email drafts are held, so nothing goes to an address nobody approved.
+
+    Emails being sent right now too: mark_email_data then sends RSET instead of DATA, and if the server already has
+    it, record_email_sent still records it as sent (by its Message-ID). A retry or an expired claim then leaves a
+    draft, never an approval for the old address."""
     cur = c.execute("UPDATE messages SET status = 'draft', approved_via = '', auto_hold = 1, updated_at = ? "
                     "WHERE lead_id = ? AND direction = 'outbound' AND channel = 'email' AND status = 'approved' "
-                    "AND sent_at IS NULL AND email_state NOT IN ('claimed', 'data')", (iso(), lead_id))
+                    "AND sent_at IS NULL", (iso(), lead_id))
     c.execute("UPDATE messages SET auto_hold = 1 WHERE lead_id = ? AND direction = 'outbound' AND channel = 'email' "
               "AND status = 'draft'", (lead_id,))
     return cur.rowcount
 
 
+CUSTOMER_STATUSES = ("meeting", "won")  # an opt-out read in the inbox never changes these: the user decides
+
+
 def record_opt_out(lead_id: int, source: str, detail: str = "", message_id: int | None = None,
                    addresses: Iterable[str] = (), now: datetime | None = None, event: bool = True,
-                   conn: sqlite3.Connection | None = None) -> Lead:
+                   automatic: bool = False, conn: sqlite3.Connection | None = None) -> Lead:
     """The lead asked not to be contacted: their address (and `addresses`) is never emailed again, for any company;
-    the lead is disqualified, tagged "unsubscribed" and gets a dated note. A company lead (the address is the
-    company's own) also puts the company on the never-contact list. Only restricts, so Claude may record one."""
+    the lead is tagged "unsubscribed" (never emailed again, whatever address it gets), disqualified and gets a dated
+    note. A company lead (the address is the company's own) also puts the company on the never-contact list. Only
+    restricts, so Claude may record one.
+
+    automatic (an opt-out the inbox check read in a reply): the address and the tag only, plus the lead's status
+    unless it is in a meeting or won. The never-contact list is left to the user: words in an email can be misread."""
     now = _utc(now or utcnow())
     with _write_locked(conn) as c:
         lead = get_lead(lead_id, conn=c)
@@ -2960,13 +3077,16 @@ def record_opt_out(lead_id: int, source: str, detail: str = "", message_id: int 
         tags = lead.tags + ["unsubscribed"] if "unsubscribed" not in lead.tags else lead.tags
         note = f"{now:%Y-%m-%d}: Asked not to be contacted ({source})."
         notes = lead.notes if note in lead.notes else f"{lead.notes}\n{note}".strip()
-        if lead.kind == "account" and lead.lead_company.strip():
+        if lead.kind == "account" and lead.lead_company.strip() and not automatic:
             company = get_company(lead.company_id, conn=c)
             listed = {e.casefold() for e in company.icp.exclude_companies}
             if lead.lead_company.casefold() not in listed:
                 update_company(lead.company_id, {"icp": {"exclude_companies": [*company.icp.exclude_companies,
                                                                                lead.lead_company]}}, conn=c)
-        updated = update_lead(lead_id, {"status": "disqualified", "tags": tags, "notes": notes}, conn=c)
+        fields: dict[str, Any] = {"tags": tags, "notes": notes}
+        if not (automatic and lead.status in CUSTOMER_STATUSES):
+            fields["status"] = "disqualified"
+        updated = update_lead(lead_id, fields, conn=c)
         _unapprove_emails(c, lead_id)
         if event:
             _email_event(c, lead.company_id, lead.id, message_id, "opt_out", detail or source, now=now)
@@ -3062,7 +3182,8 @@ def record_inbound(inbound: mailer.Inbound, key: str, now: datetime | None = Non
             if kind == mailer.OPT_OUT:
                 detail = f"Opt-out: {inbound.opt_out}"
                 record_opt_out(lead.id, "email reply", detail, message_id=message_id, now=now, event=False,
-                               addresses=[inbound.from_email, msg.email_to if msg is not None else ""], conn=c)
+                               addresses=[inbound.from_email, msg.email_to if msg is not None else ""],
+                               automatic=True, conn=c)
         _email_event(c, lead.company_id, lead.id, message_id, kind, detail, inbound_key=key, now=now)
         if kind in ("bounce", "policy_reject"):
             _email_guard(c, lead.company_id, kind, now)
@@ -3075,9 +3196,12 @@ def email_attention(company_id: int, now: datetime | None = None,
     bounces and opt-outs of the last 7 days."""
     now = _utc(now or utcnow())
     with _conn(conn) as c:
+        # One that may have been sent stays here whatever its status (skipped, or a draft again after the address
+        # changed) until the user marks it sent or chooses Send again.
         rows = c.execute("SELECT * FROM messages WHERE company_id = ? AND direction = 'outbound' AND channel = 'email' "
-                         "AND email_state IN ('unknown', 'failed') AND sent_at IS NULL AND status = 'approved' "
-                         "ORDER BY email_claimed_at DESC, id DESC LIMIT 50", (company_id,)).fetchall()
+                         "AND sent_at IS NULL AND (email_state = 'unknown' OR (email_state = 'failed' "
+                         "AND status = 'approved')) ORDER BY email_claimed_at DESC, id DESC LIMIT 50",
+                         (company_id,)).fetchall()
         events = list_email_events(company_id, kinds=("bounce", "opt_out"), since=now - timedelta(days=7), limit=20,
                                    conn=c)
     return {"messages": [_message_from_row(r) for r in rows], "events": events}

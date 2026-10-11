@@ -10,7 +10,7 @@
     <div class="min0 grow">
       <h2 id="email-title" class="title-row">Email sending (your mailbox) <span class="pill pill-agent-{{ pill }}">{{ email.label }}</span></h2>
       <p class="agent-status">
-        {% if email.state == "off" %}Off. Approved emails wait for you to copy them into your inbox and send them yourself.
+        {% if email.state == "off" %}Off. Approved emails wait for you to copy them into a new email and send them yourself.
         {% elif email.state == "on" %}On: {{ email.sent_last_24h }} of {{ email.daily_limit }} sent in the last 24 hours.{% if email.eligible_total and email.next_soon %} The next email goes out within a minute.{% elif email.eligible_total and email.next_send_at %} Next email at {{ email.next_send_at|local_dt }}.{% endif %}
         {% elif email.state == "outside_hours" %}On, outside your sending hours: {{ email.sent_last_24h }} of {{ email.daily_limit }} sent in the last 24 hours.{% if email.next_send_at %} Sending starts again at {{ email.next_send_at|local_dt }}.{% endif %}
         {% elif email.state in ("daily_limit", "mailbox_limit") %}On, but the daily limit is used up: {{ email.sent_last_24h }} of {{ email.daily_limit }} sent in the last 24 hours.{% if email.limit_frees_at %} Your mailbox can send again from {{ email.limit_frees_at|local_dt }}.{% endif %}
@@ -112,7 +112,7 @@
           <button class="btn" type="submit" name="action" value="save">{{ m.icon("check", 14) }}Save</button>
           <button class="btn" type="submit" name="action" value="off" formnovalidate>{{ m.icon("pause", 14) }}Turn off</button>
           {% else %}
-          <button class="btn btn-primary" type="submit" name="action" value="on" data-confirm="Turn on email sending? OpenBerry will email the emails you approve from {{ email.from_email or 'your mailbox' }}{% if email.approved_waiting %}: {{ email.approved_waiting|plural('approved email') }} now, oldest first{% endif %}, at most {{ email.daily_limit }} a day. Your mail provider may block mailboxes that send unsolicited email.">{{ m.icon("play", 14) }}Turn on</button>
+          <button class="btn btn-primary" type="submit" name="action" value="on" data-confirm="Turn on email sending? OpenBerry will email the emails you approve from {{ email.from_email or 'your mailbox' }}{% if email.eligible_total %}, starting with the {{ email.eligible_total|plural('approved email') }} ready now, oldest first{% endif %}, at most {{ email.daily_limit }} a day. Your mail provider may block mailboxes that send unsolicited email." data-confirm-limit="#email-limit">{{ m.icon("play", 14) }}Turn on</button>
           <button class="btn" type="submit" name="action" value="save" formnovalidate>Save settings</button>
           {% endif %}
         </div>
@@ -174,7 +174,7 @@
           <div class="min0 grow">
             <a class="lead-name" href="/c/{{ company.id }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}Lead {{ msg.lead_id }}{% endif %}</a>
             <span class="sub break">{% if msg.email_state == "unknown" %}May have been sent. Check your mailbox's Sent folder, then choose.{% else %}Not sent: {{ msg.send_error }}{% endif %}</span>
-            {{ m.email_actions(msg, "/c/" ~ company.id ~ "/outreach#email") }}
+            {{ m.email_actions(msg, "/c/" ~ company.id ~ "/outreach#email", msg.id in email.dead_address) }}
           </div>
         </li>
         {% endfor %}

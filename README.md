@@ -134,9 +134,9 @@ or the desktop app is open, OpenBerry emails the emails you approved, one at a t
 - approved emails only, exactly as approved, plain text, with your footer (who you are, your address, how to opt out)
 - a daily limit (default 30, at most 100), at least 5 minutes between two emails, and sending hours (default Monday to
   Friday, 09:00 to 18:00)
-- one email per person at a time, follow-ups only when due, never twice, never leads who replied or are on your
-  never-contact list
-- it reads your inbox (read-only) every 5 minutes: a reply stops the sequence, an opt-out ("unsubscribe", "stop",
+- one email per person (and per address, whichever leads share it) at a time, follow-ups only when due and after the
+  earlier step, never twice, never leads who replied or are on your never-contact list
+- it reads your inbox (read-only) every 5 minutes: a reply stops the sequence, an opt-out ("unsubscribe", "STOP",
   also in Arabic) puts the address on a never-email list, a bounce marks the address as not working
 
 Your password stays in the data folder's `.env` file, never in the database, never shown to Claude or the API. Claude

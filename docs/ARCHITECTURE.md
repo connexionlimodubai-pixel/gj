@@ -129,11 +129,17 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   `services.send_next_email`. `repo.claim_next_email` checks every rule under `BEGIN IMMEDIATE` (the switches, the
   mailbox and its inbox check in the last 30 minutes, nothing in flight, the daily limits, the minutes since the
   mailbox's last email, the sending hours, `repo._email_send_problem` for each email) and claims one email with a
-  compare-and-set; the returned `mailer.EmailJob` is a snapshot. `mailer.send` goes step by step and calls
-  `repo.mark_email_data` just before DATA (which refuses, so the server gets RSET, if the email may no longer go);
+  compare-and-set; the returned `mailer.EmailJob` is a snapshot. The recipient is the normalized address: the
+  never-twice rules, a reply and the follow-up wait count over every lead (any company) with that address
+  (`repo._email_threads`). `mailer.send` goes step by step and calls `repo.mark_email_data` just before DATA, which
+  checks every rule again (so a change made meanwhile counts) and refuses, so the server gets RSET, if the email may no
+  longer go;
   `repo.record_email_sent` (keyed on the Message-ID) or `repo.record_email_failure` records the outcome. A claim
   older than 10 minutes goes back to the queue; one stuck in DATA becomes `unknown`. `repo.record_inbound` records
-  what came back once (a reply through `repo.log_reply`, an opt-out through `repo.record_opt_out`, a bounce). The
+  what came back once (a reply through `repo.log_reply`, an opt-out through `repo.record_opt_out(automatic=True)`, a
+  bounce); a folder's position moves on only after each of its messages was recorded, so a database error fails the
+  check (sending waits) and the message is read again. A refused IMAP login pauses the mailbox like a refused SMTP
+  one (`repo.pause_mailbox_login`): no automatic check until the settings are saved or Try again is clicked. The
   mailbox settings live in the data folder's `.env` (`config.MAILBOX_SETTINGS`, written by the Mailbox page through
   `envfile.save_settings`); `mailer.Mailbox.from_settings` reads them.
 - `repo.reserve_api_call(service, limit)` counts one paid call before it is made, unless the month's limit is reached; it runs under

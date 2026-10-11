@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import email
 import email.policy
+import hashlib
 import imaplib
 import re
 import secrets
@@ -164,12 +165,25 @@ def clean_name(name: str) -> str:
     return " ".join(text.split())[:78].strip()
 
 
+def subject_breaks(subject: str) -> bool:
+    """The subject has a line break of any kind (\\n, \\r, U+2028, NEL, VT, FF...): the email library refuses it in a
+    header, so such an email is held back before it is claimed."""
+    return len(f"{subject}x".splitlines()) > 1
+
+
+# How an email is written on the wire: SMTP's CRLF, and header lines up to 998 characters (RFC 5322), so a header
+# that can't be folded (List-Unsubscribe's <mailto:...>) is never turned into =?utf-8?q?...?= encoded words, which
+# mail apps don't read as an address. The body keeps the 76-character lines of its quoted-printable encoding.
+WIRE_POLICY = email.policy.SMTP.clone(max_line_length=998)
+
+
 def build_email(job: EmailJob, now: datetime | None = None) -> EmailMessage:
-    """The email exactly as it goes out: plain text, UTF-8, quoted-printable, CRLF line ends on the wire.
+    """The email exactly as it goes out: plain text, UTF-8, quoted-printable, CRLF line ends on the wire (serialize
+    it with WIRE_POLICY).
 
     The subject is never changed: one with a line break is refused (ValueError), not "fixed".
     """
-    if "\n" in job.subject or "\r" in job.subject:
+    if subject_breaks(job.subject):
         raise ValueError("the subject has a line break")
     if not job.subject.strip():
         raise ValueError("the email has no subject")
@@ -279,6 +293,12 @@ def classify(exc: BaseException, phase: str, host: str = "", from_email: str = "
     detail = server_text(exc) or type(exc).__name__
     if phase == "build":  # the email itself can't be written (a subject with a line break, an odd address)
         return Outcome(FAILED, f"This email can't be sent as it is: {detail}.")
+    # Before ValueError: ssl's errors are ValueErrors too.
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return Outcome(CONFIG, f"The server's security certificate isn't valid for {host}. Check the server name, "
+                               "for example smtppro.zoho.com or smtp.hostinger.com.")
+    if isinstance(exc, ssl.SSLError):
+        return Outcome(CONFIG, f"A secure connection to {host} failed ({detail}). Check the server name and port.")
     if isinstance(exc, ValueError):  # a port OpenBerry doesn't use (check_port): the settings need fixing
         return Outcome(CONFIG, f"Your mailbox settings can't be used: {detail}.")
     if isinstance(exc, smtplib.SMTPAuthenticationError):
@@ -286,11 +306,6 @@ def classify(exc: BaseException, phase: str, host: str = "", from_email: str = "
         return Outcome(AUTH, f"Your mailbox refused the username or password ({words}). Use the full email address "
                              "as the username and the mailbox's password, or an app password if the account has "
                              "two-step sign-in.", code, enhanced_status(words))
-    if isinstance(exc, ssl.SSLCertVerificationError):
-        return Outcome(CONFIG, f"The server's security certificate isn't valid for {host}. Check the server name, "
-                               "for example smtppro.zoho.com or smtp.hostinger.com.")
-    if isinstance(exc, ssl.SSLError):
-        return Outcome(CONFIG, f"A secure connection to {host} failed ({detail}). Check the server name and port.")
     if isinstance(exc, NoEncryption):
         return Outcome(CONFIG, str(exc))
     if isinstance(exc, socket.gaierror):
@@ -304,8 +319,8 @@ def classify(exc: BaseException, phase: str, host: str = "", from_email: str = "
         said = f"{code} {words}".strip()
         if 400 <= code < 500 or (code < 400 and phase != "data"):  # a temporary refusal: try again later
             return Outcome(RETRY, RETRY_TEXT.format(detail=said), code, status)
-        no_such_user = phase == "rcpt" and not status.startswith("5.7.") and (
-            _hard_bounce_status(status) or bool(_NO_SUCH_USER.search(words)))
+        no_such_user = phase == "rcpt" and (address_refused(status, words) or not status.startswith("5.7.") and (
+            _hard_bounce_status(status) or bool(_NO_SUCH_USER.search(words))))
         if no_such_user:
             return Outcome(BOUNCE, f"The address doesn't exist (the server said: {said}).", code, status)
         if status.startswith("5.7.") or (not status.startswith("5.2.") and _BLOCKED_WORDS.search(words)):
@@ -395,7 +410,7 @@ def send(job: EmailJob, mailbox: Mailbox, on_data: Callable[[], bool], now: date
     phase = "build"
     conn: smtplib.SMTP | None = None
     try:
-        data = build_email(job, now).as_bytes()
+        data = build_email(job, now).as_bytes(policy=WIRE_POLICY)
         phase = "connect"
         conn = smtp_connect(mailbox)
         phase = "login"
@@ -617,11 +632,19 @@ class Inbox:
         assert self.conn is not None
         data = self._call(self.conn.uid, "FETCH", ",".join(str(u) for u in uids), f"(UID {part})")
         out = []
+        waiting: bytes | None = None  # a message whose UID comes after it ("* 1 FETCH (BODY[] {n}... UID 5)")
         for item in data:
             if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], bytes):
                 meta = item[0].decode("ascii", "replace") if isinstance(item[0], bytes) else str(item[0])
+                waiting = None
                 if m := re.search(r"UID (\d+)", meta):
                     out.append((int(m.group(1)), item[1][:INBOUND_BYTES_MAX]))
+                else:
+                    waiting = item[1][:INBOUND_BYTES_MAX]
+            elif isinstance(item, bytes) and waiting is not None:
+                if m := re.search(rb"UID (\d+)", item):
+                    out.append((int(m.group(1)), waiting))
+                waiting = None
         return out
 
     def append_sent(self, folder: str, raw: bytes) -> None:
@@ -678,33 +701,52 @@ def fold(text: str) -> str:
     return "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
 
 
-# Asking not to be emailed again, in English and Arabic (folded: إلغاء -> الغاء, أزلني -> ازلني). Being generous is
-# safe: a false positive only stops emails to someone who wrote back anyway, and the user reads their reply.
-OPT_OUT_PHRASES = tuple(fold(p) for p in (
-    "unsubscribe", "remove me", "remove us", "opt out", "opt-out", "optout", "take me off", "take us off",
-    "do not contact", "don't contact", "dont contact", "do not email", "don't email", "dont email", "do not e-mail",
-    "don't e-mail", "no more emails", "no more email", "stop emailing", "stop sending", "stop contacting",
-    "do not send me", "do not send us", "don't send me", "don't send us",
-    "إلغاء الاشتراك", "الغاء الاشتراك", "أزلني", "ازالتي", "إزالتي", "لا تراسلني", "لا ترسل", "لا ترسلوا", "لا تتواصل",
-    "لا تتصل", "توقف عن",
+# Asking not to be emailed again, in English and Arabic (folded: إلغاء -> الغاء, أزلني -> ازلني). Narrow on purpose:
+# a match stops every email to the address, for every company, and a chauffeur company's clients write "one stop",
+# "remove me from tomorrow's pickup list", "opt out of the meet and greet" or "don't send the driver before 6". A
+# phrase right after a negation ("please don't unsubscribe me") doesn't count.
+_NEGATED = r"(?<!not )(?<!n't )(?<!dont )(?<!never )"
+_LIST = r"(?:your |the |this |all |any )?(?:mailing |e-?mail |contact |marketing )?(?:list|lists|database)"
+OPT_OUT_PATTERNS = tuple(re.compile(rf"{_NEGATED}(?<!\w)(?:{fold(p)})(?!\w)") for p in (
+    r"unsubscribe", r"opt (?:me|us) out", r"i (?:want|would like|wish) to opt[- ]?out",
+    rf"remove (?:me|us|my (?:e-?mail|address|details)) from {_LIST}", r"remove my (?:e-?mail )?address",
+    rf"take (?:me|us|my (?:e-?mail|address)) off {_LIST}",
+    r"(?:do not|don't|dont|never) (?:contact|e-?mail|message) (?:me|us)", r"no more e-?mails?",
+    r"stop (?:e-?mailing|contacting|messaging|writing to)(?: (?:me|us))?",
+    r"stop sending (?:me|us|these|this|e-?mails?)",
+    r"(?:do not|don't|dont) send (?:me|us) (?:any )?(?:more|further)(?: e-?mails?| messages?)?",
+    r"إلغاء الاشتراك", r"إلغاء اشتراكي", r"لا تراسلني", r"لا تراسلوني", r"عدم مراسلتي",
+    r"أزلني من (?:قائمتكم|قائمتك|القائمة البريدية|قائمة المراسلات|قائمة البريد|مراسلاتكم)",
+    r"لا ترسل(?:وا)? (?:لي|لنا) (?:أي |المزيد من )?(?:رسائل|ايميلات|إيميلات|رسائل بريد)",
+    r"لا تتواصل(?:وا)? (?:معي|معنا)", r"توقف(?:وا)? عن (?:مراسلتي|مراسلتنا|إرسال)",
 ))
-SHORT_STOP = re.compile(r"\b(?:stop|توقف|اوقف|كفى)\b")
-SHORT_STOP_WORDS = 10
+# A sentence (or line, or the sender's own subject) that is only "stop", "unsubscribe", "remove me"...
+_ALONE = re.compile(
+    fold(r"(?:(?:no,? ?)?(?:thanks|thank you)[ ,]*|not interested[ ,]*|no[ ,]+)?(?:please |pls |kindly |الرجاء |رجاء |"
+         r"من فضلك )?")
+    + "(?P<word>" + fold(r"stop|unsubscribe|remove me|remove us|opt me out|opt out|opt-out|توقف|توقفوا|أوقف|أوقفوا|كفى|"
+                         r"كفاية|أزلني|إزالتي|إلغاء الاشتراك") + ")"
+    + fold(r"(?:[ ,]*(?:please|pls|now|thanks|thank you|الرجاء|رجاء|من فضلك|شكرا))?"))
 
 
-def opt_out_words(text: str, subject: str = "") -> str:
-    """The opt-out phrase in a reply ("" if none): a phrase anywhere in its new text, or "stop" in a short one.
+def opt_out_words(text: str, subject: str = "", ignore: Iterable[str] = ()) -> str:
+    """The opt-out words in a reply ("" if none): one of OPT_OUT_PATTERNS anywhere in its new text, or a sentence
+    that is only "stop", "unsubscribe", "remove me"... Lines of `ignore` (our own footers, should a mail app have
+    left our email in the reply unmarked) don't count.
 
     The subject counts only when the sender wrote it ("Unsubscribe", "Remove me"): a "Re: ..." subject is the
     subject of our own email, which says nothing about what they want."""
-    folded = fold(text)
+    drop = {" ".join(line.split()).casefold() for block in ignore for line in (block or "").splitlines()
+            if line.strip()}
+    folded = fold("\n".join(line for line in (text or "").split("\n") if " ".join(line.split()).casefold() not in drop))
     if subject and not _PREFIX.match(subject):
         folded = f"{fold(subject)}\n{folded}"
-    for phrase in OPT_OUT_PHRASES:
-        if re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", folded):
-            return phrase
-    if len(folded.split()) <= SHORT_STOP_WORDS and (m := SHORT_STOP.search(folded)):
-        return m.group(0)
+    for pattern in OPT_OUT_PATTERNS:
+        if m := pattern.search(folded):
+            return m.group(0)
+    for sentence in re.split(r"[.!?؟\n]+", folded):
+        if m := _ALONE.fullmatch(" ".join(sentence.split()).strip(" ,،;:-–—*\"'()")):
+            return m.group("word")
     return ""
 
 
@@ -714,16 +756,21 @@ _QUOTE_START = (
     re.compile(r"^on\b.{0,300}\bwrote:\s*$", re.I),
     re.compile(r"^le\b.{0,300}\ba [ée]crit\s*:\s*$", re.I),
     re.compile(r"^am\b.{0,300}\bschrieb\b.{0,200}:\s*$", re.I),
-    re.compile(r"^.{0,300}كتب.{0,300}:\s*$"),  # Arabic: "في ...، كتب سام <sam@...>:"
+    # Arabic: "في ...، كتب سام <sam@...>:". The whole word only: "المكتب:" (the office) is not it.
+    re.compile(r"^.{0,300}(?<!\w)كتب(?!\w).{0,300}:\s*$"),
 )
 STRIP_INPUT_MAX = 50_000  # the start of a long message is enough to find what is new
 _HEADER_BLOCK = re.compile(r"^(?:from|de|von|من)\s*:", re.I)
 _HEADER_NEXT = re.compile(r"^(?:sent|date|envoy[ée]|gesendet|to|subject|بتاريخ|التاريخ|إلى|الموضوع)\s*:", re.I)
+_HEADER_SUBJECT = re.compile(r"^(?:subject|objet|betreff|الموضوع)\s*:", re.I)
 
 
 def strip_quoted(text: str) -> str:
     """The new part of a reply: quoted lines (">") and everything from "On ... wrote:", "-----Original Message-----",
-    an Outlook From:/Sent: block or an Arabic "كتب ...:" line on are removed."""
+    an Outlook From:/Sent: block or an Arabic "كتب ...:" line on are removed.
+
+    A From: line starts a quoted header block only with an address in it or a Subject: line just below: a trip
+    request's "From: Dubai Marina / To: DXB Terminal 3 / Date: ..." is the reply itself."""
     lines = (text or "")[:STRIP_INPUT_MAX].replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out: list[str] = []
     for i, line in enumerate(lines):
@@ -732,7 +779,8 @@ def strip_quoted(text: str) -> str:
         if len(stripped) <= 600 and any(p.match(stripped) for p in _QUOTE_START) or (
                 stripped.lower().startswith("on ") and _QUOTE_START[2].match(joined)):
             break
-        if _HEADER_BLOCK.match(stripped) and any(_HEADER_NEXT.match(n.strip()) for n in lines[i + 1:i + 4]):
+        if (_HEADER_BLOCK.match(stripped) and any(_HEADER_NEXT.match(n.strip()) for n in lines[i + 1:i + 4])
+                and ("@" in stripped or any(_HEADER_SUBJECT.match(n.strip()) for n in lines[i + 1:i + 6]))):
             break
         if stripped.startswith(">"):
             continue
@@ -748,23 +796,32 @@ class _TextFromHtml(HTMLParser):
     SKIP = {"script", "style", "head", "title", "blockquote"}
     VOID = {"br", "hr", "img", "meta", "link", "input", "col", "area", "base", "wbr", "source", "embed"}
 
-    QUOTE_MARKERS = ("gmail_quote", "divrplyfwdmsg", "appendonsend", "moz-cite-prefix", "yahoo_quoted")
+    QUOTE_MARKERS = ("gmail_quote", "moz-cite-prefix", "yahoo_quoted")
+    # Outlook (web, Outlook.com, desktop) puts only the From/Sent/To/Subject block in divRplyFwdMsg (after the
+    # appendonsend marker): the quoted email follows as its sibling. Everything from there on is the quote.
+    END_MARKERS = ("divrplyfwdmsg", "appendonsend")
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.skip_tag = ""   # the element being skipped; only its own nesting is counted (other tags may not close)
         self.skip_depth = 0
+        self.done = False    # an END_MARKER was seen: the rest is quoted
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.done:
+            return
         if self.skip_depth:
             self.skip_depth += tag == self.skip_tag
+            return
+        marker = " ".join(v or "" for k, v in attrs if k in ("class", "id")).lower()
+        if any(m in marker for m in self.END_MARKERS):
+            self.done = True
             return
         if tag in self.VOID:
             if tag in self.BLOCK:
                 self.parts.append("\n")
             return
-        marker = " ".join(v or "" for k, v in attrs if k in ("class", "id")).lower()
         if tag in self.SKIP or any(m in marker for m in self.QUOTE_MARKERS):
             self.skip_tag, self.skip_depth = tag, 1
             return
@@ -775,11 +832,11 @@ class _TextFromHtml(HTMLParser):
         if self.skip_depth:
             self.skip_depth -= tag == self.skip_tag
             return
-        if tag in self.BLOCK and tag not in self.VOID:
+        if tag in self.BLOCK and tag not in self.VOID and not self.done:
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if not self.skip_depth:
+        if not self.skip_depth and not self.done:
             self.parts.append(data)
 
 
@@ -907,9 +964,25 @@ def _original_ids(msg: Message, own_id: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(i for i in ids if i != own_id))
 
 
+# A permanent failure that is about the address, whatever its status code: Microsoft 365's "550 5.4.1 Recipient
+# address rejected: Access denied" (no such recipient), a domain that doesn't exist (5.4.4), and RESOLVER.RST.* (a
+# Microsoft 365 group or mailbox that takes no mail from outside, a setting of the recipient's, not spam).
+_ADDRESS_GONE = re.compile(r"recipient address rejected|recipientnotfound|resolver\.adr\.|"
+                           r"host or domain name not found|nonexistentdomain|domain (?:not found|does not exist)", re.I)
+_OUTSIDERS_REFUSED = re.compile(r"resolver\.rst\.", re.I)
+
+
+def address_refused(status: str, words: str) -> bool:
+    """A permanent failure that means the address can't get our email (see _ADDRESS_GONE)."""
+    return bool(_OUTSIDERS_REFUSED.search(words)) or (status.startswith("5.4.") and bool(_ADDRESS_GONE.search(words)))
+
+
 def _bounce_kind(status: str, words: str) -> str:
-    """bounce (the address doesn't exist: 5.1.x, 5.2.1), policy_reject (5.7.x, or spam and block words: the sender's
-    reputation, so the address stays) or soft_bounce (delayed, mailbox full 5.2.2, anything temporary)."""
+    """bounce (the address doesn't exist: 5.1.x, 5.2.1, address_refused), policy_reject (5.7.x, or spam and block
+    words: the sender's reputation, so the address stays) or soft_bounce (delayed, mailbox full 5.2.2, anything
+    temporary)."""
+    if address_refused(status, words):
+        return BOUNCE
     if status.startswith("5.7."):
         return POLICY_REJECT
     if _hard_bounce_status(status) or (status.startswith("5.") and _NO_SUCH_USER.search(words)):
@@ -926,9 +999,10 @@ def _auto_reply(msg: Message, subject: str) -> bool:
             or precedence in ("auto_reply", "bulk", "junk", "list") or bool(_AUTO_SUBJECT.match(subject)))
 
 
-def classify_inbound(raw: bytes) -> Inbound:
+def classify_inbound(raw: bytes, ignore: Iterable[str] = ()) -> Inbound:
     """What an inbox message is: a bounce (hard, soft or a policy rejection), the List-Unsubscribe email, an
-    auto-reply, an opt-out or a reply. Raises ValueError for a message that can't be read at all."""
+    auto-reply (also a newsletter or list mail that answers none of our emails), an opt-out or a reply. `ignore`:
+    our own footers, never read as an opt-out. Raises ValueError for a message that can't be read at all."""
     try:
         msg = email.message_from_bytes(raw[:INBOUND_BYTES_MAX], policy=email.policy.default)
     except Exception as exc:
@@ -946,8 +1020,9 @@ def classify_inbound(raw: bytes) -> Inbound:
     if report or (system and _BOUNCE_SUBJECT.search(subject)):
         blocks = _dsn_blocks(msg) if report else []
         if blocks:
-            failed = [b for b in blocks if b.get("action", "").lower() in ("failed", "delayed", "")]
-            chosen = failed or blocks
+            chosen = [b for b in blocks if b.get("action", "").lower() in ("failed", "delayed", "")]
+            if not chosen:  # delivered, relayed or expanded: nothing failed
+                return Inbound(AUTO_REPLY, **base)
             kinds = [(_bounce_kind(b.get("status", "") or enhanced_status(b.get("diagnostic", "")),
                                    b.get("diagnostic", "")) if b.get("action", "").lower() != "delayed"
                       else SOFT_BOUNCE, b) for b in chosen]
@@ -972,12 +1047,28 @@ def classify_inbound(raw: bytes) -> Inbound:
     text = strip_quoted(_body_text(msg))[:INBOUND_TEXT_MAX]
     if m := _UNSUBSCRIBE_SUBJECT.match(subject):  # the List-Unsubscribe email
         return Inbound(OPT_OUT, **base, text=text, token=m.group(1).lower(), opt_out="unsubscribe")
-    if _auto_reply(msg, subject):
+    # A newsletter from the lead's own address (a hotel's Mailchimp campaign from info@) answers none of our emails:
+    # noted, never read for opt-out words. A reply sent through a mailing list still refers to our email.
+    bulk = not references and bool(_header(msg, "List-Id") or _header(msg, "List-Unsubscribe"))
+    if _auto_reply(msg, subject) or bulk:
         return Inbound(AUTO_REPLY, **base, text=text)
-    words = opt_out_words(text, subject)
+    words = opt_out_words(text, subject, ignore)
     if words:
         return Inbound(OPT_OUT, **base, text=text, opt_out=words)
     return Inbound(REPLY, **base, text=text)
+
+
+def content_key(raw: bytes) -> str:
+    """A key for a message without a Message-ID that stays the same wherever it is read again (another folder, or
+    after the server renumbered the folder): its sender, recipient, date and subject and the start of its body."""
+    head, _, body = raw[:INBOUND_BYTES_MAX].replace(b"\r\n", b"\n").partition(b"\n\n")
+    try:
+        msg = email.message_from_bytes(head + b"\n\n", policy=email.policy.default)
+        facts = "\0".join(_header(msg, name, True) for name in ("From", "To", "Date", "Subject"))
+    except Exception:
+        facts = ""
+    digest = hashlib.sha256(facts.encode("utf-8", "replace") + b"\0" + body[:2048]).hexdigest()
+    return f"sha:{digest[:40]}"
 
 
 def header_facts(headers: Message) -> dict[str, Any]:

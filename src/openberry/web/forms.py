@@ -101,7 +101,7 @@ def checked(form: FormData, name: str) -> bool:
 AGENT_LIMIT_RANGE = int_bounds(OutreachConfig, "agent_daily_limit", (1, 50))
 AUTO_APPROVE_HOURS_RANGE = int_bounds(OutreachConfig, "auto_approve_hours", (1, 72))
 EMAIL_LIMIT_RANGE = int_bounds(OutreachConfig, "email_daily_limit", (1, 100))
-EMAIL_GAP_RANGE = int_bounds(OutreachConfig, "email_gap_minutes", (1, 240))
+EMAIL_GAP_RANGE = int_bounds(OutreachConfig, "email_gap_minutes", (5, 240))
 
 
 # --------------------------------------------------------------------------------------

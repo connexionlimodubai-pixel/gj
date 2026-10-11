@@ -108,7 +108,11 @@ def test_values_round_trip_through_the_dotenv_reader(home: Path, value: str) -> 
     assert get_settings().google_places_key == value.strip()
 
 
-@pytest.mark.parametrize("value", ["two\nlines", "cr\rhere", "nul\0", "both ' and \""])
+@pytest.mark.parametrize("value", ["two\nlines", "cr\rhere", "nul\0", "both ' and \"",
+                                   # Line breaks only str.splitlines() knows: read back, the value would end there
+                                   # and the rest would be read as another setting.
+                                   *(f"Abc{sep}OPENBERRY_PUBLIC_REGISTRATION=true"
+                                     for sep in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " "))])
 def test_values_a_dotenv_file_cannot_hold_are_refused(home: Path, value: str) -> None:
     with pytest.raises(envfile.SettingNotSaved, match="line breaks|both kinds of quotes"):
         envfile.save_settings({KEY: value})

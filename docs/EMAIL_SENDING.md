@@ -51,9 +51,10 @@ These rules are checked by OpenBerry itself every time, whatever the dashboard, 
 | Mailbox connected and inbox checked | Nothing is sent unless your mailbox is connected and its inbox was read successfully in the last 30 minutes, so a reply or opt-out is seen first. |
 | Approved emails only, exactly as approved | The subject and text as you approved them, plus your footer. Plain text only. If the text changes, it is a draft again. While an email is being sent, it can't be edited or deleted. After it is sent, its text can't change. |
 | Auto-approved emails only with their own switch | Drafts approved by [auto-approve](AI_AGENT_SENDING.md#auto-approve-optional) are emailed only if you also tick **Also send emails that auto-approve approved** (off by default). |
-| A real recipient | A valid address, never a no-reply or system address, never an address on your never-email list (opted out, bounced, or marked by you), never an address whose domain is on your never-contact list. If a lead's address changes, its approved emails go back to draft. |
-| The right people | Never leads who replied, booked a meeting, were won, lost or disqualified, or are on your never-contact list. Never for a paused company. |
-| One at a time | One email per person at a time, never the same step twice, and a follow-up only once its wait has passed (counting messages sent on any channel). |
+| A real recipient | A valid address, never a no-reply or system address, never your own mailbox (use **Send test email**), never an address on your never-email list (opted out, bounced, or marked by you), never an address whose domain is on your never-contact list. If a lead's address changes, its approved emails go back to draft, also one being sent at that moment. |
+| The right people | Never leads who replied, booked a meeting, were won, lost or disqualified, opted out (tagged `unsubscribed`, whatever address they get later), or are on your never-contact list. Never for a paused company. A change you make while an email is being sent (the lead marked Lost, the never-contact list, a switch) stops it before your mail server receives it. |
+| One address, one recipient | An address found through several leads (two hotel branches with one reservations@, a person and their company's info@, even in two companies) is one recipient: it gets one email at a time, never the same step twice, and a reply through one lead stops the emails of all of them. |
+| One at a time, in order | One email per person at a time, never the same step twice, never a follow-up before the earlier step was sent or skipped, and a follow-up only once its wait has passed (counting messages sent on any channel, and emails that may have been sent). |
 | Limits and pace | At most your daily limit in any 24 hours (default **30**, at most **100**), at least **5 minutes** between two emails (you can choose more), only in your sending hours (default **Monday to Friday, 09:00 to 18:00**, on your computer's clock), and at most 100 emails a day from the mailbox for all companies together. |
 | Never twice | Each email is claimed, then marked "being sent" just before your mail server receives it, then recorded as sent. If the connection breaks while the server is receiving it, OpenBerry can't know whether it went out: it shows **May have been sent** and never sends it again by itself. |
 | Stops by itself | On a reply, an opt-out, a bounce, a refused login, a security problem, the provider refusing to send, or repeated failures. |
@@ -62,11 +63,13 @@ These rules are checked by OpenBerry itself every time, whatever the dashboard, 
 ## 2. Connect your mailbox
 
 Open **Mailbox** in the sidebar. Choose your provider: it fills in the servers. Then type your email address, your
-name and your password, and click **Save and check inbox**.
+name and your password, and click **Save and check inbox**. Saving checks reading only: then click **Send test email**
+to check sending, before you turn sending on.
 
 - Your password is saved in OpenBerry's settings file in your data folder (`~/.openberry/.env`, or the folder in
   `OPENBERRY_HOME`), which only your user account can read. It is never shown again, never stored in the database,
-  never given to Claude or the JSON API, and never written to a log.
+  never given to Claude or the JSON API, and never written to a log. If you change a server or the username, type the
+  password again: OpenBerry never sends a saved password to a server it wasn't typed for.
 - OpenBerry always connects encrypted: SMTP on port 465 (TLS) or 587 (STARTTLS), IMAP on port 993, with the server's
   certificate checked. Other ports are refused.
 - **Send test email** sends a short email to your own address only (5 tests in 10 minutes), then checks the inbox.
@@ -83,8 +86,9 @@ name and your password, and click **Save and check inbox**.
 - Your account's data centre changes the ending: `.eu` (Europe), `.in` (India), `.com.au` (Australia). Pick it under
   **Zoho data centre**. Zoho's IMAP settings page shows your exact servers; you can type them over the preset.
 - Turn on IMAP in Zoho Mail: **Settings → Mail Accounts → IMAP Access**.
-- Username: your full email address. With two-step sign-in, create an **app-specific password** in Zoho (My Account →
-  Security → App passwords) and use it here.
+- Username: your full email address. With two-step sign-in, create an **app-specific password**: sign in at
+  accounts.zoho.com, open **Security → App Passwords**, click **Generate New Password**, name it "OpenBerry", and paste
+  the password it shows here (Zoho shows it once).
 - The From address must be your mailbox or one of its aliases.
 - Zoho limits outgoing email to between 50 and 500 an hour, depending on your sending reputation, and doesn't allow
   bulk or burst sending. OpenBerry sends one email at a time, minutes apart. Zoho's free business plans may not include
@@ -110,7 +114,7 @@ Microsoft 365 and Outlook.com need a sign-in method OpenBerry doesn't have, so t
 
 | You see | What to do |
 |---|---|
-| Your mailbox refused the username or password | Use the full email address as the username, and the mailbox's password or an app password. Sending stays paused until you save the settings again or click **Try again**. |
+| Your mailbox refused the username or password | Use the full email address as the username, and the mailbox's password or an app password. Sending and the automatic inbox checks stay paused until you save the settings again, or click **Try again** or **Check inbox**: a mail provider can lock an account that keeps trying a wrong password. |
 | The server's security certificate isn't valid | The server name is wrong (for example `mail.yourdomain.com` instead of `smtppro.zoho.com`). |
 | Can't find the server | A typo in the server name, or no internet connection. |
 | This server doesn't offer encryption on port 587 | Use port 465. OpenBerry never sends your password unencrypted. |
@@ -121,9 +125,18 @@ Microsoft 365 and Outlook.com need a sign-in method OpenBerry doesn't have, so t
 
 - **A separate mailbox, ideally on a separate domain** (for example `acme-mail.com` next to `acme.com`). If it gets
   blocked or lands on a blocklist, your main domain and your client email are safe.
-- **SPF, DKIM and DMARC** tell receiving servers your emails are really from you. Your mail provider shows the DNS
-  records to add (Zoho: Admin Console → Domains; Hostinger: hPanel → Emails). Without them, many of your emails go to
-  spam.
+- **SPF, DKIM and DMARC** tell receiving servers your emails are really from you. Without them, many of your emails go
+  to spam. They are DNS records of the domain you send from, added where its DNS is managed: often your domain
+  registrar, or Hostinger (hPanel → Domains → DNS / Nameservers) if the domain is there.
+  1. **SPF**: your mail provider gives one TXT record. For Zoho (Admin Console → Domains → your domain → Email
+     Configuration → SPF) it looks like `v=spf1 include:zoho.com ~all` (`zoho.eu`, `zoho.in`... for other data
+     centres). A domain has only one SPF record: if one exists, add the `include:` to it.
+  2. **DKIM**: in Zoho, Admin Console → Domains → your domain → Email Configuration → DKIM → Add. Zoho shows a
+     selector and a long TXT value: add that TXT record, then click **Verify** in Zoho.
+  3. **DMARC**: start with a TXT record named `_dmarc` and the value `v=DMARC1; p=none; rua=mailto:you@yourdomain.com`.
+     It changes nothing for delivery yet and sends you reports; move to `p=quarantine` once SPF and DKIM pass.
+  4. Wait for the records to take effect (up to a day), then send a test email to a Gmail address and check
+     **Show original**: SPF, DKIM and DMARC should say PASS.
 - **Warm up slowly, and keep it small.**
 
 | When | Daily limit |
@@ -159,16 +172,20 @@ is ignored and not stored.
 
 - **A reply** is logged on the lead's page. The lead moves to Replied, and their drafts and approved messages are
   skipped (emails and LinkedIn).
-- **An opt-out** ("unsubscribe", "stop", "remove me", "don't email me", "إلغاء الاشتراك"...), or the email a mail
-  app's Unsubscribe button sends: the address goes on your **never-email list**, for every company, and the lead is
-  disqualified and tagged `unsubscribed`. A company lead also goes on the company's never-contact list. This happens
-  at the next inbox check, within minutes.
+- **An opt-out** ("unsubscribe", "STOP" on its own, "remove me from your list", "don't email me", "إلغاء
+  الاشتراك"...), or the email a mail app's Unsubscribe button sends: the address goes on your **never-email list**, for
+  every company, and the lead is tagged `unsubscribed` (never emailed again, whatever address it gets) and
+  disqualified. A lead in a meeting or won keeps its status, and the company's never-contact list is left to you: words
+  in an email can be misread ("one stop", "remove me from tomorrow's pickup list" are not opt-outs, and OpenBerry
+  doesn't read them as such). This happens at the next inbox check, within minutes.
+- **Newsletters** from a lead's address (a hotel's campaign from its info@) are noted, never read as a reply or an
+  opt-out. Your own emails coming back to your mailbox are ignored.
 - **A hard bounce** (the address doesn't exist): the address goes on the never-email list, and the lead is tagged
   `email-bounced`. Three hard bounces in 24 hours pause email sending for that company for 24 hours.
 - **Auto-replies** (out of office) and **delayed delivery** notices are noted on the lead's page; the sequence goes on.
 
-You can also click **Unsubscribed (never email again)** on a lead's page, or ask Claude to log a reply with
-`opt_out=true`. The never-email list is on the **Mailbox** page. It stays when a lead is deleted, so a business found
+You can also click **Unsubscribed (never email again)** on a lead's page (a company lead then also goes on the
+company's never-contact list), or ask Claude to log a reply with `opt_out=true`. The never-email list is on the **Mailbox** page. It stays when a lead is deleted, so a business found
 again on Google Maps stays off it. Remove a bounced address once it is fixed; remove an opt-out only if the person
 asked to hear from you again.
 
@@ -184,10 +201,11 @@ Turn it on only if you trust every draft.
 
 | What happened | What OpenBerry does |
 |---|---|
-| Login refused, a certificate problem, an unknown server, a From address not allowed | Pauses the mailbox until you save its settings or click **Try again** on the Mailbox page. The email waits. |
-| The provider refuses to send (spam, a limit, a suspended mailbox) | The email isn't sent. The mailbox pauses for 24 hours. Check your mailbox in the provider's webmail before you resume. |
+| Login refused (sending or reading), a certificate problem, an unknown server, a From address not allowed | Pauses the mailbox (sending, and the automatic inbox checks after a refused login) until you save its settings or click **Try again** on the Mailbox page. The email waits. |
+| A reply couldn't be saved (OpenBerry's database was busy) | The inbox check counts as failed, so nothing is sent, and the message is read again at the next check. |
+| The provider refuses to send (spam, a limit, a suspended mailbox) | The email isn't sent. The mailbox pauses for 24 hours, also when you save its settings. Check your mailbox in the provider's webmail before you click **Try again**. |
 | The server can't be reached | Tries again after 5, 15, then 60 minutes. |
-| The address doesn't exist | The email isn't sent and the address goes on the never-email list. |
+| The address doesn't exist (also Microsoft 365's "Recipient address rejected", a domain that doesn't exist, or a group that takes no outside mail) | The email isn't sent and the address goes on the never-email list. Fix the address on the lead's page, or skip the email. |
 | The connection broke while the server was receiving the email | **May have been sent.** Check your mailbox's Sent folder, then choose **Mark sent** or **Send again** (it may then arrive twice). A reply or bounce that refers to it settles it by itself. |
 | OpenBerry closed while sending | The same: before the server received anything, the email is simply tried again; during, it may have been sent. |
 | A sent email couldn't be saved in OpenBerry's database | OpenBerry stops sending until you restart it, so nothing can go out twice. |

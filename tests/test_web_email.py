@@ -12,6 +12,7 @@ import stat
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -150,15 +151,54 @@ def test_saving_the_mailbox_writes_the_data_folders_env_file_and_checks_the_inbo
 
 def test_an_empty_password_keeps_the_saved_one_and_regions_and_presets_fill_the_servers(client):
     save_mailbox(client)
-    follow(client, save_mailbox(client, password="", provider="zoho_personal", region="eu", smtp_port="587"))
+    follow(client, save_mailbox(client, password="", smtp_port="587", from_name="Sam R."))  # same servers
     settings = config.get_settings()
-    assert settings.smtp_password == PASSWORD
+    assert settings.smtp_password == PASSWORD and settings.smtp_port == 587 and settings.smtp_from_name == "Sam R."
+    follow(client, save_mailbox(client, password=PASSWORD, provider="zoho_personal", region="eu", smtp_port="587"))
     assert (settings.smtp_host, settings.smtp_port, settings.imap_host) == ("smtp.zoho.eu", 587, "imap.zoho.eu")
-    follow(client, save_mailbox(client, provider="hostinger", password=""))
+    follow(client, save_mailbox(client, provider="hostinger"))
     assert (settings.smtp_host, settings.imap_host) == ("smtp.hostinger.com", "imap.hostinger.com")
-    follow(client, save_mailbox(client, provider="other", smtp_host="Mail.Example.COM", imap_host="imap.example.com",
-                                password=""))
+    follow(client, save_mailbox(client, provider="other", smtp_host="Mail.Example.COM", imap_host="imap.example.com"))
     assert settings.smtp_host == "mail.example.com" and settings.mail_provider == "other"
+
+
+@pytest.mark.parametrize("changes", [
+    {"provider": "other", "smtp_host": SMTP_HOST, "imap_host": "mail.attacker.example"},
+    {"provider": "other", "smtp_host": "mail.attacker.example", "imap_host": IMAP_HOST},
+    {"provider": "other", "smtp_host": SMTP_HOST, "imap_host": IMAP_HOST, "username": "someone@else.example"},
+])
+def test_the_saved_password_never_goes_to_a_new_server(client, offline_mail, changes):
+    follow(client, save_mailbox(client, provider="other", smtp_host=SMTP_HOST, imap_host=IMAP_HOST))
+    offline_mail.log.clear()
+    offline_mail.imap_logins.clear()
+    page = follow(client, save_mailbox(client, password="", **changes))
+    assert "Type the password again: the server or username changed." in flashes(page)
+    assert "Nothing was saved." in flashes(page)
+    settings = config.get_settings()
+    assert (settings.smtp_host, settings.imap_host, settings.smtp_username) == (SMTP_HOST, IMAP_HOST, FROM)
+    assert offline_mail.log == [] and offline_mail.imap_logins == []  # no connection to anyone
+    follow(client, post(client, "/mailbox", {"action": "test"}))
+    assert all(entry[2] == SMTP_HOST for entry in offline_mail.log if entry[:2] == ("smtp", "connect"))
+    # A separate reading password is kept only for its own reading server and username.
+    follow(client, save_mailbox(client, password=PASSWORD, provider="other", smtp_host=SMTP_HOST, imap_host=IMAP_HOST,
+                                imap_username="reader@acme-mail.example", imap_password="Reading-Pass-1"))
+    page = follow(client, save_mailbox(client, password=PASSWORD, provider="other", smtp_host=SMTP_HOST,
+                                       imap_host="imap.attacker.example", imap_username="reader@acme-mail.example"))
+    assert "Type the reading password again" in flashes(page) and settings.imap_host == IMAP_HOST
+
+
+def test_a_password_set_outside_openberry_needs_the_servers_changed_there_too(client, monkeypatch):
+    follow(client, save_mailbox(client, provider="other", smtp_host=SMTP_HOST, imap_host=IMAP_HOST))
+    monkeypatch.delitem(config._FROM_FILE, "OPENBERRY_SMTP_PASSWORD", raising=False)
+    monkeypatch.setenv("OPENBERRY_SMTP_PASSWORD", "env-pass")  # the server's environment (Docker)
+    page = follow(client, save_mailbox(client, password="", provider="other", smtp_host=SMTP_HOST,
+                                       imap_host="mail.attacker.example"))
+    assert "The password is set outside OpenBerry (OPENBERRY_SMTP_PASSWORD)" in flashes(page)
+    assert config.get_settings().imap_host == IMAP_HOST
+    # Disconnect removes what OpenBerry saved, and says what it couldn't remove.
+    page = follow(client, post(client, "/mailbox", {"action": "disconnect"}))
+    assert "Some mailbox settings are set outside OpenBerry (OPENBERRY_SMTP_PASSWORD)" in flashes(page)
+    assert "its password removed" not in flashes(page)
 
 
 @pytest.mark.parametrize("changes,problem", [
@@ -169,11 +209,30 @@ def test_an_empty_password_keeps_the_saved_one_and_regions_and_presets_fill_the_
     ({"username": "sam rahman"}, "without spaces"),
     ({"password": ""}, "Enter the mailbox's password"),
     ({"password": "two\nlines"}, "can't contain line breaks"),
+    # Read back from the .env file, the password would end at any of these, and the rest become another setting.
+    *(({"password": f"Abc{sep}OPENBERRY_PUBLIC_REGISTRATION=true"}, "can't contain line breaks")
+      for sep in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ")),
+    ({"imap_username": "reader@acme-mail.example", "imap_password": "a b"}, "reading password can't contain"),
 ])
 def test_bad_mailbox_settings_save_nothing(client, changes, problem):
     page = follow(client, save_mailbox(client, **changes))
     assert problem in flashes(page) and "Nothing was saved." in flashes(page)
     assert not env_file().exists() and config.get_settings().smtp_host == ""
+
+
+def test_saving_the_mailbox_lifts_a_refused_login_but_never_a_providers_block(client, offline_mail):
+    follow(client, save_mailbox(client))
+    repo.record_email_failure(0, "", mailer.PROVIDER_BLOCK, "554 5.7.1 Message rejected as spam", FROM)
+    page = follow(client, save_mailbox(client, password="", from_name="Sam R."))  # only the name changed
+    state = repo.mailbox_state(FROM)
+    assert state["paused"] and state["paused_until"] and "rejected as spam" in state["pause_reason"]
+    assert "Now click Send test email" in flashes(page)
+    repo.record_email_failure(0, "", mailer.AUTH, "535 refused", FROM)
+    follow(client, save_mailbox(client, password=""))  # new settings: a refused login is tried again
+    state = repo.mailbox_state(FROM)
+    assert not state["auth_failed"] and state["paused_until"]  # the provider's block stays
+    follow(client, post(client, "/mailbox", {"action": "retry"}))  # only Try again lifts it early
+    assert not repo.mailbox_state(FROM)["paused"]
 
 
 def test_settings_from_the_environment_win_and_are_read_only(client, monkeypatch):
@@ -212,7 +271,7 @@ def test_check_inbox_retry_and_disconnect(client, company, offline_mail):
     ready(company)
     repo.record_email_failure(0, "", mailer.AUTH, "refused", FROM)
     page = client.get("/mailbox").text
-    assert "Sending is paused until you fix the mailbox settings" in html_lib.unescape(page)
+    assert "Sending and inbox checks are paused until you fix the mailbox settings" in html_lib.unescape(page)
     follow(client, post(client, "/mailbox", {"action": "retry"}))
     assert not repo.mailbox_state(FROM)["paused"]
     assert "Inbox checked" in flashes(follow(client, post(client, "/mailbox", {"action": "check"})))
@@ -404,7 +463,8 @@ def test_approving_an_email_says_what_happens_and_needs_a_subject(client, compan
     assert "OpenBerry will email it from your mailbox" in flashes(follow(client, resp))
     resp = post(client, f"{base}/messages/{second.id}", {"action": "approve", "next": f"{base}/outreach"},
                 page=f"{base}/outreach")
-    assert "It won't be emailed now (another email to this lead goes first" in flashes(follow(client, resp))
+    assert "It won't be emailed now (another email to this lead or its address goes first" in flashes(
+        follow(client, resp))
 
 
 def test_an_email_being_sent_cant_be_deleted_from_the_dashboard(client, company):
@@ -455,10 +515,69 @@ def test_the_dashboard_says_email_sending_is_on_and_flags_problems(client, compa
     assert "Email sending is on: 0 of 30 emails sent in the last 24 hours · 1 queued." in page
     with db.connect() as c:
         c.execute("UPDATE messages SET email_state = 'failed', send_error = 'refused' WHERE id = ?", (msg.id,))
-    assert "1 email from your mailbox needs you" in html_lib.unescape(client.get(f"/c/{company.id}").text)
+    page = re.sub(r"<[^>]+>", "", html_lib.unescape(client.get(f"/c/{company.id}").text))
+    assert "1 email from your mailbox needs you: it may have been sent, or sending failed. Check it" in page
     settings_page = html_lib.unescape(client.get(f"/c/{company.id}/settings").text)
     assert "Email sending: On, at most 30 a day. Change it on the Outreach page." in re.sub(r"<[^>]+>", "",
                                                                                             settings_page)
+    repo.save_inbox_check(FROM, False, "Your mailbox refused the username or password for reading mail.")
+    page = re.sub(r"<[^>]+>", "", html_lib.unescape(client.get(f"/c/{company.id}").text))
+    assert "Email sending is on, but OpenBerry can't read your inbox: 0 of 30 emails" in page
+    assert "is inbox not checked" not in page
+    assert ">Inbox problem<" in card(client.get(f"/c/{company.id}/outreach").text)
+
+
+def test_the_card_speaks_to_you_on_your_clock_and_offers_only_what_can_work(client, company, monkeypatch):
+    monkeypatch.setattr(repo, "EMAIL_LOCAL_TZ", timezone(timedelta(hours=4)))  # this computer is in Dubai
+    ready(company)
+    lina = lead_with_email(company)
+    repo.create_message(lina, "Hello", channel="email", subject="Cars", status="sent")  # by hand, just now
+    follow_up = repo.create_message(lina, "Following up", channel="email", subject="Cars", step=2, status="approved")
+    page = html_lib.unescape(client.get(f"/c/{company.id}/outreach?tab=approved").text)
+    item = re.search(rf'id="q-{follow_up.id}".*?</li>', page, re.S).group(0)
+    line = re.search(r'<p class="email-line email-line-held">.*?</p>', item, re.S).group(0)
+    assert "not due before" in line and "+00:00" not in line  # "Thu 15 Oct, 14:00", on this computer's clock
+    with db.connect() as c:
+        repo._save_email_pause(c, company.id, repo.utcnow() + timedelta(hours=2),
+                               "3 hard bounces in 24 hours. Check the addresses before you resume.")
+    text = re.sub(r"<[^>]+>", "", html_lib.unescape(card(client.get(f"/c/{company.id}/outreach").text)))
+    assert "Only you can resume it early" in text and "the user" not in text
+    assert "+00:00" not in text and ".)" not in text and ".." not in text
+    repo.resume_email_sending(company.id)
+    # A hard bounce: Try again can't work while the address is on the never-email list.
+    omar = lead_with_email(company, "omar@client.example", "Omar Haddad")
+    bounced = repo.create_message(omar, "Hi Omar", channel="email", subject="Cars", status="approved")
+    with db.connect() as c:
+        c.execute("UPDATE messages SET email_state = 'failed', email_to = 'omar@client.example', send_error = ? "
+                  "WHERE id = ?", ("The address doesn't exist (the server said: 550 5.1.1 User unknown).", bounced.id))
+    repo.add_suppression("omar@client.example", "bounce", "5.1.1 User unknown")
+    email_card = card(client.get(f"/c/{company.id}/outreach").text)
+    attention = re.search(r'<ul class="list email-attention">.*?</ul>', email_card, re.S).group(0)
+    assert "Fix the address" in attention and 'value="retry"' not in attention
+    resp = post(client, f"/c/{company.id}/messages/{bounced.id}/email", {"action": "retry"},
+                page=f"/c/{company.id}/outreach")
+    flashed = flashes(follow(client, resp))
+    assert "It isn't emailed now: omar@client.example bounced" in flashed and "back in the queue" not in flashed
+    # The lead page's never-email line starts with words, not a capitalized address.
+    page = html_lib.unescape(client.get(f"/c/{company.id}/leads/{omar}").text)
+    assert "This address bounced: it doesn't exist (" in page and "Omar@client.example" not in page
+
+
+def test_the_confirmations_say_what_approving_and_turning_on_do(client, company):
+    connect_mailbox(config.get_settings())
+    repo.save_inbox_check(FROM, True)
+    lina = lead_with_email(company)
+    repo.create_message(lina, "Hello", channel="email", subject="Cars", status="approved")
+    repo.create_message(lead_with_email(company, "noreply@hotel.example", "No Reply"), "Hi", channel="email",
+                        subject="Hi", status="approved")  # held back: never emailed
+    repo.create_message(lead_with_email(company, "omar@client.example", "Omar"), "Hi Omar", channel="email",
+                        subject="Cars")  # a draft, so the Drafts tab has its bulk bar
+    email_card = html_lib.unescape(card(client.get(f"/c/{company.id}/outreach").text))
+    assert "starting with the 1 approved email ready now" in email_card and 'data-confirm-limit="#email-limit"' in \
+        email_card
+    assert "data-email-sending" not in client.get(f"/c/{company.id}/outreach?tab=drafts").text
+    ready(company)
+    assert "data-email-sending" in client.get(f"/c/{company.id}/outreach?tab=drafts").text
 
 
 # --------------------------------------------------------------------------------------
@@ -492,11 +611,32 @@ async def test_get_email_status_never_shows_the_mailbox_credentials(company, web
         assert secret not in dumped, secret
 
 
+async def test_get_email_status_never_names_the_mail_servers_in_errors(company, web_settings, offline_mail):
+    import socket
+
+    ready(company)
+    lead = lead_with_email(company)
+    msg = repo.create_message(lead, "Hello", channel="email", subject="Airport transfers", status="approved")
+    offline_mail.imap_fail["connect"] = socket.gaierror(-2, "Name or service not known")
+    assert services.check_inbox()["status"] == "failed"  # "Can't find the server imap.acme-mail.example..."
+    repo.record_email_failure(0, "", mailer.CONFIG, f"A secure connection to {SMTP_HOST} failed.", FROM)
+    with db.connect() as c:
+        c.execute("UPDATE messages SET email_state = 'failed', send_error = ? WHERE id = ?",
+                  (f"Your mail server {SMTP_HOST.upper()} refused this email", msg.id))
+    async with mcp_client() as c:
+        error, status = await call(c, "get_email_status", company_id=company.id)
+    assert not error and status["mailbox"]["inbox_error"].startswith("Can't find the server your mail server")
+    dumped = json.dumps(status).lower()
+    assert SMTP_HOST not in dumped and IMAP_HOST not in dumped
+    with TestClient(create_app(web_settings)) as api:  # the JSON API returns the same
+        assert IMAP_HOST not in api.get(f"/api/companies/{company.id}/email-status").text
+
+
 async def test_claude_may_only_make_email_sending_safer(company, web_settings):
-    ready(company, email_daily_limit=20, email_send_auto_approved=True)
+    ready(company, email_daily_limit=20, email_send_auto_approved=True, email_gap_minutes=10)
     async with mcp_client() as c:
         for change, words in (({"email_daily_limit": 50}, "raise the daily email limit"),
-                              ({"email_gap_minutes": 1}, "send emails closer together"),
+                              ({"email_gap_minutes": 6}, "send emails closer together"),
                               ({"email_start_hour": 0, "email_end_hour": 24, "email_days": [0]}, None),
                               ({"email_footer": "Other footer, reply unsubscribe"}, "change the email footer"),
                               ({"email_paused_until": None, "email_pause_reason": "x"}, "pause or resume")):

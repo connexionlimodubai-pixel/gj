@@ -194,6 +194,15 @@ def _short(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _no_host(text: str, limit: int) -> str:
+    """A mail error for Claude, shortened, with the mailbox's server names replaced: get_email_status never names the
+    server (the dashboard's own messages do, to say what to check)."""
+    settings = config.get_settings()
+    for host in sorted({settings.smtp_host.strip(), settings.imap_host.strip()} - {""}, key=len, reverse=True):
+        text = re.sub(re.escape(host), "your mail server", text or "", flags=re.I)
+    return _short(text, limit)
+
+
 def _clamp(value: int, low: int, high: int) -> int:
     return max(low, min(high, int(value)))
 
@@ -1772,7 +1781,8 @@ def get_email_status(
     return {
         "company_id": company_id,
         "state": "off" if reason == "disabled" else (reason or "on"),
-        "message": repo.email_blocked_message(queue) or "Email sending is on: approved emails go out one at a time.",
+        "message": (_no_host(repo.email_blocked_message(queue), 600)
+                    or "Email sending is on: approved emails go out one at a time."),
         "enabled": queue["enabled"],
         "daily_limit": queue["daily_limit"],
         "sent_last_24h": queue["sent_last_24h"],
@@ -1790,19 +1800,19 @@ def get_email_status(
         "mailbox": {
             "connected": mailbox["connected"], "from": mailbox["address"],
             "inbox_checked_at": mailbox["inbox_checked_at"], "inbox_ok": mailbox["inbox_ok"],
-            "inbox_error": _short(mailbox["inbox_error"], 300), "paused": mailbox["paused"],
-            "paused_until": mailbox["paused_until"], "pause_reason": _short(mailbox["pause_reason"], 300),
+            "inbox_error": _no_host(mailbox["inbox_error"], 300), "paused": mailbox["paused"],
+            "paused_until": mailbox["paused_until"], "pause_reason": _no_host(mailbox["pause_reason"], 300),
         },
         "queued": queue["eligible_total"],
         "next": [{"message_id": item["message_id"], "lead_id": item["lead_id"],
                   "lead_name": _short(leads.get(item["lead_id"], ""), _LEAD_FIELD_MAX),
                   "subject": _short(item["subject"], 200), "step": item["step"],
                   "auto_approved": item["auto_approved"]} for item in queue["items"]],
-        "held_back": [{"message_id": s["message_id"], "lead_id": s["lead_id"], "reason": s["reason"]}
+        "held_back": [{"message_id": s["message_id"], "lead_id": s["lead_id"], "reason": _no_host(s["reason"], 600)}
                       for s in queue["skipped"][:EMAIL_HELD_SHOWN]],
         "needs_attention": {
             "emails": [{"message_id": m.id, "lead_id": m.lead_id, "email_state": m.email_state,
-                        "error": _short(m.send_error, 300)} for m in attention["messages"]],
+                        "error": _no_host(m.send_error, 300)} for m in attention["messages"]],
             "bounces_and_opt_outs_7d": [{"lead_id": e["lead_id"], "kind": e["kind"], "at": _iso(e["created_at"]),
                                          "detail": _short(e["detail"], 200)} for e in attention["events"]],
         },

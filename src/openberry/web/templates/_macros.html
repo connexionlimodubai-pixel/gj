@@ -185,18 +185,21 @@
 {% if info and info.state in ("held", "waiting", "auto") %}
 <p class="email-line email-line-held">{{ icon("pause", 14) }}<span>{% if info.state == "auto" %}Auto-approved: approve it yourself to send it from your mailbox, or allow auto-approved emails on the <a href="/c/{{ msg.company_id }}/outreach#email">Email sending card</a>.{% elif info.state == "waiting" %}Approved. It goes out when OpenBerry can send again: {{ info.reason }}.{% else %}Not emailed now: {{ info.reason }}.{% endif %}</span></p>
 {% elif info and info.state in ("unknown", "failed", "bounced") %}
-<div class="email-line email-line-problem">{{ icon("alert", 14) }}<span>{% if info.state == "unknown" %}It may have been sent: the connection broke while your mail server was receiving it. Check your mailbox's Sent folder, then choose Mark sent or Send again.{% elif info.state == "bounced" %}{{ info.reason or "It bounced." }}{% else %}Not sent: {{ info.reason or "no details" }}{% endif %}</span>{% if info.state != "bounced" and msg.status == "approved" %}{{ email_actions(msg, next_url) }}{% endif %}</div>
+<div class="email-line email-line-problem">{{ icon("alert", 14) }}<span>{% if info.state == "unknown" %}It may have been sent: the connection broke while your mail server was receiving it. Check your mailbox's Sent folder, then choose Mark sent or Send again.{% elif info.state == "bounced" %}{{ info.reason or "It bounced." }}{% else %}Not sent: {{ info.reason or "no details" }}{% endif %}</span>{% if info.state != "bounced" and (msg.status == "approved" or info.state == "unknown") %}{{ email_actions(msg, next_url, info.dead) }}{% endif %}</div>
 {% endif %}
 {% if footer and msg.channel == "email" and msg.direction == "outbound" and msg.status in ("draft", "approved") and not msg.email_state %}
 <div class="email-footer-preview"><span class="label-sm">Added when sent</span><div class="email-footer-text">{{ footer }}</div></div>
 {% endif %}
 {%- endmacro %}
 
-{% macro email_actions(msg, next_url) -%}
+{# dead: it failed because the address doesn't exist (it is on the never-email list): Try again can't work. #}
+{% macro email_actions(msg, next_url, dead=false) -%}
 <span class="email-actions">
 {% if msg.email_state == "unknown" %}
 <form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/email" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm" type="submit" name="action" value="mark_sent">{{ icon("check", 14) }}Mark sent</button></form>
 <form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/email" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="send_again" data-confirm="Send it again? If it did go out the first time, it arrives twice.">{{ icon("refresh", 14) }}Send again</button></form>
+{% elif msg.email_state == "failed" and dead %}
+<a class="btn btn-sm" href="/c/{{ msg.company_id }}/leads/{{ msg.lead_id }}#edit-profile">{{ icon("edit", 14) }}Fix the address</a>
 {% elif msg.email_state == "failed" %}
 <form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/email" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm" type="submit" name="action" value="retry">{{ icon("refresh", 14) }}Try again</button></form>
 {% endif %}

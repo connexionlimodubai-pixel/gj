@@ -298,10 +298,10 @@ def _approved_email_note(company_id: int, message: Message) -> str:
     queue = repo.email_queue(company_id, limit=repo.EMAIL_QUEUE_MAX)
     why_not = next((s["reason"] for s in queue["skipped"] if s["message_id"] == message.id), "")
     if why_not:
-        return f"Approved. It won't be emailed now ({why_not}); you can copy it and send it yourself."
+        return f"Approved. It won't be emailed now ({mail.for_you(why_not)}); you can copy it and send it yourself."
     if queue["blocked_reason"] and queue["blocked_reason"] != "outside_hours":
-        return (f"Approved. OpenBerry emails it from your mailbox once it can send again "
-                f"({repo.email_blocked_message(queue)[:1].lower()}{repo.email_blocked_message(queue)[1:]}).")
+        why = mail.for_you(repo.email_blocked_message(queue, you=True))
+        return f"Approved. OpenBerry emails it from your mailbox once it can send again ({why[:1].lower()}{why[1:]})."
     return "Approved. OpenBerry will email it from your mailbox, exactly as it is, with your footer."
 
 

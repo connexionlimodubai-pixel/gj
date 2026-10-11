@@ -8,6 +8,7 @@ from __future__ import annotations
 import email
 import email.policy
 import imaplib
+import re
 import smtplib
 import socket
 import ssl
@@ -362,14 +363,49 @@ def test_unrelated_and_malformed_mail():
 
 
 def test_opt_out_words_in_english_and_arabic():
-    assert mailer.opt_out_words("Please remove me from your list") == "remove me"
+    assert mailer.opt_out_words("Please remove me from your list") == "remove me from your list"
     assert mailer.opt_out_words("الرجاء إزالتي") and mailer.opt_out_words("لا تراسلني مرة اخرى")
     assert mailer.opt_out_words("stop") == "stop" and mailer.opt_out_words("توقف") == "توقف"
     long = "We stop by the airport most weeks and might need cars for visiting partners next month, thanks."
-    assert mailer.opt_out_words(long) == ""  # "stop" counts only in a short reply
+    assert mailer.opt_out_words(long) == ""  # "stop" counts only on its own
     assert mailer.opt_out_words("Sounds good", subject="Re: Stop waiting for taxis") == ""
     assert mailer.opt_out_words("", subject="Unsubscribe") == "unsubscribe"
-    assert mailer.opt_out_words("Don’t email me again") == "don't email"  # a curly apostrophe
+    assert mailer.opt_out_words("Don’t email me again") == "don't email me"  # a curly apostrophe
+
+
+@pytest.mark.parametrize("text", [
+    "STOP", "Stop.", "Please stop", "No thanks, stop.", "Not interested, please remove me from your mailing list.",
+    "Stop emailing", "Please stop sending me these emails", "Unsubscribe", "How do I unsubscribe?",
+    "Take me off your list", "Do not contact me again", "Opt me out please", "No more emails",
+    "Thanks.\nRemove me\nSam", "الرجاء إلغاء الاشتراك", "توقف", "أزلني من قائمتكم", "لا تتواصل معي", "كفى",
+])
+def test_real_opt_outs_are_still_caught(text):
+    assert mailer.opt_out_words(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "How much for DXB to Marina with one stop?",
+    "Can your driver stop at the mall first?",
+    "Yes please. Need a non-stop transfer to Abu Dhabi tomorrow.",
+    "كم السعر مع توقف في المول؟",
+    "Please don't unsubscribe me, I want your rates next month.",
+    "Can we opt out of the meet and greet to lower the price? Please send a quote.",
+    "please do not send me the brochure, just the price",
+    "Do not contact the GM directly, email me instead.",
+    "Please remove me from tomorrow's pickup list, guest cancelled.",
+    "لا ترسل السائق قبل الساعة 6",
+    "لا تتصل بي، أرسل لي عرض السعر بالبريد",
+    "السائق توقف عن الرد، من فضلك اتصل بي",
+])
+def test_a_chauffeur_clients_normal_email_is_no_opt_out(text):
+    assert mailer.opt_out_words(text) == "", text
+
+
+def test_our_own_footer_left_in_a_reply_is_no_opt_out():
+    footer = 'Acme Chauffeurs · Office 1204, Dubai\nNot interested? Reply "unsubscribe" and we won\'t email you again.'
+    reply = 'Yes, send the rates.\n\nHi Lina, we drive executives.\nNot interested?  Reply "unsubscribe" and we ' \
+            "won't email you again."
+    assert mailer.opt_out_words(reply) == "unsubscribe" and mailer.opt_out_words(reply, ignore=[footer]) == ""
 
 
 def test_quoted_text_and_html_are_reduced_to_what_is_new():
@@ -388,3 +424,138 @@ def test_header_facts_say_what_to_read_in_full():
     assert facts["bounce"] and facts["from_email"].startswith("mailer-daemon@")
     reply = email.message_from_bytes(eml("reply_gmail.eml", lead=LEAD, ours=OUR_ID), policy=email.policy.default)
     assert OUR_ID in mailer.header_facts(reply)["references"] and not mailer.header_facts(reply)["bounce"]
+
+
+
+# --------------------------------------------------------------------------------------
+# What real mail looks like
+# --------------------------------------------------------------------------------------
+
+
+def outlook_html_reply(new_text: str) -> bytes:
+    """An HTML-only reply from Outlook on the web: the From/Sent block in divRplyFwdMsg, our email after it."""
+    html = (f'<html><body><div class="elementToProof">{new_text}</div><div id="appendonsend"></div><hr>'
+            '<div id="divRplyFwdMsg" dir="ltr"><b>From:</b> Sam Rahman &lt;sam@acme-mail.example&gt;<br><b>Sent:'
+            '</b> Monday<br><b>Subject:</b> Airport transfers</div><div class="BodyFragment"><div>Hi Lina,<br>We '
+            'drive executives.<br>Not interested? Reply "unsubscribe" and we won\'t email you again.</div></div>'
+            '</body></html>')
+    return (f"From: Lina Noor <{LEAD}>\r\nTo: {FROM}\r\nSubject: RE: Airport transfers\r\nMessage-ID: <owa-1@x>\r\n"
+            f"In-Reply-To: {OUR_ID}\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{html}"
+            ).encode()
+
+
+def test_an_outlook_html_reply_keeps_only_the_new_text_and_our_footer_is_no_opt_out():
+    inbound = mailer.classify_inbound(outlook_html_reply("Yes, please send me your corporate rates."))
+    assert (inbound.kind, inbound.text) == (mailer.REPLY, "Yes, please send me your corporate rates.")
+    html = eml("reply_outlook.eml", lead=LEAD, ours=OUR_ID).decode().split("text/html")[1]
+    assert mailer.html_to_text(html.split("\r\n\r\n", 1)[1]) == "Hello Sam, please call me next week."
+
+
+def test_trip_details_in_a_reply_are_kept():
+    english = ("Yes, please quote this trip:\nFrom: Dubai Marina, Tower 3\nTo: DXB Terminal 3\nDate: 15 Oct, 06:00\n"
+               "Passengers: 3, 4 bags\n\nThanks, Lina")
+    arabic = "نعم، أرجو عرض سعر:\nمن: دبي مارينا\nإلى: مطار دبي مبنى 3\nالتاريخ: 15 أكتوبر"
+    office = "مرحبا سام،\nعنوان المكتب:\nبرج الخليج، الطابق 12"
+    for text in (english, arabic, office):
+        assert mailer.strip_quoted(text) == text
+    # Quoted headers are still cut: an address in From:, or a Subject: below it.
+    assert mailer.strip_quoted("Ok\nFrom: Sam Rahman\nSent: Monday\nTo: Lina\nSubject: Cars\nOld") == "Ok"
+    assert mailer.strip_quoted("نعم\nفي الاثنين، كتب سام <sam@acme-mail.example>:\n> قديم") == "نعم"
+
+
+@pytest.mark.parametrize("status,diagnostic,kind", [
+    ("5.4.1", "smtp; 550 5.4.1 Recipient address rejected: Access denied. AS(201806281)", mailer.BOUNCE),
+    ("5.4.4", "smtp; 550 5.4.4 Host or domain name not found", mailer.BOUNCE),
+    ("5.7.1", "smtp; 550 5.7.1 RESOLVER.RST.AuthRequired; authentication required", mailer.BOUNCE),
+    ("5.7.133", "smtp; 550 5.7.133 RESOLVER.RST.SenderNotAuthenticatedForGroup", mailer.BOUNCE),
+    ("5.7.1", "smtp; 554 5.7.1 Message rejected as spam", mailer.POLICY_REJECT),
+    ("4.4.7", "smtp; 450 4.4.7 Delivery delayed", mailer.SOFT_BOUNCE),
+])
+def test_microsoft_365_and_postfix_permanent_failures(status, diagnostic, kind):
+    raw = eml("dsn_postfix.eml", lead=LEAD, ours=OUR_ID).decode()
+    raw = re.sub(r"Status: 5\.1\.1", f"Status: {status}", raw)
+    raw = re.sub(r"Diagnostic-Code: .*(\r\n[ \t].*)*", f"Diagnostic-Code: {diagnostic}", raw)
+    assert mailer.classify_inbound(raw.encode()).kind == kind, (status, diagnostic)
+
+
+def test_a_failure_at_rcpt_for_a_microsoft_365_address_that_doesnt_exist_is_a_bounce():
+    refused = smtplib.SMTPRecipientsRefused({LEAD: (550, b"5.4.1 Recipient address rejected: Access denied")})
+    assert mailer.classify(refused, "rcpt").kind == mailer.BOUNCE
+
+
+def test_a_relayed_dsn_is_no_bounce():
+    raw = eml("dsn_postfix.eml", lead=LEAD, ours=OUR_ID).decode()
+    raw = re.sub(r"Action: failed", "Action: relayed", raw)
+    raw = re.sub(r"Status: 5\.1\.1", "Status: 2.0.0", raw)
+    assert mailer.classify_inbound(raw.encode()).kind == mailer.AUTO_REPLY
+
+
+def test_a_newsletter_from_a_leads_address_is_no_reply():
+    raw = (f"From: Palm Hotel <info@palmhotel.example>\r\nTo: {FROM}\r\nSubject: Our autumn offers\r\n"
+           "Message-ID: <campaign-1@mail.example>\r\nList-Id: <palm.list.example>\r\n"
+           "List-Unsubscribe: <https://example.com/u/1>\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+           '<p>New suites!</p><a href="https://example.com/u/1">Unsubscribe</a>').encode()
+    assert mailer.classify_inbound(raw).kind == mailer.AUTO_REPLY
+    # A reply through a mailing list (a Google Group) still refers to our email: it is read.
+    reply = raw.replace(b"Subject: Our autumn offers", f"Subject: Re: Cars\r\nIn-Reply-To: {OUR_ID}".encode())
+    assert mailer.classify_inbound(reply).kind == mailer.OPT_OUT
+
+
+def test_a_fetch_answer_with_the_uid_after_the_message_is_read(offline_mail, monkeypatch):
+    fake = imaplib.IMAP4_SSL
+    original = fake.uid
+
+    def uid_last(self, command, *args):  # "* 1 FETCH (BODY[] {n}<message> UID 5)": RFC 3501 allows any order
+        typ, data = original(self, command, *args)
+        if command != "FETCH":
+            return typ, data
+        out = []
+        for item in data:
+            if isinstance(item, tuple):
+                uid = re.search(rb"UID (\d+)", item[0]).group(1)
+                out.append((re.sub(rb"UID \d+ ", b"", item[0]), item[1]))
+                out.append(b" UID " + uid + b")")
+        return typ, out
+
+    monkeypatch.setattr(fake, "uid", uid_last)
+    inbox = offline_mail.folders["INBOX"]
+    with mailer.Inbox(a_mailbox()) as box:
+        _, state = box.fetch_new("INBOX", None, lambda h: True)
+    uid = inbox.add(eml("reply_gmail.eml", lead=LEAD, ours=OUR_ID))
+    with mailer.Inbox(a_mailbox()) as box:
+        found, _ = box.fetch_new("INBOX", state, lambda h: True)
+    assert [key for key, _ in found] == [f"uid:INBOX:1:{uid}"] and b"corporate rates" in found[0][1]
+
+
+def test_a_message_without_a_message_id_has_the_same_key_wherever_it_is_read():
+    raw = re.sub(rb"Message-ID: [^\r\n]*\r\n", b"", eml("reply_gmail.eml", lead=LEAD, ours=OUR_ID), flags=re.I)
+    assert mailer.classify_inbound(raw).message_id == ""
+    assert mailer.content_key(raw) == mailer.content_key(b"X-Spam-Flag: NO\r\n" + raw)  # moved from Junk
+    assert mailer.content_key(raw) != mailer.content_key(raw.replace(b"corporate rates", b"group rates"))
+
+
+def test_list_unsubscribe_is_written_as_an_address_on_the_wire(offline_mail):
+    sender = "bookings@connexionlimodubai.com"
+    outcome = mailer.send(job(from_email=sender, header_id="<5f2b9c1e0a7d4e6b8c3f1a2d9e8b7c6a@connexionlimodubai.com>"),
+                          a_mailbox(from_email=sender, username=sender), on_data=lambda: True)
+    assert outcome.ok
+    assert f"List-Unsubscribe: <mailto:{sender}?subject=unsubscribe%20".encode() in outcome.data
+    assert b"=?utf-8?" not in outcome.data
+    assert all(len(line) <= 78 for line in outcome.data.split(b"\r\n\r\n", 1)[1].split(b"\r\n"))  # the body
+    assert parsed(outcome.data).get_content().startswith("Hi Lina,")
+
+
+def test_a_certificate_for_another_name_says_so_in_plain_words():
+    outcome = mailer.classify(ssl.SSLCertVerificationError(1, "certificate verify failed: Hostname mismatch"),
+                              "connect", "mail.desertline.example")
+    assert outcome.kind == mailer.CONFIG and "CERTIFICATE_VERIFY_FAILED" not in outcome.text
+    assert "security certificate isn't valid for mail.desertline.example" in outcome.text
+    assert mailer.classify(ValueError("port 25 isn't used: only 465 or 587"), "connect").kind == mailer.CONFIG
+
+
+@pytest.mark.parametrize("sep", ["\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " "])
+def test_a_subject_with_any_line_break_is_refused(sep):
+    assert mailer.subject_breaks(f"Airport transfers{sep}for Gulf Bank")
+    with pytest.raises(ValueError, match="line break"):
+        mailer.build_email(job(subject=f"Airport transfers{sep}for Gulf Bank"))
+    assert not mailer.subject_breaks("Airport transfers – Dubaï office")

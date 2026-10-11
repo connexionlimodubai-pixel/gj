@@ -37,10 +37,18 @@
     });
   }
 
+  // data-confirm-limit names a number field whose current value replaces "at most N a day" in the question, so it
+  // says what the form would save, not what was saved before.
   function initConfirm() {
     document.addEventListener("click", (e) => {
       const btn = e.target.closest("[data-confirm]");
-      if (btn && !window.confirm(btn.getAttribute("data-confirm"))) {
+      if (!btn) return;
+      let question = btn.getAttribute("data-confirm");
+      const limit = btn.getAttribute("data-confirm-limit") ? $(btn.getAttribute("data-confirm-limit")) : null;
+      if (limit && /^\d+$/.test(limit.value.trim())) {
+        question = question.replace(/at most \d+ a day/, "at most " + limit.value.trim() + " a day");
+      }
+      if (!window.confirm(question)) {
         e.preventDefault();
         e.stopImmediatePropagation();
       }
@@ -228,6 +236,7 @@
     const count = $("[data-bulk-count]", form);
     const buttons = $$("[data-bulk-action]", form);
     const drafts = (n) => n + (n === 1 ? " draft" : " drafts");
+    const emailing = form.hasAttribute("data-email-sending");
     const update = () => {
       const n = items.filter((el) => el.checked).length;
       if (all) {
@@ -239,8 +248,10 @@
         const approve = btn.getAttribute("data-bulk-action") === "approve";
         btn.disabled = n === 0;
         $("[data-bulk-label]", btn).textContent = (approve ? "Approve" : "Skip") + " selected" + (n ? " (" + n + ")" : "");
+        const emailed = emailing ? " Approved emails are emailed from your mailbox." : "";
         btn.setAttribute("data-confirm", approve
-          ? "Approve " + drafts(n) + " exactly as written? Approved LinkedIn messages can be sent by your AI agent if it is on."
+          ? "Approve " + drafts(n) + " exactly as written?" + emailed
+            + " Approved LinkedIn messages can be sent by your AI agent if it is on."
           : "Skip " + drafts(n) + "? They leave the queue and won't be sent.");
       });
     };
@@ -358,7 +369,8 @@
     };
     provider.addEventListener("change", () => apply(true));
     if (region) region.addEventListener("change", () => apply(true));
-    apply(false);
+    // Nothing saved yet: the chosen provider's servers are filled in at once, as the page says.
+    apply(!!(smtp && imap && !smtp.value && !imap.value));
   }
 
   // The Email sending card: the preview shows the footer as it is typed. A checkbox with data-confirm-check asks

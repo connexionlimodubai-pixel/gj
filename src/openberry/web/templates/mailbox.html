@@ -44,8 +44,9 @@
   <div class="agent-pause" role="alert">
     {{ m.icon("alert", 18) }}
     <div class="min0 grow">
-      <p><strong>{% if mailbox.auth_failed %}Sending is paused until you fix the mailbox settings:{% else %}Sending is paused until {{ (mailbox.paused_until|todatetime)|abs_dt }}:{% endif %}</strong></p>
+      <p><strong>{% if mailbox.auth_failed %}Sending and inbox checks are paused until you fix the mailbox settings:{% else %}Sending is paused until {{ (mailbox.paused_until|todatetime)|local_dt }}:{% endif %}</strong></p>
       <p class="agent-reason">{{ mailbox.pause_reason or "No details given." }}</p>
+      <p class="small muted">{% if mailbox.auth_failed %}Save the settings with the right password, or click Try again or Check inbox once it is fixed.{% else %}It starts again by itself then. Try again starts it now.{% endif %}</p>
     </div>
     <form method="post" action="/mailbox">{{ m.csrf() }}<button class="btn btn-sm" type="submit" name="action" value="retry">{{ m.icon("refresh", 14) }}Try again</button></form>
   </div>

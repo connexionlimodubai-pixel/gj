@@ -46,7 +46,7 @@
 <div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>OpenBerry can't read your inbox</strong>, so it sends no email: <span class="agent-reason">{{ email.mailbox.inbox_error }}</span> <a href="/mailbox#status">Mailbox settings{{ m.icon("chevron-right", 12) }}</a></p></div>
 {% endif %}
 {% if email.attention %}
-<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}<p><strong>{{ email.attention|length|plural("email") }} from your mailbox need{{ "s" if email.attention|length == 1 }} you:</strong> it may have been sent, or sending failed. <a href="{{ base }}/outreach#email">Check them on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
+<div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}{% set one = email.attention|length == 1 %}<p><strong>{{ email.attention|length|plural("email") }} from your mailbox need{{ "s" if one }} you:</strong> {{ "it" if one else "they" }} may have been sent, or sending failed. <a href="{{ base }}/outreach#email">Check {{ "it" if one else "them" }} on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
 {% endif %}
 
 <section class="kpis" aria-label="Key numbers">
@@ -62,7 +62,7 @@
 <p class="agent-line">{{ m.icon("bot", 15) }}<span>AI agent sending is on: <strong>{{ agent.sent_last_24h }} of {{ agent.daily_limit }}</strong> LinkedIn messages sent in the last 24 hours{% if agent.state == "limit" %}, daily limit reached{% else %} · {{ agent.eligible_total }} queued{% endif %}.</span> <a href="{{ base }}/outreach#agent">Outreach{{ m.icon("chevron-right", 12) }}</a></p>
 {% endif %}
 {% if email.enabled %}
-<p class="agent-line{% if email.state not in ('on', 'outside_hours') %} agent-line-held{% endif %}">{{ m.icon("mail", 15) }}<span>Email sending is {{ "on" if email.state in ("on", "outside_hours") else email.label|lower }}: <strong>{{ email.sent_last_24h }} of {{ email.daily_limit }}</strong> emails sent in the last 24 hours · {{ email.eligible_total }} queued.</span> <a href="{{ base }}/outreach#email">Outreach{{ m.icon("chevron-right", 12) }}</a></p>
+<p class="agent-line{% if email.state not in ('on', 'outside_hours') %} agent-line-held{% endif %}">{{ m.icon("mail", 15) }}<span>Email sending is {{ email.phrase }}: <strong>{{ email.sent_last_24h }} of {{ email.daily_limit }}</strong> emails sent in the last 24 hours · {{ email.eligible_total }} queued.</span> <a href="{{ base }}/outreach#email">Outreach{{ m.icon("chevron-right", 12) }}</a></p>
 {% endif %}
 
 <div class="dash-grid">

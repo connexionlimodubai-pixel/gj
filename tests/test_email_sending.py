@@ -123,7 +123,7 @@ def test_settings_defaults_and_bounds():
     assert (cfg.email_days, cfg.email_start_hour, cfg.email_end_hour) == ([0, 1, 2, 3, 4], 9, 18)
     assert cfg.email_footer == "" and cfg.email_paused_until is None
     for bad in ({"email_daily_limit": 0}, {"email_daily_limit": 101}, {"email_gap_minutes": 0},
-                {"email_start_hour": 18, "email_end_hour": 9}, {"email_days": ["Funday"]},
+                {"email_gap_minutes": 4}, {"email_start_hour": 18, "email_end_hour": 9}, {"email_days": ["Funday"]},
                 {"email_footer": "x" * 601}):
         with pytest.raises(ValueError):
             OutreachConfig(**bad)
@@ -348,20 +348,20 @@ def test_a_new_address_sends_approved_emails_back_to_draft(company, box):
 
 
 def test_the_daily_limit_is_rolling_and_counts_emails_in_flight_or_unknown(company, box):
-    turn_on(company, email_daily_limit=3, email_gap_minutes=1)
+    turn_on(company, email_daily_limit=3)
     messages = [approved(lead(company)) for _ in range(5)]
     assert send()["status"] == "sent"
-    set_row(messages[1].id, email_state="unknown", email_claimed_at=repo.iso(NOW + timedelta(minutes=1)))
+    set_row(messages[1].id, email_state="unknown", email_claimed_at=repo.iso(NOW + timedelta(minutes=5)))
     set_row(messages[2].id, email_state="data", email_claim="other", email_claimed_at=repo.iso(NOW + timedelta(
-        minutes=2)))
-    state = repo.email_sending_status(company.id, now=NOW + timedelta(minutes=3))
+        minutes=10)))
+    state = repo.email_sending_status(company.id, now=NOW + timedelta(minutes=15))
     assert state["sent_last_24h"] == 3 and state["remaining"] == 0 and state["blocked_reason"] == "daily_limit"
     assert state["limit_frees_at"] == repo.iso(NOW + timedelta(hours=24))
     assert "daily limit of 3" in repo.email_blocked_message(state)
     set_row(messages[2].id, email_state="unknown")
     assert send(NOW + timedelta(hours=23, minutes=59))["status"] == "idle"
-    later = NOW + timedelta(hours=24, minutes=1)
-    assert send(later)["status"] == "sent"  # the first one left the window
+    later = NOW + timedelta(hours=24, minutes=6)
+    assert send(later)["status"] == "sent"  # the first two left the window
     # Your own Mark sent doesn't count: only what OpenBerry sent (or may have sent).
     counted = repo.email_sending_status(company.id, now=later)["sent_last_24h"]
     repo.update_message(messages[4].id, status="sent")
@@ -370,14 +370,14 @@ def test_the_daily_limit_is_rolling_and_counts_emails_in_flight_or_unknown(compa
 
 def test_the_mailbox_cap_covers_every_company(company, box, monkeypatch):
     monkeypatch.setattr(repo, "MAILBOX_DAILY_MAX", 2)
-    other = turn_on(repo.create_company(CompanyIn(name="Second Co")), email_gap_minutes=1)
-    turn_on(company, email_gap_minutes=1)
+    other = turn_on(repo.create_company(CompanyIn(name="Second Co")))
+    turn_on(company)
     approved(lead(company))
     approved(lead(other))
     approved(lead(company))
-    assert send()["status"] == "sent" and send(NOW + timedelta(minutes=2))["status"] == "sent"
-    assert repo.email_sending_status(company.id, now=NOW + timedelta(minutes=4))["blocked_reason"] == "mailbox_limit"
-    assert send(NOW + timedelta(minutes=4))["status"] == "idle"
+    assert send()["status"] == "sent" and send(NOW + timedelta(minutes=5))["status"] == "sent"
+    assert repo.email_sending_status(company.id, now=NOW + timedelta(minutes=10))["blocked_reason"] == "mailbox_limit"
+    assert send(NOW + timedelta(minutes=10))["status"] == "idle"
     # The company that waited longest goes first: one each.
     assert len(repo.list_messages(company.id, status="sent")) == len(repo.list_messages(other.id, status="sent")) == 1
 
@@ -606,19 +606,19 @@ def test_temporary_failures_pause_for_longer_each_time(company, box):
 
 
 def test_a_hard_bounce_at_rcpt_suppresses_the_address_and_three_pause_the_company(company, box):
-    turn_on(company, email_gap_minutes=1)
+    turn_on(company)
     messages = [approved(lead(company)) for _ in range(4)]
     box.fail["rcpt"] = (550, b"5.1.1 <x>: Recipient address rejected: User unknown")
     for i in range(3):
-        assert send(NOW + timedelta(minutes=2 * i))["status"] == mailer.BOUNCE
+        assert send(NOW + timedelta(minutes=5 * i))["status"] == mailer.BOUNCE
     first = repo.get_message(messages[0].id)
     assert first.email_state == "failed" and "doesn't exist" in first.send_error and first.sent_at is None
     assert "email-bounced" in repo.get_lead(first.lead_id).tags
     assert repo.suppressed_addresses([first.email_to])[first.email_to]["reason"] == "bounce"
     out = repo.get_company(company.id).outreach
-    assert out.email_paused_until == NOW + timedelta(minutes=4) + repo.EMAIL_PAUSE and "3 hard bounces" in \
+    assert out.email_paused_until == NOW + timedelta(minutes=10) + repo.EMAIL_PAUSE and "3 hard bounces" in \
         out.email_pause_reason
-    assert send(NOW + timedelta(minutes=10))["status"] == "idle"
+    assert send(NOW + timedelta(minutes=20))["status"] == "idle"
 
 
 def test_the_provider_refusing_pauses_the_mailbox_for_a_day(company, box):
@@ -639,6 +639,9 @@ def test_a_broken_connection_during_data_is_unknown(company, box):
     box.fail["data"] = TimeoutError("timed out")
     assert send()["status"] == mailer.UNKNOWN
     assert row(message.id)["email_state"] == "unknown" and repo.get_message(message.id).sent_at is None
+    # What to do about the email stays on the email; the mailbox's short wait has its own words.
+    assert "Mark sent or Send again" in repo.get_message(message.id).send_error
+    assert repo.mailbox_state(FROM, now=NOW)["pause_reason"] == repo.DROPPED_TEXT
 
 
 def test_two_spam_rejections_in_a_day_pause_the_company(company, box):
@@ -723,14 +726,36 @@ def test_an_opt_out_suppresses_disqualifies_and_tags(company, box, name):
     assert "asked not to be emailed" in skip_reason(other, again.id)
 
 
-def test_a_company_lead_that_opts_out_goes_on_the_never_contact_list(company, box):
+def test_a_company_lead_that_opts_out_goes_on_the_never_contact_list_when_you_say_so(company, box):
     turn_on(company)
     hotel = repo.upsert_lead(company.id, LeadIn(lead_company="Palm Hotel", email="lina@gulfbank.example"))[0]
     sent_from_mailbox(hotel.id)
     services.check_inbox(now=NOW)
     deliver(box, "stop.eml")
     services.check_inbox(now=NOW + timedelta(minutes=5))
+    # Read in the inbox: the address is never emailed again and the lead is tagged, but the never-contact list
+    # (which also stops LinkedIn and future leads) is left to the user: words in an email can be misread.
+    found = repo.get_lead(hotel.id)
+    assert found.status == "disqualified" and "unsubscribed" in found.tags
+    assert "Palm Hotel" not in repo.get_company(company.id).icp.exclude_companies
+    repo.record_opt_out(hotel.id, "marked in the dashboard", "You marked it")  # the lead page's Unsubscribed
     assert "Palm Hotel" in repo.get_company(company.id).icp.exclude_companies
+
+
+def test_an_opt_out_read_in_the_inbox_never_changes_a_won_customer(company, box):
+    turn_on(company)
+    hotel = repo.upsert_lead(company.id, LeadIn(lead_company="Palm Hotel", email="lina@gulfbank.example"))[0]
+    sent_from_mailbox(hotel.id)
+    repo.update_lead(hotel.id, {"status": "won"})
+    services.check_inbox(now=NOW)
+    box.deliver(f"From: lina@gulfbank.example\r\nTo: {FROM}\r\nSubject: Re: Airport transfers\r\n"
+                f"Message-ID: <won-1@gulfbank.example>\r\nIn-Reply-To: {OUR_ID}\r\n\r\n"
+                "Please remove me from your mailing list.\r\n".encode())
+    services.check_inbox(now=NOW + timedelta(minutes=5))
+    found = repo.get_lead(hotel.id)
+    assert found.status == "won" and "unsubscribed" in found.tags
+    assert repo.suppressed_addresses(["lina@gulfbank.example"])["lina@gulfbank.example"]["reason"] == "opt_out"
+    assert repo.get_company(company.id).icp.exclude_companies == []
 
 
 def test_a_hard_bounce_marks_the_email_and_suppresses_the_address(company, box):
@@ -808,13 +833,37 @@ def test_a_failing_inbox_check_blocks_sending(company, box):
 
     turn_on(company)
     approved(lead(company))
-    box.imap_fail["login"] = imaplib.IMAP4.error(b"[AUTHENTICATIONFAILED] Invalid credentials")
+    box.imap_fail["connect"] = ConnectionRefusedError(111, "Connection refused")
     result = services.check_inbox(now=NOW)
-    assert result["status"] == "failed" and result["kind"] == mailer.AUTH
+    assert result["status"] == "failed" and result["kind"] == mailer.RETRY
     assert repo.email_sending_status(company.id, now=NOW)["blocked_reason"] == "inbox_unchecked"
     assert services.send_next_email(now=NOW) == {"status": "idle"} and box.sent == []
     assert services.inbox_due(now=NOW + timedelta(minutes=4)) is False
-    assert services.inbox_due(now=NOW + timedelta(minutes=5)) is True
+    assert services.inbox_due(now=NOW + timedelta(minutes=5)) is True  # a network problem: tried again
+
+
+def test_a_refused_inbox_login_is_not_tried_again_until_the_user_acts(company, box):
+    import imaplib
+
+    turn_on(company)
+    approved(lead(company))
+    box.imap_fail["login"] = imaplib.IMAP4.error(b"[AUTHENTICATIONFAILED] Invalid credentials")
+    result = services.check_inbox(now=NOW)
+    assert result["status"] == "failed" and result["kind"] == mailer.AUTH
+    state = repo.mailbox_state(FROM, now=NOW)
+    assert state["auth_failed"] and state["paused"] and "for reading mail" in state["pause_reason"]
+    # Providers lock an account that keeps trying a wrong password: no automatic check, no email, for hours.
+    for minutes in (5, 60, 600):
+        assert services.inbox_due(now=NOW + timedelta(minutes=minutes)) is False
+    assert services.send_next_email(now=NOW + timedelta(hours=1)) == {"status": "idle"} and box.sent == []
+    assert box.imap_commands().count("LOGIN") == 1
+    box.imap_fail.clear()
+    assert repo.retry_mailbox(FROM, now=NOW + timedelta(hours=1), auth_only=True) is True  # saved, or Check inbox
+    assert services.inbox_due(now=NOW + timedelta(hours=1)) is True
+    # A refused SMTP login stops the automatic inbox checks too (usually the same password).
+    box.fail["login"] = smtplib.SMTPAuthenticationError(535, b"5.7.8 Authentication failed")
+    assert send(NOW + timedelta(hours=1))["status"] == mailer.AUTH
+    assert services.inbox_due(now=NOW + timedelta(hours=2)) is False
 
 
 def test_gmail_keeps_its_own_sent_copy(company, settings, offline_mail):
@@ -896,3 +945,230 @@ def test_a_version_4_database_gets_the_email_columns_and_tables(settings):
     old = repo.list_messages(1)[0]
     assert (old.email_state, old.email_message_id, old.approved_via, old.status) == ("", None, "auto", "approved")
     assert repo.get_company(1).outreach.email_sending is False  # an old profile: off
+
+
+# --------------------------------------------------------------------------------------
+# One address is one recipient; earlier steps first; changes made while an email is being sent
+# --------------------------------------------------------------------------------------
+
+
+ROVE = "reservations@rovehotels.example"
+
+
+def test_an_address_on_several_leads_gets_one_cold_email_and_a_reply_stops_them_all(company, box):
+    turn_on(company)
+    # Two hotel branches whose Google Maps listings point to one chain's site: two account leads, one mailbox.
+    downtown = repo.upsert_lead(company.id, LeadIn(lead_company="Rove Downtown", email=ROVE))[0]
+    city_walk = repo.upsert_lead(company.id, LeadIn(lead_company="Rove City Walk",
+                                                    email="Reservations@RoveHotels.example"))[0]
+    first, second = approved(downtown.id), approved(city_walk.id)
+    assert repo.EMAIL_ONE_AT_A_TIME in skip_reason(company, second.id)
+    assert send()["message_id"] == first.id
+    assert send(NOW + timedelta(minutes=6)) == {"status": "idle"} and len(box.sent) == 1
+    assert f"step 1 was already emailed to {ROVE} through another lead" in skip_reason(
+        company, second.id, NOW + timedelta(minutes=6))
+    # The same address as a person lead in another company: the same mailbox, so it waits too.
+    other = turn_on(repo.create_company(CompanyIn(name="Second Co")))
+    person = approved(lead(other, ROVE, full_name="Omar Front Desk"))
+    assert "through another lead" in skip_reason(other, person.id, NOW + timedelta(minutes=6))
+    with db.connect() as c:  # and the claim's own check refuses it, whatever the queue said
+        assert repo._claim_email(c, repo.get_company(other.id), person.id, "x", FROM, "",
+                                 NOW + timedelta(minutes=6)) is None
+    # The hotel replies through the first lead: the other leads' follow-ups never go to the address that replied.
+    repo.update_message(second.id, status="skipped")
+    follow_up = approved(city_walk.id, step=2)
+    repo.log_reply(downtown.id, "Thanks, we have a provider.", channel="email")
+    assert repo.get_lead(city_walk.id).status == "new"
+    assert repo.ADDRESS_REPLIED in skip_reason(company, follow_up.id, NOW + timedelta(days=10))
+    assert send(NOW + timedelta(days=10)) == {"status": "idle"} and len(box.sent) == 1
+    with db.connect() as c:
+        assert repo._claim_email(c, repo.get_company(company.id), follow_up.id, "y", FROM, "",
+                                 NOW + timedelta(days=10)) is None
+
+
+def test_a_follow_up_never_goes_out_as_the_first_contact(company, box):
+    turn_on(company)
+    one = lead(company)
+    step_one = approved(one, status="draft")
+    follow_up = approved(one, step=2, body="Hi, just following up on my email from last week.")
+    assert "step 1 to this lead isn't sent yet: send or skip it first" in skip_reason(company, follow_up.id)
+    two = lead(company, linkedin_url="https://www.linkedin.com/in/two-first")
+    approved(two, channel="linkedin_connect", body="Hi, glad to connect.")  # approved, not sent yet
+    after_linkedin = approved(two, step=2)
+    assert "step 1 to this lead isn't sent yet" in skip_reason(company, after_linkedin.id)
+    assert send() == {"status": "idle"} and box.sent == []
+    repo.update_message(step_one.id, status="skipped")  # a skipped step doesn't hold it back
+    assert send()["message_id"] == follow_up.id
+
+
+@pytest.mark.parametrize("change", ["lost", "never_contact", "auto_switch_off", "unsubscribed"])
+def test_a_change_made_while_the_email_is_being_sent_stops_it_before_data(company, box, monkeypatch, change):
+    from email_fakes import _FakeSMTPBase
+
+    turn_on(company, email_send_auto_approved=True)
+    target = lead(company, lead_company="Gulf Bank")
+    message = approved(target)
+    set_row(message.id, approved_via="auto")
+    real_rcpt = _FakeSMTPBase.rcpt
+
+    def user_acts_meanwhile(self: Any, recip: str, options: Any = ()) -> Any:  # while OpenBerry is signed in
+        if change == "lost":
+            repo.update_lead(target, {"status": "lost"})
+        elif change == "never_contact":
+            repo.update_company(company.id, {"icp": {"exclude_companies": ["Gulf Bank"]}})
+        elif change == "auto_switch_off":
+            repo.update_company(company.id, {"outreach": {"email_send_auto_approved": False}})
+        else:
+            repo.update_lead(target, {"tags": ["unsubscribed"]})
+        return real_rcpt(self, recip, options)
+
+    monkeypatch.setattr(_FakeSMTPBase, "rcpt", user_acts_meanwhile)
+    assert send()["status"] == mailer.ABORTED
+    assert box.sent == [] and "rset" in box.smtp_commands() and "data" not in box.smtp_commands()
+    assert row(message.id)["email_state"] == ""
+
+
+def test_a_new_address_during_a_send_never_gets_the_email(company, box, monkeypatch):
+    from email_fakes import _FakeSMTPBase
+
+    turn_on(company)
+    target = lead(company, "old@client.example")
+    message = approved(target)
+    real_rcpt = _FakeSMTPBase.rcpt
+
+    def address_changed_then_451(self: Any, recip: str, options: Any = ()) -> Any:
+        repo.update_lead(target, {"email": "someone.else@other.example"})
+        return 451, b"4.7.1 Try again later"
+
+    monkeypatch.setattr(_FakeSMTPBase, "rcpt", address_changed_then_451)
+    assert send()["status"] == mailer.RETRY
+    stored = repo.get_message(message.id)
+    assert (stored.status, stored.auto_hold, stored.email_state) == ("draft", True, "")  # nobody approved the new one
+    monkeypatch.setattr(_FakeSMTPBase, "rcpt", real_rcpt)
+    repo.retry_mailbox(FROM)
+    assert send(NOW + timedelta(minutes=10)) == {"status": "idle"} and box.sent == []
+    # The same after a crash: a stale claim goes back as a draft, not as an approval for the old address.
+    other = lead(company, "a@client.example")
+    second = approved(other)
+    assert repo.claim_next_email("crashed", FROM, now=NOW + timedelta(minutes=20)).message_id == second.id
+    repo.update_lead(other, {"email": "b@client.example"})
+    repo.expire_email_claims(now=NOW + timedelta(minutes=31))
+    assert repo.get_message(second.id).status == "draft"
+
+
+def test_skipping_an_email_that_may_have_been_sent_keeps_the_follow_up_wait(company, box):
+    turn_on(company)
+    target = lead(company)
+    first = approved(target)
+    box.fail["data"] = TimeoutError("timed out")
+    assert send()["status"] == mailer.UNKNOWN
+    box.fail.clear()
+    repo.retry_mailbox(FROM)
+    repo.update_message(first.id, status="skipped")  # Skip, next to Mark sent and Send again
+    again = approved(target, subject="Another try")
+    follow_up = approved(target, step=2)
+    later = NOW + timedelta(minutes=10)
+    assert send(later) == {"status": "idle"} and box.sent == []
+    assert "step 1 was already emailed to this lead" in skip_reason(company, again.id, later)
+    assert "not due before" in skip_reason(company, follow_up.id, later)
+    assert [m.id for m in repo.email_attention(company.id)["messages"]] == [first.id]  # it still needs you
+
+
+def test_an_opt_out_sticks_to_the_lead_whatever_address_it_gets(company, box):
+    turn_on(company)
+    lina = lead(company, "lina@gulfbank.example")
+    repo.record_opt_out(lina, "marked in the dashboard", "You marked it")  # the lead page's Unsubscribed
+    repo.update_lead(lina, {"email": "lina.noor@gulfbank.example", "status": "qualified"})  # Claude or the API
+    message = repo.update_message_as(approved(lina, status="draft").id, "claude", status="approved")
+    assert repo.UNSUBSCRIBED in skip_reason(company, message.id)
+    assert send() == {"status": "idle"} and box.sent == []
+
+
+def test_claude_marking_a_maybe_sent_email_as_sent_keeps_it_counted(company, box):
+    turn_on(company, email_daily_limit=1)
+    first, second = approved(lead(company)), approved(lead(company))
+    box.fail["data"] = TimeoutError("timed out")
+    assert send()["status"] == mailer.UNKNOWN
+    box.fail.clear()
+    repo.retry_mailbox(FROM)
+    stored = repo.update_message_as(first.id, "claude", status="sent", now=NOW + timedelta(minutes=8))
+    assert (stored.sent_via, stored.email_state, stored.sent_at) == ("smtp", "sent", NOW)
+    later = NOW + timedelta(minutes=10)
+    assert repo.email_sending_status(company.id, now=later)["blocked_reason"] == "daily_limit"
+    assert send(later) == {"status": "idle"} and box.sent == [] and repo.get_message(second.id).sent_at is None
+
+
+def test_the_mailbox_itself_is_never_a_recipient_and_its_own_email_is_never_read_as_a_reply(company, box):
+    turn_on(company)
+    me = lead(company, FROM.upper(), full_name="Sam Test")
+    message = approved(me)
+    assert repo.OWN_MAILBOX in skip_reason(company, message.id)
+    assert send() == {"status": "idle"} and box.sent == []
+    # Sent anyway (by an older version): it comes back to the inbox, with the footer's "unsubscribe" in it.
+    sent_from_mailbox(me)
+    services.check_inbox(now=NOW)
+    box.deliver(f"From: Sam Rahman <{FROM}>\r\nTo: {FROM}\r\nSubject: Airport transfers\r\nMessage-ID: {OUR_ID}\r\n"
+                f"\r\n{BODY}\r\n\r\n{FOOTER}\r\n".replace("\n", "\r\n").replace("\r\r\n", "\r\n").encode())
+    assert services.send_test_email().ok  # the test email arrives too
+    box.deliver(box.sent[-1]["data"])
+    assert services.check_inbox(now=NOW + timedelta(minutes=5)) == {"status": "ok", "checked": 0, "recorded": 0}
+    found = repo.get_lead(me)
+    assert found.status == "contacted" and "unsubscribed" not in found.tags
+    assert repo.suppressed_addresses([FROM]) == {}
+
+
+def test_a_reply_that_cant_be_recorded_is_read_again_and_sending_waits(company, box, monkeypatch):
+    turn_on(company)
+    lina, _ = lina_sent(company, box)
+    follow_up = approved(lina, step=2)
+    deliver(box, "stop.eml")
+    real = repo.record_inbound
+
+    def busy(*args: Any, **kwargs: Any) -> Any:  # another writer held the lock past the busy timeout
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(repo, "record_inbound", busy)
+    result = services.check_inbox(now=NOW + timedelta(minutes=5))
+    assert result["status"] == "failed" and "couldn't save a message from your inbox" in result["text"]
+    assert repo.email_sending_status(company.id, now=NOW + timedelta(minutes=5))["blocked_reason"] == \
+        "inbox_unchecked"
+    monkeypatch.setattr(repo, "record_inbound", real)
+    assert services.check_inbox(now=NOW + timedelta(minutes=10)) == {"status": "ok", "checked": 1, "recorded": 1}
+    assert repo.get_lead(lina).status == "disqualified" and repo.get_message(follow_up.id).status == "skipped"
+    assert repo.suppressed_addresses(["lina@gulfbank.example"])["lina@gulfbank.example"]["reason"] == "opt_out"
+
+
+def test_a_reply_without_a_message_id_is_logged_once_after_the_folder_is_renumbered(company, box):
+    import re
+
+    turn_on(company)
+    lina, _ = lina_sent(company, box)
+    raw = re.sub(rb"Message-ID: [^\r\n]*\r\n", b"", eml("reply_gmail.eml", lead="lina@gulfbank.example", ours=OUR_ID),
+                 flags=re.I)
+    box.deliver(raw)
+    assert services.check_inbox(now=NOW + timedelta(minutes=5))["recorded"] == 1
+    box.folders["INBOX"].uidvalidity = 77
+    box.deliver(raw, "Junk")
+    services.check_inbox(now=NOW + timedelta(minutes=10))
+    assert len([m for m in repo.list_messages(company.id, lead_id=lina) if m.direction == "inbound"]) == 1
+
+
+def test_a_newsletter_from_a_hotels_address_changes_nothing(company, box):
+    turn_on(company)
+    hotel = repo.upsert_lead(company.id, LeadIn(lead_company="Palm Hotel", email="lina@gulfbank.example"))[0]
+    sent_from_mailbox(hotel.id)
+    services.check_inbox(now=NOW)
+    box.deliver(f"From: Palm Hotel <lina@gulfbank.example>\r\nTo: {FROM}\r\nSubject: Autumn offers\r\n"
+                "Message-ID: <campaign-9@gulfbank.example>\r\nList-Unsubscribe: <https://example.com/u>\r\n\r\n"
+                "New suites. Unsubscribe here.\r\n".encode())
+    services.check_inbox(now=NOW + timedelta(minutes=5))
+    assert repo.get_lead(hotel.id).status == "contacted" and repo.suppressed_addresses(["lina@gulfbank.example"]) == {}
+    assert [e["kind"] for e in repo.list_email_events(lead_id=hotel.id)] == ["auto_reply"]
+
+
+@pytest.mark.parametrize("sep", [" ", "\x85", "\x0b"])
+def test_a_subject_with_an_unusual_line_break_is_held_back_before_any_claim(company, box, sep):
+    turn_on(company)
+    message = approved(lead(company), subject=f"Airport transfers{sep}for Gulf Bank")
+    assert skip_reason(company, message.id) == "the subject has a line break"
+    assert send() == {"status": "idle"} and box.smtp_commands() == []

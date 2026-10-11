@@ -59,6 +59,12 @@ def setting_state(name: str) -> SettingState:
                         where=str(where) if source == "file" and where else "", hint=hint)
 
 
+def breaks_lines(value: str) -> bool:
+    """The value has a line break of any kind str.splitlines() knows (\\n, \\r, VT, FF, FS to RS, NEL, U+2028,
+    U+2029) or a NUL: read back from the .env file, it would be cut short, and the rest read as other settings."""
+    return "\0" in value or len(f"{value}x".splitlines()) > 1
+
+
 def format_line(name: str, value: str) -> str:
     """NAME="value", or NAME='value' when the value contains a double quote (config._dotenv_value reads both)."""
     return f"{name}='{value}'" if '"' in value else f'{name}="{value}"'
@@ -77,7 +83,7 @@ def _check(name: str, value: str | None) -> str | None:
         value = value.strip()
     if not value.strip():
         return None
-    if any(ch in value for ch in "\n\r\0"):
+    if breaks_lines(value):
         raise SettingNotSaved("Use a value without line breaks.")
     if '"' in value and "'" in value:
         # The .env file quotes a value with one kind of quote, so it can't hold both.

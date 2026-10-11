@@ -256,7 +256,7 @@
   {% endfor %}
 </ul>
 {% if bulk %}
-<form method="post" action="{{ base }}/outreach/bulk" id="bulk-form" class="bulk-bar" data-bulk data-keep-scroll aria-label="Approve or skip several drafts">
+<form method="post" action="{{ base }}/outreach/bulk" id="bulk-form" class="bulk-bar" data-bulk data-keep-scroll{% if company.outreach.email_sending %} data-email-sending{% endif %} aria-label="Approve or skip several drafts">
   {{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab=drafts">
   <label class="bulk-all" data-bulk-js hidden><input type="checkbox" data-bulk-all>Select all</label>
   <p class="bulk-count" data-bulk-count aria-live="polite">Tick drafts to approve or skip them together.</p>

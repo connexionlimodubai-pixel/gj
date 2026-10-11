@@ -85,6 +85,9 @@ EMAIL_SETTINGS = ("email_sending", "email_daily_limit", "email_gap_minutes", "em
                   "email_end_hour", "email_footer", "email_send_auto_approved", "email_paused_until",
                   "email_pause_reason")
 EMAIL_FOOTER_MAX = 600
+# The fewest minutes between two emails: Zoho Mail (and most providers) forbid bursts, and limit a new mailbox to
+# about 50 emails an hour.
+EMAIL_GAP_MIN = 5
 # Message.email_state of an outbound email OpenBerry sends from the user's mailbox (repo.claim_next_email):
 # "" not tried (or back in the queue), "claimed" being prepared, "data" the mail server is receiving it, "sent",
 # "failed" (the reason in send_error), "unknown" (the connection broke while the server was receiving it: it may have
@@ -337,7 +340,8 @@ class OutreachConfig(_Model):
     email_daily_limit: int = Field(
         default=30, ge=1, le=100, description="Most emails sent from the mailbox for this company in any 24 hours")
     email_gap_minutes: int = Field(
-        default=5, ge=1, le=240, description="At least this many minutes between two emails from the mailbox")
+        default=5, ge=EMAIL_GAP_MIN, le=240,
+        description="At least this many minutes between two emails from the mailbox (5 or more)")
     email_days: Annotated[list[int], BeforeValidator(lambda v: _weekdays(v))] = Field(
         default_factory=lambda: [0, 1, 2, 3, 4], description="Days emails may go out: 0 = Monday ... 6 = Sunday")
     email_start_hour: int = Field(default=9, ge=0, le=23, description="Sending hours start (local time)")

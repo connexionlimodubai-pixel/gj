@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from datetime import timedelta
+from functools import partial
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -171,13 +172,14 @@ def _mailbox_changes(form: FormData) -> tuple[dict[str, str | None], list[str]]:
     if len(from_name) > 100:
         problems.append("Keep the name under 100 characters.")
     for label, secret in (("password", password), ("reading password", imap_password)):
-        if any(ch in secret for ch in "\r\n\0"):
+        if envfile.breaks_lines(secret):
             problems.append(f"The {label} can't contain line breaks.")
     if not password and not settings.smtp_password:
         problems.append("Enter the mailbox's password (or app password).")
     imap_username = _text(form, "imap_username")
     if imap_username and any(ch.isspace() for ch in imap_username):
         problems.append("Enter the reading username without spaces.")
+    problems += _password_moves(settings, smtp_host, username, imap_host, imap_username, password, imap_password)
     changes: dict[str, str | None] = {
         FIELDS["provider"]: provider, FIELDS["smtp_host"]: smtp_host, FIELDS["smtp_port"]: port_text,
         FIELDS["username"]: username, FIELDS["from_email"]: from_email, FIELDS["from_name"]: from_name or None,
@@ -192,6 +194,38 @@ def _mailbox_changes(form: FormData) -> tuple[dict[str, str | None], list[str]]:
         changes[FIELDS["imap_password"]] = None  # the same details for reading and sending
     # Settings set outside OpenBerry (the environment or another .env file) win and stay as they are.
     return {k: v for k, v in changes.items() if _editable(k)}, problems
+
+
+def _password_moves(settings: Any, smtp_host: str, username: str, imap_host: str, imap_username: str, password: str,
+                    imap_password: str) -> list[str]:
+    """A saved password only ever goes to the servers and username it was typed for. Kept for a new server, anyone
+    at this dashboard could send it to a server of theirs and read it there, though the page never shows it. So a
+    changed server or username needs the password typed again (a port change alone doesn't, nor filling in a server
+    for the first time next to a password set outside OpenBerry)."""
+    def changed(field: str, typed: str, saved: str) -> bool:
+        saved = (saved or "").strip().lower()
+        return _editable(FIELDS[field]) and bool(saved) and typed.strip().lower() != saved
+
+    smtp_moved = changed("smtp_host", smtp_host, settings.smtp_host) or changed("username", username,
+                                                                                settings.smtp_username)
+    imap_moved = changed("imap_host", imap_host, settings.imap_host) or changed("imap_username", imap_username,
+                                                                                settings.imap_username)
+    keeps_imap = bool(imap_username and settings.imap_password and not imap_password)
+    reads_with_main = not (imap_password or keeps_imap)  # no reading password of its own: the main one reads too
+    problems = []
+    if settings.smtp_password and (smtp_moved or (imap_moved and reads_with_main)):
+        if not _editable(FIELDS["password"]):
+            problems.append(f"The password is set outside OpenBerry ({FIELDS['password']}): change the servers and "
+                            "username there too.")
+        elif not password:
+            problems.append("Type the password again: the server or username changed.")
+    if keeps_imap and imap_moved:
+        if not _editable(FIELDS["imap_password"]):
+            problems.append(f"The reading password is set outside OpenBerry ({FIELDS['imap_password']}): change the "
+                            "reading server and username there too.")
+        else:
+            problems.append("Type the reading password again: the reading server or username changed.")
+    return problems
 
 
 def _editable(name: str) -> bool:
@@ -237,9 +271,13 @@ async def mailbox_save(request: Request, form: FormData = Depends(checked_form))
             return _back()
         if not await run_in_threadpool(_save, request, changes):
             return _back()
-        await run_in_threadpool(repo.retry_mailbox)  # new settings: try again at once
+        # New settings: a refused login is tried again at once. A provider's block (24 hours, to protect the
+        # mailbox from suspension) and the waits after failures stay: only Try again lifts them early.
+        await run_in_threadpool(partial(repo.retry_mailbox, auth_only=True))
         result = await run_in_threadpool(services.check_inbox)
         _inbox_flash(request, result, "Mailbox saved. ")
+        if result["status"] == "ok":
+            flash(request, "Now click Send test email to check that your mailbox can send.", "info")
     elif action == "test":
         if wait := limits(request).test_email.allow("mailbox"):
             flash(request, f"You sent 5 test emails in the last 10 minutes. Try again in {int(wait // 60) + 1} "
@@ -250,7 +288,9 @@ async def mailbox_save(request: Request, form: FormData = Depends(checked_form))
         if not outcome.ok:
             flash(request, f"The test email wasn't sent: {outcome.text}", "error")
             return _back()
-        # Sending works; reading the inbox is the other half (replies, opt-outs and bounces).
+        # Sending works (a refused login is lifted); reading the inbox is the other half (replies, opt-outs and
+        # bounces).
+        await run_in_threadpool(partial(repo.retry_mailbox, auth_only=True))
         _inbox_flash(request, await run_in_threadpool(services.check_inbox),
                      f"Test email sent to {address}: check that it arrived (also in the spam folder). ")
     elif action == "check":
@@ -258,7 +298,10 @@ async def mailbox_save(request: Request, form: FormData = Depends(checked_form))
             flash(request, "You checked the inbox many times in the last 10 minutes. Try again in a few minutes.",
                   "error")
             return _back()
-        _inbox_flash(request, await run_in_threadpool(services.check_inbox))
+        result = await run_in_threadpool(services.check_inbox)
+        if result["status"] == "ok":  # the reading login works again: the automatic checks start again
+            await run_in_threadpool(partial(repo.retry_mailbox, auth_only=True))
+        _inbox_flash(request, result)
     elif action == "retry":
         await run_in_threadpool(repo.retry_mailbox)
         flash(request, "Mailbox pause lifted. OpenBerry tries again within a minute, if email sending is on.")
@@ -280,6 +323,11 @@ def _disconnect(request: Request) -> None:
     for company in repo.list_companies():
         if company.outreach.email_sending:
             repo.update_company(company.id, {"outreach": {"email_sending": False}})
+    outside = [name for name in config.MAILBOX_SETTINGS if config.setting_source(name)[0] and not _editable(name)]
+    if outside:  # the flash says only what was removed
+        flash(request, f"Email sending is off for every company. Some mailbox settings are set outside OpenBerry "
+                       f"({', '.join(outside)}): remove them there to disconnect the mailbox.", "warning")
+        return
     flash(request, "Mailbox disconnected and its password removed. Email sending is off for every company.", "info")
 
 
@@ -293,6 +341,21 @@ EMAIL_STATE_LABELS = {
     "paused": "Paused", "daily_limit": "Daily limit reached", "mailbox_limit": "Daily limit reached",
     "outside_hours": "Outside sending hours",
 }
+# The dashboard's line: "Email sending is <phrase>: 4 of 30 emails sent in the last 24 hours".
+EMAIL_STATE_PHRASES = {
+    "on": "on", "outside_hours": "on", "not_connected": "on, but no mailbox is connected",
+    "mailbox_paused": "on, but your mailbox is paused", "inbox_unchecked": "on, but your inbox wasn't checked",
+    "inbox_problem": "on, but OpenBerry can't read your inbox", "footer": "on, but the footer needs fixing",
+    "company_paused": "on, but the company is paused", "paused": "paused",
+    "daily_limit": "on, but the daily limit is reached",
+    "mailbox_limit": "on, but your mailbox's daily limit is reached",
+}
+_ISO_TIME = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[+-]\d{2}:\d{2}|Z)")
+
+
+def for_you(text: str) -> str:
+    """A reason shared with Claude and the API (times in ISO, in UTC), for the dashboard: on this computer's clock."""
+    return _ISO_TIME.sub(lambda m: local_dt(to_datetime(m.group(0))), text or "")
 EMAIL_LIMIT_RANGE = forms.EMAIL_LIMIT_RANGE
 EMAIL_GAP_RANGE = forms.EMAIL_GAP_RANGE
 EMAIL_QUEUE_SHOWN = 10
@@ -312,8 +375,15 @@ def email_status(company: Company, messages: list[Message] | None = None) -> dic
     state = "off" if reason == "disabled" else (reason or "on")
     attention = repo.email_attention(company.id)
     eligible = {item["message_id"] for item in queue["items"]}
-    held = {s["message_id"]: s["reason"] for s in queue["skipped"]}
-    blocked_message = repo.email_blocked_message(queue)
+    skipped = [{**s, "reason": for_you(s["reason"])} for s in queue["skipped"]]
+    held = {s["message_id"]: s["reason"] for s in skipped}
+    blocked_message = for_you(repo.email_blocked_message(queue, you=True))
+    # Failed because the address doesn't exist (it is on the never-email list): Try again can't work, so the
+    # email offers "Fix the address" instead.
+    failed = [m for m in [*(messages or []), *attention["messages"]] if m.email_state == "failed"]
+    never = repo.suppressed_addresses([m.email_to or "" for m in failed])
+    dead_address = {m.id for m in failed
+                    if (never.get(repo.normalize_email(m.email_to or "")) or {}).get("reason") == "bounce"}
     info: dict[int, dict[str, Any]] = {}
     for msg in messages or []:
         if msg.channel != "email" or msg.direction != "outbound":
@@ -321,7 +391,7 @@ def email_status(company: Company, messages: list[Message] | None = None) -> dic
         if msg.email_state in repo.EMAIL_IN_FLIGHT:
             info[msg.id] = {"state": "sending"}
         elif msg.email_state in ("unknown", "failed", "bounced"):
-            info[msg.id] = {"state": msg.email_state, "reason": msg.send_error}
+            info[msg.id] = {"state": msg.email_state, "reason": msg.send_error, "dead": msg.id in dead_address}
         elif msg.status != "approved" or not queue["enabled"]:
             continue
         elif msg.id in eligible:
@@ -335,9 +405,12 @@ def email_status(company: Company, messages: list[Message] | None = None) -> dic
     if preview is None:
         preview = next((m for m in repo.list_messages(company.id, direction="outbound", limit=50)
                         if m.channel == "email" and m.status in ("approved", "draft")), None)
+    inbox_problem = state == "inbox_unchecked" and bool(queue["mailbox"]["inbox_error"])
     return {
-        **queue, "items": queue["items"][:EMAIL_QUEUE_SHOWN], "state": state,
-        "label": EMAIL_STATE_LABELS.get(state, state), "info": info, "message": blocked_message,
+        **queue, "items": queue["items"][:EMAIL_QUEUE_SHOWN], "skipped": skipped, "state": state,
+        "label": "Inbox problem" if inbox_problem else EMAIL_STATE_LABELS.get(state, state),
+        "phrase": EMAIL_STATE_PHRASES.get("inbox_problem" if inbox_problem else state, "on"),
+        "info": info, "message": blocked_message, "dead_address": dead_address,
         "queued_ids": eligible if reason in DELAYED else set(),
         "from_email": settings.smtp_from_email or settings.smtp_username, "from_name": settings.smtp_from_name,
         "provider": settings.mail_provider, "hostinger": settings.mail_provider == "hostinger",
@@ -501,7 +574,7 @@ async def email_send_now(request: Request, company_id: int, form: FormData = Dep
         flash(request, "1 email sent. Turn the scheduler on to send the rest automatically.")
     elif result["status"] == "idle":
         status = await run_in_threadpool(repo.email_sending_status, company_id)
-        why = repo.email_blocked_message(status)
+        why = for_you(repo.email_blocked_message(status, you=True))
         if not why and status.get("next_send_at"):
             why = f"the next email can go out at {local_dt(to_datetime(status['next_send_at']))}"
         flash(request, f"Nothing was sent{': ' + why if why else ': no approved email is ready'}.", "info")
@@ -533,6 +606,12 @@ def email_message_action(request: Request, company_id: int, message_id: int,
         repo.resolve_email(message_id, action)
     except ValueError as exc:
         flash(request, str(exc), "error")
+        return RedirectResponse(back, status_code=303)
+    # Say what really happens to it now: back in the queue, or held back (a bounced address, a reply...).
+    held = next((s["reason"] for s in repo.email_queue(company_id, limit=0)["skipped"]
+                 if s["message_id"] == message_id), "") if action != "mark_sent" else ""
+    if held:
+        flash(request, f"It isn't emailed now: {for_you(held)}.", "warning")
     else:
         flash(request, EMAIL_ACTIONS[action])
     return RedirectResponse(back, status_code=303)

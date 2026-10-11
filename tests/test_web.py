@@ -142,7 +142,7 @@ def test_every_page_renders_with_sample_data(client, sample_company):
                  f"{base}/leads/{person.id}", f"{base}/leads/{account.id}", f"{base}/signals",
                  f"{base}/outreach", f"{base}/outreach?tab=approved", f"{base}/outreach?tab=sent",
                  f"{base}/outreach?tab=replies", f"{base}/outreach?tab=followups", f"{base}/settings",
-                 "/companies", "/register", "/help"):
+                 "/companies", "/register", "/help", "/data"):
         resp = client.get(path)
         assert resp.status_code == 200, path
     dashboard = client.get(base).text

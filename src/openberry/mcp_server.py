@@ -42,7 +42,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
-from . import __version__, config, leads_csv, mailer, outreach, repo, sample_cleanup, services
+from . import __version__, config, db, leads_csv, mailer, outreach, repo, sample_cleanup, services
 from .collectors import COLLECTORS
 from .collectors.base import find_terms
 from .config import Settings, current_base_url, get_settings
@@ -2236,9 +2236,22 @@ _PROMPTS: list[tuple[Callable[..., str], str]] = [
 ]
 
 
+class OpenBerryServer(MCPServer):
+    """The MCP server, checking the database before each tool call: a file this version can't open (written by a
+    newer OpenBerry, or an upgrade that couldn't save a copy first) is answered as a tool error that says so, which
+    Claude can pass on, instead of the SDK's bare "Error executing tool"."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
+        try:
+            await asyncio.to_thread(db.prepare)
+        except db.DatabaseProblem as exc:
+            raise ToolError(str(exc)) from exc
+        return await super().call_tool(name, arguments, context)
+
+
 def build_server() -> MCPServer:
     """The OpenBerry MCP server with every tool, resource and prompt registered."""
-    server: MCPServer = MCPServer(
+    server: MCPServer = OpenBerryServer(
         "openberry",
         title="OpenBerry",
         description="Open-source intent-signal lead generation: companies, scored leads, signals and outreach drafts.",

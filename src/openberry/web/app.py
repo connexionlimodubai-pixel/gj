@@ -19,9 +19,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
-from .. import __version__, repo
+from .. import __version__, db, repo
 from ..config import Settings, get_settings, set_settings
-from . import api, auth, keys, leads, mail, pages, scans
+from . import api, auth, data, keys, leads, mail, pages, scans
 from .ratelimit import Limits
 from .ui import STATIC_DIR, render
 
@@ -44,10 +44,11 @@ def _wants_html(request: Request) -> bool:
     return not request.url.path.startswith(("/api", "/mcp", "/static", "/healthz"))
 
 
-def _error_page(request: Request, status_code: int, message: str) -> Response:
+def _error_page(request: Request, status_code: int, message: str, title: str = "", public: bool = False) -> Response:
+    """The error page. `public` leaves out the menu, which reads the database: for errors about the database."""
     return render(request, "error.html", {
-        "title": ERROR_TITLES.get(status_code, "Error"), "status_code": status_code, "message": message,
-    }, status_code=status_code)
+        "title": title or ERROR_TITLES.get(status_code, "Error"), "status_code": status_code, "message": message,
+    }, status_code=status_code, public=public)
 
 
 def _login_required(request: Request, exc: auth.LoginRequired) -> Response:
@@ -78,6 +79,15 @@ def _http_error(request: Request, exc: StarletteHTTPException) -> Response:
     if exc.status_code == 404:
         detail = "There's no page at this address."
     return _error_page(request, exc.status_code, detail)
+
+
+def _database_problem(request: Request, exc: db.DatabaseProblem) -> Response:
+    """A data file this version can't open (written by a newer version, or an upgrade that couldn't save a copy
+    first): say so and what to do, on every page, instead of a bare error."""
+    log.error("%s", exc)
+    if not _wants_html(request):
+        return JSONResponse({"detail": str(exc)}, status_code=503)
+    return _error_page(request, 503, str(exc), title="OpenBerry can't open your data", public=True)
 
 
 def _json_errors(errors: Any) -> list[dict[str, Any]]:
@@ -156,6 +166,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(ValueError, _value_error)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(RequestValidationError, _request_validation_error)
+    app.add_exception_handler(db.DatabaseProblem, _database_problem)
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -170,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(pages.router)
     app.include_router(keys.router)
     app.include_router(mail.router)
+    app.include_router(data.router)
     app.include_router(leads.router)
 
     if settings.http_mcp_enabled:

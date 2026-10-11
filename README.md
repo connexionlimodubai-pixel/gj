@@ -143,6 +143,16 @@ and the API can turn email sending off, never on. **Hostinger forbids email to p
 Mail allows one-to-one business email only: use a separate mailbox (ideally a separate domain) for outreach, set up
 SPF, DKIM and DMARC, and start with 5 to 10 a day. Read [docs/EMAIL_SENDING.md](docs/EMAIL_SENDING.md) first.
 
+## Back up your data
+
+Everything is in one SQLite file, `~/.openberry/openberry.db` (Docker: the `openberry-data` volume). OpenBerry saves a
+copy in the `backups` folder next to it every day (7 days and 4 weeks are kept), before a schema upgrade, before
+Delete company and before a restore. For a copy of your own, open **Your data** in the dashboard and click
+**Download backup**, or run `openberry backup`: both are safe while OpenBerry runs. Don't copy `openberry.db` alone
+while OpenBerry or Claude uses it: its newest changes are in `openberry.db-wal`. To put a backup back, close OpenBerry
+(and Claude Desktop) and run `openberry restore FILE`. [docs/DESKTOP.md](docs/DESKTOP.md#back-up-your-data) has the
+details, and how to update and uninstall.
+
 ## Configuration
 
 Everything is optional for local use. Put settings in `.env` (read from the current folder and `~/.openberry/.env`)
@@ -175,6 +185,8 @@ openberry mcp                                  # MCP over stdio (what Claude Des
 openberry mcp --http --port 8001               # standalone MCP over HTTP (bearer token)
 openberry scan [--company 1] [--source hackernews]
 openberry rescore | init-db
+openberry backup [PATH]                        # a consistent copy of the database, safe while OpenBerry runs
+openberry restore FILE                         # put a backup back (OpenBerry closed); turns email and agent sending off
 openberry remove-sample [--dry-run]            # the sample company an older version created: shows what goes, asks first
 ```
 (Prefix with `uv run` if you haven't installed it with `pip install .`.)

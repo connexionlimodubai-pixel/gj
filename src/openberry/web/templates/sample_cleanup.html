@@ -79,7 +79,7 @@
     <button class="btn btn-danger" type="submit">{{ m.icon("trash") }}{% if safe %}Delete the sample company{% elif removing %}Remove {{ removing|plural("sample lead") }}{% else %}Remove the sample marker{% endif %}</button>
     <a class="btn btn-ghost" href="/c/{{ company.id }}">Cancel</a>
   </form>
-  {% if safe and backup_first %}<p class="small muted">A backup of your data is saved first.</p>{% endif %}
+  {% if safe %}<p class="small muted">A backup of your data is saved first.</p>{% endif %}
   {% if not safe %}<p class="small muted">Want the whole company gone instead? <a href="/c/{{ company.id }}/leads.csv">Export its leads</a> first if you need them, then use <a href="/c/{{ company.id }}/settings#danger-zone">Company profile → Delete company</a>.</p>{% endif %}
 </section>
 {% endblock %}

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
 from starlette.responses import RedirectResponse, Response
 
-from .. import repo, sample_cleanup, services
+from .. import backups, repo, sample_cleanup, services
 from ..config import get_settings
 from ..models import EMAIL_SETTINGS, PROSPECT_TYPES, SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
 from . import charts, forms, mail, scans
@@ -722,11 +723,17 @@ def settings_status(request: Request, company_id: int, form: FormData = Depends(
 
 @router.post("/c/{company_id}/delete")
 def company_delete(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Delete the company, after a backup of the whole database (backups.delete_company): nothing goes without it."""
     company = repo.get_company(company_id)
-    repo.delete_company(company_id)
+    try:
+        backups.delete_company(company_id)
+    except (OSError, sqlite3.Error) as exc:
+        flash(request, f"Nothing was deleted: OpenBerry could not save a backup of your data first ({exc}).", "error")
+        return redirect(f"/c/{company_id}/settings#danger-zone")
     if request.session.get(COMPANY_KEY) == company_id:
         request.session.pop(COMPANY_KEY, None)
-    flash(request, f"Deleted {company.name} and all of its leads, signals and messages.", "info")
+    flash(request, f"Deleted {company.name} and all of its leads, signals and messages. A backup of your data was "
+          "saved first (Your data).", "info")
     return redirect("/companies")
 
 
@@ -743,7 +750,7 @@ def _render_sample(request: Request, plan: sample_cleanup.CleanupPlan, *, status
     return render(request, "sample_cleanup.html", {
         "company": plan.company, "active": "sample", "title": "Remove sample data", "plan": plan,
         "sample_leads": leads["sample"], "touched_leads": leads["touched"], "other_leads": leads["other"],
-        "changed": changed, "backup_first": sample_cleanup.snapshots_available(),
+        "changed": changed,
     }, status_code=status_code)
 
 

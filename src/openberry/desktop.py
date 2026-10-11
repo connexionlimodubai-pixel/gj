@@ -61,8 +61,8 @@ HEALTHZ_APP = "openberry"  # /healthz answers {"ok": true, "app": "openberry"} (
 # as `openberry`: Claude Desktop can start `OpenBerry mcp`, and CI can run `OpenBerry desktop --smoke`.
 # Any other first argument that isn't an option goes there too, so a typo or a removed command gets
 # argparse's "invalid choice" instead of starting the app.
-CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "rescore", "init-db", "remove-sample", "--version", "-h",
-                          "--help"})
+CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "rescore", "init-db", "backup", "restore",
+                          "remove-sample", "--version", "-h", "--help"})
 
 
 class DesktopError(RuntimeError):
@@ -639,12 +639,25 @@ def _run_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Eve
         lock.release()
 
 
+def open_data(settings: Settings) -> None:
+    """Create or upgrade the database before the window opens, so a problem with it is shown in a window of its own
+    (show_error) with what to do: a file a newer OpenBerry wrote, an upgrade that couldn't save a copy first."""
+    from . import db
+
+    try:
+        db.prepare(settings.db_path)
+    except db.DatabaseProblem as exc:
+        raise DesktopError(str(exc)) from exc
+
+
 def _serve_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Event | None) -> None:
     """Start this process's server, show it, and stop it when the person is done."""
     sock = bind_port(ports)
     url = socket_url(sock)
     try:
-        server = start_server(desktop_settings(url, home), sock)
+        settings = desktop_settings(url, home)
+        open_data(settings)
+        server = start_server(settings, sock)
     except BaseException:
         sock.close()
         raise
@@ -696,6 +709,7 @@ def smoke(home: Path, ports: Sequence[int]) -> int:
     settings = desktop_settings(url, home)
     settings.scheduler_enabled = False  # a check must not start anyone's scheduled scans
     try:
+        open_data(settings)
         server = start_server(settings, sock)
     except BaseException:
         sock.close()

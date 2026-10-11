@@ -688,6 +688,13 @@ a.lead-name:hover { color: var(--accent-text); }
 .agent-line-held { background: var(--warning-bg); }
 .agent-line-held > .icon { color: var(--warning); }
 .keys-card + .keys-card { margin-top: var(--s4); }
+/* Your data page */
+.data-files { display: grid; gap: 6px; padding-left: 18px; list-style: disc; color: var(--text-2); }
+.data-files code { color: var(--text); }
+.data-steps { list-style: decimal; padding-left: 20px; display: grid; gap: var(--s3); color: var(--text-2); }
+.data-steps .code-block { margin-top: var(--s2); color: var(--text); }
+.data-steps .small { margin-top: var(--s1); }
+.data-dl { width: 1%; text-align: right; }
 .mailbox-form { display: grid; gap: var(--s3); }
 .mailbox-form .field { min-width: 0; }
 .provider-help { display: grid; gap: var(--s2); }

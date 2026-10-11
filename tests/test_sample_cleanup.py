@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import subprocess
+from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from fastapi.testclient import TestClient
 from mcp.client import Client
 
 from email_fakes import FROM, connect_mailbox
-from openberry import cli, db, repo, sample_cleanup
+from openberry import backups, cli, db, repo, sample_cleanup
 from openberry.mcp_server import build_server
 from openberry.models import CompanyIn, LeadIn, SignalIn
 from openberry.sample_cleanup import SAMPLE_LEAD_REASON, PlanChanged, cleanup_plan, is_sample_lead
@@ -261,18 +262,15 @@ def test_removing_an_untouched_sample_company_deletes_it_after_a_backup(monkeypa
     before = counts()
     assert before == {"companies": 2, "leads": 14, "lead_keys": before["lead_keys"], "signals": 14, "messages": 2,
                       "scan_runs": 1, "place_ids": 1, "email_events": 1, "email_suppressions": 1, "api_usage": 1}
-    backups: list[tuple[Path, int]] = []
-
-    def backup_to(dest: Path) -> None:  # WP2.1's db.backup_to: here it records that the company was still there
-        with db.connect() as c:
-            backups.append((dest, c.execute("SELECT COUNT(*) FROM companies").fetchone()[0]))
-        dest.write_bytes(b"backup")
-
-    monkeypatch.setattr(db, "backup_to", backup_to, raising=False)
     plan = cleanup_plan(sample_id)
     done = sample_cleanup.remove(sample_id, plan.token)
-    assert done.company_deleted and done.removed_leads == 13 and done.backup == backups[0][0]
-    assert backups[0][1] == 2 and done.backup.parent == settings.db_path.parent / "backups" and done.backup.exists()
+    assert done.company_deleted and done.removed_leads == 13
+    assert done.backup.parent == settings.db_path.parent / "backups" and done.backup.name.endswith("-before-delete.db")
+    with closing(sqlite3.connect(done.backup)) as copy:  # taken under the write lock, before the delete
+        assert copy.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 2
+        assert copy.execute("SELECT COUNT(*) FROM leads").fetchone()[0] == 14
+        assert copy.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert [s.path for s in backups.list_snapshots()] == [done.backup]
     after = counts()
     assert after == {"companies": 1, "leads": 1, "lead_keys": after["lead_keys"], "signals": 0, "messages": 0,
                      "scan_runs": 0, "place_ids": 0, "email_events": 0, "email_suppressions": 1, "api_usage": 1}
@@ -284,16 +282,8 @@ def test_removing_an_untouched_sample_company_deletes_it_after_a_backup(monkeypa
     assert [c.id for c in repo.list_companies()] == [real_id]
 
 
-def test_without_backups_the_company_is_still_deleted(monkeypatch):
-    monkeypatch.delattr(db, "backup_to", raising=False)  # this version has no backups yet (WP2.1)
-    assert sample_cleanup.snapshots_available() is False and sample_cleanup.snapshot_before_delete() is None
-    sample_id = seed_sample_company(legacy_demo=True)
-    done = sample_cleanup.remove(sample_id, cleanup_plan(sample_id).token)
-    assert done.company_deleted and done.backup is None and repo.list_companies() == []
-
-
 def test_a_failed_backup_deletes_nothing(monkeypatch):
-    def backup_to(dest: Path) -> None:
+    def backup_to(dest: Path, source: Path | None = None) -> None:
         raise OSError("No space left on device")
 
     monkeypatch.setattr(db, "backup_to", backup_to, raising=False)
@@ -313,11 +303,11 @@ def test_otherwise_only_the_untouched_sample_leads_go(monkeypatch):
     added, _ = repo.upsert_lead(sample_id, LeadIn(full_name="Real HN user", source="hackernews",
                                                   profile_url="https://news.ycombinator.com/user?id=x"))
     plan = cleanup_plan(sample_id)
-    backups: list[Path] = []
-    monkeypatch.setattr(db, "backup_to", backups.append, raising=False)
+    copies: list[Path] = []
+    monkeypatch.setattr(db, "backup_to", lambda dest, source=None: copies.append(dest))
     done = sample_cleanup.remove(sample_id, plan.token)
     assert not done.company_deleted and (done.removed_leads, done.kept_leads) == (11, 3)
-    assert backups == []  # nothing but sample leads was deleted
+    assert copies == [] and done.backup is None  # nothing but sample leads was deleted
     assert sorted(lead.id for lead in repo.list_leads(sample_id, limit=100)[0]) == sorted([aisha, priya, added.id])
     assert repo.get_company(sample_id).name == LEGACY_NAME  # the profile stays
     assert sorted(m.lead_id for m in repo.list_messages(sample_id)) == sorted([aisha, priya])  # their drafts stay
@@ -391,10 +381,8 @@ def test_the_confirmation_page_lists_what_goes_and_what_stays(client, monkeypatc
     page = client.get(f"/c/{sample_id}/sample").text
     assert "Delete the sample company" in page and "13 sample leads, 14 signals and 2 drafts" in page
     assert "Aisha Rahman" in page and "the email opt-outs and bounces" in page
-    assert "A backup of your data is saved first." not in page  # no backups in this version yet (WP2.1)
+    assert "A backup of your data is saved first." in page
     assert sample_cleanup.BANNER_TEXT in page and 'class="sample-banner"' not in page  # the lede, not the banner
-    monkeypatch.setattr(db, "backup_to", lambda dest: dest.write_bytes(b""), raising=False)
-    assert "A backup of your data is saved first." in client.get(f"/c/{sample_id}/sample").text
     later(monkeypatch)
     repo.update_lead(lead_named(sample_id, "Priya Nair"), {"notes": "call her"})
     added, _ = repo.upsert_lead(sample_id, LeadIn(full_name="Pat Real", source="manual",

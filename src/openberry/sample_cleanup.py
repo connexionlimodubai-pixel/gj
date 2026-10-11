@@ -29,8 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import db, repo
-from .config import get_settings
+from . import backups, db, repo
 from .models import Company, Lead, Message, ScanRun
 
 LEGACY_SOURCE = "demo"  # leads.source and signals.source of every row the demo wrote
@@ -241,23 +240,10 @@ class Removal:
     backup: Path | None = None
 
 
-def snapshots_available() -> bool:
-    """Whether this version backs up the database before deleting a company (WP2.1)."""
-    return callable(getattr(db, "backup_to", None))
-
-
-def snapshot_before_delete() -> Path | None:
-    """HOOK for WP2.1 (backups): copy the database into backups/ before the sample company is deleted, as Delete
-    company will. Uses db.backup_to(dest) once WP2 adds it; returns the copy's path, or None while this version has
-    no backups. A backup that fails raises, so nothing is deleted. Replace the body with WP2's own snapshot helper
-    (same naming and pruning as Delete company) when it lands."""
-    backup_to = getattr(db, "backup_to", None)
-    if not callable(backup_to):
-        return None
-    dest = get_settings().db_path.parent / "backups" / f"openberry-{repo.utcnow():%Y%m%d-%H%M%S}-sample.db"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    backup_to(dest)
-    return dest
+def snapshot_before_delete() -> Path:
+    """Copy the database into the backups folder before the sample company is deleted, as Delete company does (same
+    naming and pruning: backups.BEFORE_DELETE). A backup that fails raises, so nothing is deleted."""
+    return backups.snapshot(backups.BEFORE_DELETE)
 
 
 def remove(company_id: int, token: str, *, snapshot: Callable[[], Path | None] | None = None) -> Removal:

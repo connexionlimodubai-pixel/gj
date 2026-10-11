@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import os
 import sqlite3
 import threading
 import time
@@ -240,11 +243,88 @@ EMAIL_MESSAGE_COLUMNS = {
 }
 
 
+log = logging.getLogger(__name__)
+
+
+class DatabaseProblem(RuntimeError):
+    """The data file can't be opened as it is. The message says why and what to do, in plain words: the desktop app
+    shows it in a window, the dashboard on its error page, Claude as a tool error, and the command line prints it."""
+
+
+class DatabaseTooNew(DatabaseProblem):
+    """The file was written by a newer OpenBerry: this version would damage it (0.1.1 turned a v5 file into v3)."""
+
+    def __init__(self, version: int) -> None:
+        self.version = version
+        super().__init__(f"This data was saved by a newer OpenBerry (database v{version}). Open the newer app, "
+                         "or restore a backup.")
+
+
+class UpgradeBackupFailed(DatabaseProblem):
+    """The copy taken before a schema upgrade failed (a full disk, a folder that can't be written): nothing changed."""
+
+    def __init__(self, folder: Path, reason: object) -> None:
+        super().__init__(f"OpenBerry has to update your data for this version, but it could not save a copy of it "
+                         f"first in {folder} ({reason}). Nothing was changed. Free some disk space, or check that you "
+                         "can write to that folder, then open OpenBerry again.")
+
+
+def backup_to(dest: Path, source: Path | None = None) -> Path:
+    """Copy the database (`source`, else the configured one) to `dest` with SQLite's backup API.
+
+    The copy is consistent and complete: it holds what is still in the -wal file, and other connections keep reading
+    and writing while it is made. It is written under a temporary name first, so `dest` is either a whole copy or
+    absent. Returns `dest`.
+    """
+    source = Path(source or db_path())
+    dest = Path(dest)
+    if not source.is_file():
+        raise FileNotFoundError(f"there is no database at {source}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}-{threading.get_ident()}.tmp")
+    try:
+        with contextlib.closing(sqlite3.connect(source, timeout=30)) as src, \
+                contextlib.closing(sqlite3.connect(tmp)) as out:
+            src.execute("PRAGMA busy_timeout=30000")
+            src.backup(out)
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    return dest
+
+
+def file_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _before_upgrade(conn: sqlite3.Connection, path: Path) -> None:
+    """Refuse a file a newer version wrote, and copy a file an older version wrote before anything in it changes.
+
+    Runs before executescript(SCHEMA), which creates tables outside the migration's transaction, and writes nothing.
+    """
+    version = file_version(conn)
+    if version > SCHEMA_VERSION:
+        raise DatabaseTooNew(version)
+    if 0 < version < SCHEMA_VERSION and str(path) != ":memory:":
+        from . import backups  # it imports this module
+
+        try:
+            copy = backups.snapshot(backups.PRE_UPGRADE, source=path, version=version)
+        except (OSError, sqlite3.Error) as exc:
+            raise UpgradeBackupFailed(backups.folder(path), exc) from exc
+        log.info("upgrading the data from database v%s to v%s; a copy of it was saved first: %s", version,
+                 SCHEMA_VERSION, copy)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Bring a database written by an older version up to SCHEMA (CREATE IF NOT EXISTS adds no columns)."""
     conn.execute("BEGIN IMMEDIATE")  # two processes starting at once must not both add the column
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:  # a newer version upgraded it since _before_upgrade looked
+            raise DatabaseTooNew(version)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)")}
         if "alerted_at" not in columns:
             conn.execute("ALTER TABLE leads ADD COLUMN alerted_at TEXT")
@@ -311,6 +391,7 @@ def init_db(path: Path | None = None) -> Path:
     conn = sqlite3.connect(path, timeout=30)  # another process may be upgrading the same file
     try:
         _use_wal(conn)
+        _before_upgrade(conn, path)
         conn.executescript(SCHEMA)
         _migrate(conn)
     finally:
@@ -322,6 +403,19 @@ _initialized: set[str] = set()
 _init_lock = threading.Lock()  # one thread per process creates and upgrades the file; the others wait for it
 
 
+def prepare(path: Path | None = None) -> Path:
+    """Create or upgrade the database once per process (init_db), before its first connection. Raises a
+    DatabaseProblem when the file can't be used; it is tried again on the next connection."""
+    path = path or db_path()
+    key = str(path.resolve()) if str(path) != ":memory:" else ":memory:"
+    if key not in _initialized:
+        with _init_lock:
+            if key not in _initialized:
+                init_db(path)
+                _initialized.add(key)
+    return path
+
+
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     """Open a connection, commit on success, roll back on error.
@@ -329,13 +423,7 @@ def connect() -> Iterator[sqlite3.Connection]:
     A fresh connection per unit of work keeps us thread-safe across FastAPI's
     threadpool, the scheduler task, and the MCP server process.
     """
-    path = db_path()
-    key = str(path.resolve()) if str(path) != ":memory:" else ":memory:"
-    if key not in _initialized:
-        with _init_lock:
-            if key not in _initialized:
-                init_db(path)
-                _initialized.add(key)
+    path = prepare()
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")

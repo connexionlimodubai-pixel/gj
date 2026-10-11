@@ -1,4 +1,4 @@
-"""Command line: `openberry serve | desktop | mcp | scan | rescore | init-db | remove-sample`."""
+"""Command line: `openberry serve | desktop | mcp | scan | rescore | init-db | backup | restore | remove-sample`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import argparse
 import asyncio
 import json
 import logging
+import sqlite3
 import sys
+from pathlib import Path
 
 from . import __version__
 
@@ -137,6 +139,37 @@ def _init_db(_: argparse.Namespace) -> None:
     print(f"Database ready at {init_db()}")
 
 
+def _backup(args: argparse.Namespace) -> None:
+    from . import backups, db
+
+    if not db.db_path().is_file():
+        sys.exit(f"openberry backup: there is no data to back up yet ({db.db_path()} doesn't exist).")
+    db.prepare()  # a file a newer version wrote is refused, an older one is upgraded (with its own copy) first
+    try:
+        path = backups.manual_backup(args.path)
+    except (OSError, sqlite3.Error) as exc:
+        sys.exit(f"openberry backup: the backup failed: {exc}")
+    print(f"Backup saved: {path}")
+
+
+def _restore(args: argparse.Namespace) -> None:
+    from . import backups
+
+    try:
+        done = backups.restore(args.file)
+    except backups.RestoreRefused as exc:
+        sys.exit(f"openberry restore: {exc} Nothing was changed.")
+    print(f"Restored {args.file}.")
+    if done.previous:
+        print(f"Your data from before the restore was saved first: {done.previous}")
+    if done.sending_turned_off:
+        print("Email sending and AI agent sending are now off for: " + ", ".join(done.sending_turned_off) + ". "
+              "Emails sent after this backup was made are not in it: check the Outreach page before you turn "
+              "sending back on.")
+    else:
+        print("Email sending and AI agent sending are off for every company.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     from .desktop import add_arguments as add_desktop_arguments
 
@@ -167,6 +200,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("rescore", help="recompute every lead score").set_defaults(func=_rescore)
     sub.add_parser("init-db", help="create the SQLite database").set_defaults(func=_init_db)
 
+    p = sub.add_parser("backup", help="save a copy of your data (safe while OpenBerry runs)")
+    p.add_argument("path", nargs="?", type=Path,
+                   help="file or folder to save it to (default: the backups folder in your data folder)")
+    p.set_defaults(func=_backup)
+
+    p = sub.add_parser("restore", help="put a backup back (close OpenBerry and quit Claude Desktop first)")
+    p.add_argument("file", type=Path, help="the backup file, e.g. openberry-backup-2026-10-11.db")
+    p.set_defaults(func=_restore)
+
     from .sample_cleanup import CLI_HELP
 
     p = sub.add_parser("remove-sample", help=CLI_HELP)
@@ -190,7 +232,13 @@ def main(argv: list[str] | None = None) -> None:
     # Logs go to stderr: stdout belongs to the MCP protocol in `openberry mcp`.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # it logs full request URLs at INFO; webhook URLs are secrets
-    args.func(args)
+    from .db import DatabaseProblem
+
+    try:
+        args.func(args)
+    except DatabaseProblem as exc:  # a file a newer version wrote, an upgrade that couldn't save a copy first
+        print(f"openberry: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

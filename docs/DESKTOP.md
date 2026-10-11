@@ -7,8 +7,8 @@ system-wide. Your data stays on your computer.
 - [Download](#download)
 - Install it on [Windows](#windows), a [Mac](#mac) or [Linux](#linux)
 - [Connect Claude Desktop](#connect-claude-desktop)
-- [Your data and settings](#your-data-and-settings)
-- [Updating](#updating) and [closing the app](#closing-the-app)
+- [Your data and settings](#your-data-and-settings), [backups](#back-up-your-data) and [restoring one](#restore-a-backup)
+- [Updating](#updating), [closing the app](#closing-the-app) and [uninstalling it](#uninstall)
 - [If something goes wrong](#if-something-goes-wrong)
 - For developers: [building it yourself](#building-it-yourself) and [releasing a new version](#releasing-a-new-version)
 
@@ -39,7 +39,9 @@ GitHub wraps each of these downloads in an extra zip file. Unzip it first to get
 ## Windows
 
 1. **Unzip it.** Right-click the downloaded `.zip` file, choose **Extract All…**, and pick a folder
-   where the app can stay, such as your **Documents** folder. Don't run the app from inside the zip file.
+   where the app can stay. We suggest `%LOCALAPPDATA%\Programs` (type it in the box, Windows turns it into
+   `C:\Users\<you>\AppData\Local\Programs`). Avoid **Documents** and **Desktop**: OneDrive often syncs
+   them, and moves or locks the app's files. Don't run the app from inside the zip file.
 2. **Open it.** Open the new `OpenBerry` folder and double-click **OpenBerry** (`OpenBerry.exe`).
 3. **The first time**, Windows may show a blue box saying *"Windows protected your PC"*. Click
    **More info**, then **Run anyway**. Windows shows this box because the app isn't code-signed: a signing
@@ -124,7 +126,7 @@ The settings look like this. The paths are examples, and your own are in the **C
 }
 ```
 
-On Windows the command is like `C:\\Users\\you\\Documents\\OpenBerry\\openberry-cli.exe`: in this file every
+On Windows the command is like `C:\\Users\\you\\AppData\\Local\\Programs\\OpenBerry\\openberry-cli.exe`: in this file every
 `\` is written twice. The copied settings already do that for you.
 
 - **When OpenBerry is closed,** Claude can still use its tools: Claude starts `openberry-cli` in the
@@ -147,9 +149,11 @@ Everything OpenBerry stores is in a folder named `.openberry` in your home folde
 
 Inside the folder:
 
-- **`openberry.db`** holds all your companies, leads, signals and messages. To back up, copy this file while
-  OpenBerry is closed.
-- **`.env`** holds your settings and keys, if you have any (see below).
+- **`openberry.db`** holds all your companies, leads, signals, messages and email opt-outs. While OpenBerry or
+  Claude uses it, the newest changes are in `openberry.db-wal` next to it. [Back it up](#back-up-your-data) from the
+  app rather than copying it.
+- **`backups/`** holds the copies OpenBerry saves by itself (see [Back up your data](#back-up-your-data)).
+- **`.env`** holds your settings and keys, if you have any (see below), and your mailbox password.
 - **`logs/desktop.log`** records what the app did. Look here, or send it along, when something goes wrong.
 - **`webview/`** and **`desktop-secret-key`** keep you logged in to the window between runs.
 
@@ -173,18 +177,63 @@ in the same `.env` file and never shown again. Then turn on **Email sending** on
 out only while the app is open; close it and sending waits. Read [EMAIL_SENDING.md](EMAIL_SENDING.md) first: some
 providers, Hostinger for example, forbid email to people who did not opt in.
 
+## Back up your data
+
+- **Download backup:** open **Your data** in the menu and click **Download backup**. You get one file,
+  `openberry-backup-<date>.db`, with all your companies, leads, messages and email opt-outs, made safely while
+  OpenBerry runs. Keep it somewhere else too: another drive, a USB stick or cloud storage. Your settings and
+  passwords (`.env`) are not in it.
+- **Automatic backups:** while it is open, OpenBerry saves a copy in `.openberry/backups` every day, and keeps 7 days
+  and 4 weeks of them. It also saves one before an update changes your data, before you delete a company and before a
+  restore. **Your data** lists them, and each one can be downloaded there.
+- **From the command line:** `openberry-cli backup` saves a copy in the backups folder, and `openberry-cli backup
+  D:\Backups` saves it in that folder. It works while OpenBerry is open.
+- **By hand:** close OpenBerry **and** quit Claude Desktop (it keeps `openberry-cli` running), then copy the whole
+  `.openberry` folder, with every file in it: `openberry.db`, `openberry.db-wal` and `openberry.db-shm` if they are
+  there, and `.env`. Copying `openberry.db` alone while either is open can miss your latest changes.
+
+## Restore a backup
+
+Restoring replaces all your data with the backup's.
+
+1. Close OpenBerry, and quit Claude Desktop (right-click Claude's icon next to the clock, **Quit**; on a Mac,
+   **Claude → Quit Claude**).
+2. Open a terminal (on Windows, **Command Prompt**) and run the app's `openberry-cli` with `restore` and the backup
+   file. **Your data → Restore a backup** shows the exact line for your computer, for example:
+   ```
+   "C:\Users\you\AppData\Local\Programs\OpenBerry\openberry-cli.exe" restore "C:\Users\you\Downloads\openberry-backup-2026-10-11.db"
+   ```
+3. Open OpenBerry and Claude Desktop again.
+
+OpenBerry checks the backup first, and refuses one that is damaged or was saved by a newer version. It saves your
+current data in `backups/` before replacing it. Then it turns **email sending and AI agent sending off** for every
+company: emails sent after the backup was made are not in it, so they would go out a second time. Check the
+Outreach pages, then turn sending back on.
+
 ## Updating
 
-1. Close OpenBerry.
-2. Download the new version.
-3. Replace the old app with it:
+1. **Back up:** in OpenBerry, open **Your data** and click **Download backup**. Version 0.1.x has no Your data page:
+   after step 2, copy the whole `.openberry` folder instead ([by hand](#back-up-your-data)).
+2. Close OpenBerry, and **quit Claude Desktop** (right-click Claude's icon next to the clock, **Quit**; on a Mac,
+   **Claude → Quit Claude**). Claude Desktop keeps the old `openberry-cli` running in the background until you quit it.
+3. Download the new version.
+4. Replace the old app with it:
    - **Windows:** delete the old `OpenBerry` folder, then extract the new one in the same place.
    - **Mac:** drag the new OpenBerry into Applications and choose **Replace**.
    - **Linux:** extract the new version over the old one.
-4. The first time you open the new version, Windows or macOS asks you to confirm again, as when you installed it.
+5. Open the new version. The first time, Windows or macOS asks you to confirm again, as when you installed it.
+   If the new version stores data differently, it updates your data by itself, after saving a copy in
+   `.openberry/backups` (named `openberry-pre-v…`).
+6. Open Claude Desktop again.
 
 Your data in `.openberry` stays as it is. If you put the new version in a different place, copy the
 Claude Desktop settings again ([Connect Claude Desktop](#connect-claude-desktop)).
+
+**There is no going back to an older version** once a newer one has updated your data. From 0.2.0 on, an older
+version refuses to open it ("This data was saved by a newer OpenBerry"). Version 0.1.x doesn't check and can damage
+it, which is why step 2 quits Claude Desktop: it may still run the old `openberry-cli`. To go back anyway, put the
+backup from step 1 back first ([restore](#restore-a-backup), or copy the folder back by hand while everything is
+closed).
 
 **Upgrading from 0.1.x:** if you loaded the demo, open its company and click **Delete sample company** in the
 banner at the top. The next page shows what goes and what stays, and nothing is removed until you confirm.
@@ -200,9 +249,22 @@ If OpenBerry opened in your web browser instead of its own window (see below), c
 not stop it: it keeps running in the background. Restart your computer to stop it, or end **OpenBerry** in
 Task Manager (Windows: Ctrl+Shift+Esc).
 
+## Uninstall
+
+1. If you want to keep your data, open **Your data** and click **Download backup** first.
+2. Close OpenBerry, and quit Claude Desktop.
+3. Delete the app: on Windows the `OpenBerry` folder, on a Mac **OpenBerry** in Applications (drag it to the Trash),
+   on Linux its folder.
+4. Delete the `.openberry` folder in your home folder ([where it is](#your-data-and-settings)). It holds your data
+   and your mailbox password.
+5. In Claude Desktop, open **Settings → Developer → Edit Config**, remove the `"openberry": { … }` entry from
+   `claude_desktop_config.json` (and the comma before it, if there is one), save, and restart Claude Desktop.
+
 ## If something goes wrong
 
 - **The app doesn't open, or closes straight away.** Read `.openberry/logs/desktop.log`. The last lines say why.
+- **"This data was saved by a newer OpenBerry".** You opened an older version after a newer one updated your data.
+  Open the newer version, or [restore a backup](#restore-a-backup) made with this version.
 - **Windows: it opens in the browser instead of a window.** Install the
   [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - **Windows: "Smart App Control blocked an app that may be unsafe".** There is no *Run anyway* button for

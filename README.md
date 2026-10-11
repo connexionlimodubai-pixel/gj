@@ -175,6 +175,7 @@ openberry mcp                                  # MCP over stdio (what Claude Des
 openberry mcp --http --port 8001               # standalone MCP over HTTP (bearer token)
 openberry scan [--company 1] [--source hackernews]
 openberry rescore | init-db
+openberry remove-sample [--dry-run]            # the sample company an older version created: shows what goes, asks first
 ```
 (Prefix with `uv run` if you haven't installed it with `pip install .`.)
 If you change `--host` or `--port`, set `OPENBERRY_BASE_URL` to the URL you open in the browser: Claude's links use it,

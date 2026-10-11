@@ -1,4 +1,4 @@
-"""Command line: `openberry serve | desktop | mcp | scan | rescore | init-db`."""
+"""Command line: `openberry serve | desktop | mcp | scan | rescore | init-db | remove-sample`."""
 
 from __future__ import annotations
 
@@ -83,6 +83,46 @@ def _scan(args: argparse.Namespace) -> None:
         print(json.dumps({"company_id": company_id, **stats}, indent=2, default=str))
 
 
+def _confirm(question: str) -> bool:
+    try:
+        return input(question).strip().lower() in ("y", "yes")
+    except EOFError:  # no terminal to answer from
+        print()
+        return False
+
+
+def _remove_sample(args: argparse.Namespace) -> None:
+    from . import sample_cleanup
+
+    ids = sorted(sample_cleanup.sample_company_ids())
+    if args.company is not None:
+        ids = [i for i in ids if i == args.company]
+    if not ids:
+        print(sample_cleanup.NOT_FOUND)
+        return
+    for company_id in ids:
+        plan = sample_cleanup.cleanup_plan(company_id)
+        if plan is None:
+            continue
+        print("\n".join(sample_cleanup.describe(plan)))
+        if args.dry_run:
+            print("Dry run: nothing was changed.")
+            continue
+        if not args.yes and not _confirm("Remove it? [y/N] "):
+            print("Nothing was changed. Add --yes to remove it without being asked.")
+            continue
+        try:
+            done = sample_cleanup.remove(company_id, plan.token)
+        except sample_cleanup.PlanChanged as exc:
+            sys.exit(f"openberry remove-sample: {exc}")
+        if done.company_deleted:
+            print(f"Deleted {plan.company.name}." + (f" Backup saved first: {done.backup}" if done.backup else ""))
+        else:
+            kept = "lead" if done.kept_leads == 1 else sample_cleanup.count_of(done.kept_leads, "lead")
+            print(f"Removed {sample_cleanup.count_of(done.removed_leads, 'sample lead')}. {plan.company.name} and "
+                  f"its other {kept} stay.")
+
+
 def _rescore(_: argparse.Namespace) -> None:
     from . import repo
 
@@ -126,6 +166,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("rescore", help="recompute every lead score").set_defaults(func=_rescore)
     sub.add_parser("init-db", help="create the SQLite database").set_defaults(func=_init_db)
+
+    from .sample_cleanup import CLI_HELP
+
+    p = sub.add_parser("remove-sample", help=CLI_HELP)
+    p.add_argument("--company", type=int, help="only this company id")
+    p.add_argument("--dry-run", action="store_true", help="show what would be removed and change nothing")
+    p.add_argument("--yes", action="store_true", help="remove without asking")
+    p.set_defaults(func=_remove_sample)
     return parser
 
 

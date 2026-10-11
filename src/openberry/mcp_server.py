@@ -42,7 +42,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
-from . import __version__, config, leads_csv, mailer, outreach, repo, services
+from . import __version__, config, leads_csv, mailer, outreach, repo, sample_cleanup, services
 from .collectors import COLLECTORS
 from .collectors.base import find_terms
 from .config import Settings, current_base_url, get_settings
@@ -626,9 +626,12 @@ def list_companies() -> dict[str, Any]:
 
     Each company is a separate workspace with its own offer, ICP, signals, leads and outreach.
     Returns id, name, website, status (active/paused), lead and hot-lead counts, last scan time
-    and a dashboard link per company.
+    and a dashboard link per company. The fictional sample company an older version created has a
+    "note" saying so: leave it alone.
     """
-    rows = [_company_row(c) for c in repo.list_companies()]
+    samples = sample_cleanup.sample_company_ids()
+    rows = [_company_row(c) | ({"note": sample_cleanup.COMPANY_NOTE} if c.id in samples else {})
+            for c in repo.list_companies()]
     out: dict[str, Any] = {"companies": rows, "dashboard": _base_url()}
     if not rows:
         out["hint"] = "No company registered yet. Use the onboard_company prompt or call register_company."

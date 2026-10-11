@@ -88,6 +88,13 @@
       {% endfor %}
     </div>
     {% endif %}
+    {% if sample_banner %}
+    <div class="sample-banner" role="note">
+      {{ m.icon("info", 18) }}
+      <p>{{ SAMPLE_BANNER_TEXT }} Nothing is ever sent to them.</p>
+      <a class="btn btn-sm" href="/c/{{ company.id }}/sample">{{ m.icon("trash", 14) }}Delete sample company</a>
+    </div>
+    {% endif %}
     {% block content %}{% endblock %}
   </div>
   <footer class="footer">

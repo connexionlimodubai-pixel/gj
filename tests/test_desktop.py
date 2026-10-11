@@ -234,7 +234,7 @@ def lock_holder(home: Path) -> Iterator[desktop.InstanceLock]:
 # --------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("argv", [
-    ["serve", "--port", "9000"], ["mcp"], ["scan", "--company", "1"], ["rescore"], ["init-db"],
+    ["serve", "--port", "9000"], ["mcp"], ["scan", "--company", "1"], ["rescore"], ["init-db"], ["remove-sample"],
     ["--version"], ["-h"], ["--help"], ["desktop", "--smoke"],
     ["demo"], ["scna"],  # removed or mistyped commands too: the command line refuses them, the app doesn't start
 ])

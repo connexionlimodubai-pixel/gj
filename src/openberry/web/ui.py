@@ -14,7 +14,7 @@ from fastapi import Request
 from fastapi.templating import Jinja2Templates
 from starlette.responses import Response
 
-from .. import __version__, repo
+from .. import __version__, repo, sample_cleanup
 from ..collectors import google_places
 from ..config import get_settings
 from ..models import (
@@ -328,7 +328,7 @@ def _build_env() -> jinja2.Environment:
         select_options=select_options, check_options=check_options, pending_review=pending_review,
         SCAN_STATUS_LABELS=SCAN_STATUS_LABELS,
         DOCS_URL=DOCS_URL, AGENT_DOCS_URL=AGENT_DOCS_URL, EMAIL_DOCS_URL=EMAIL_DOCS_URL, ICONS=ICONS, LOGO=LOGO,
-        EMAIL_EVENT_LABELS=EMAIL_EVENT_LABELS,
+        EMAIL_EVENT_LABELS=EMAIL_EVENT_LABELS, SAMPLE_BANNER_TEXT=sample_cleanup.BANNER_TEXT,
         AGENT_LIMIT_RANGE=AGENT_LIMIT_RANGE, AUTO_APPROVE_HOURS_RANGE=AUTO_APPROVE_HOURS_RANGE,
         EMAIL_LIMIT_RANGE=EMAIL_LIMIT_RANGE, EMAIL_GAP_RANGE=EMAIL_GAP_RANGE, WEEKDAYS=WEEKDAYS,
         message_version=repo.message_version, BULK_MESSAGES_MAX=repo.BULK_MESSAGES_MAX,
@@ -362,7 +362,11 @@ def render(request: Request, name: str, context: dict[str, Any] | None = None, *
     show_nav = logged_in and not public
     ctx: dict[str, Any] = {"company": None, "active": "", "title": "", "values": {}, "errors": {}}
     ctx.update(context or {})
+    company = ctx["company"]
     ctx.update(
+        # The sample company an older version left (sample_cleanup): a banner on its pages leads to its removal page.
+        sample_banner=bool(show_nav and isinstance(company, Company) and ctx["active"] != "sample"
+                           and sample_cleanup.is_sample_company(company.id)),
         show_nav=show_nav,
         public=public,
         logged_in=logged_in,

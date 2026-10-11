@@ -18,7 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
 from starlette.responses import RedirectResponse, Response
 
-from .. import repo, services
+from .. import repo, sample_cleanup, services
 from ..config import get_settings
 from ..models import EMAIL_SETTINGS, PROSPECT_TYPES, SIGNAL_TYPES, Company, CompanyIn, Lead, OutreachConfig, ScanRun
 from . import charts, forms, mail, scans
@@ -263,10 +263,11 @@ def switch_company(company: str = "") -> Response:
 @router.get("/companies")
 def companies_board(request: Request) -> Response:
     cards = []
+    samples = sample_cleanup.sample_company_ids()
     for company in repo.list_companies():
         stats = repo.company_stats(company.id)
         cards.append({"company": company, "leads": stats["leads_total"], "hot": stats["tiers"]["hot"],
-                      "signals_7d": stats["signals_7d"]})
+                      "signals_7d": stats["signals_7d"], "sample": company.id in samples})
     return render(request, "companies.html", {"cards": cards, "active": "companies", "title": "Registration board"})
 
 
@@ -352,7 +353,8 @@ def mcp_launch(db_path: str) -> dict[str, Any]:
 @router.get("/help")
 def help_page(request: Request) -> Response:
     settings = get_settings()
-    companies = repo.list_companies()
+    samples = sample_cleanup.sample_company_ids()
+    example = next((c for c in repo.list_companies() if c.id not in samples), None)  # the prompts name a real one
     launch = mcp_launch(str(settings.db_path.resolve()))
     desktop = {"mcpServers": {"openberry": {"command": launch["command"], "args": launch["args"],
                                             **({"env": launch["env"]} if launch["env"] else {})}}}
@@ -362,7 +364,7 @@ def help_page(request: Request) -> Response:
     packaged = bool(getattr(sys, "frozen", False))
     return render(request, "help.html", {
         "active": "help", "title": "Connect Claude & API", "db_path": str(settings.db_path.resolve()),
-        "api_token_set": bool(settings.api_token), "example_company": companies[0].id if companies else None,
+        "api_token_set": bool(settings.api_token), "example_company": example.id if example else None,
         "http_mcp": settings.http_mcp_enabled, "launch": launch, "launch_shell": shell_line(
             [launch["command"], *launch["args"]]), "docker_shell": shell_line(DOCKER_MCP),
         "desktop_config": json.dumps(desktop, indent=2, ensure_ascii=False),
@@ -726,3 +728,56 @@ def company_delete(request: Request, company_id: int, form: FormData = Depends(c
         request.session.pop(COMPANY_KEY, None)
     flash(request, f"Deleted {company.name} and all of its leads, signals and messages.", "info")
     return redirect("/companies")
+
+
+# --------------------------------------------------------------------------------------
+# Sample data an older version left (sample_cleanup): the banner's confirmation page
+# --------------------------------------------------------------------------------------
+
+OTHER_LEADS_SHOWN = 50
+
+
+def _render_sample(request: Request, plan: sample_cleanup.CleanupPlan, *, status_code: int = 200,
+                   changed: bool = False) -> Response:
+    leads = plan.lead_lists(other_max=OTHER_LEADS_SHOWN)
+    return render(request, "sample_cleanup.html", {
+        "company": plan.company, "active": "sample", "title": "Remove sample data", "plan": plan,
+        "sample_leads": leads["sample"], "touched_leads": leads["touched"], "other_leads": leads["other"],
+        "changed": changed, "backup_first": sample_cleanup.snapshots_available(),
+    }, status_code=status_code)
+
+
+@router.get("/c/{company_id}/sample")
+def sample_page(request: Request, company_id: int) -> Response:
+    """Exactly what removing the sample data would remove, and what stays. Removes nothing."""
+    repo.get_company(company_id)
+    plan = sample_cleanup.cleanup_plan(company_id)
+    if plan is None:
+        raise repo.NotFound(f"company {company_id} has no sample data")
+    remember_company(request, company_id)
+    return _render_sample(request, plan)
+
+
+@router.post("/c/{company_id}/sample")
+def sample_remove(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
+    """Remove what the confirmation page listed (its plan token), or nothing with 409 if the plan changed since."""
+    company = repo.find_company(company_id)
+    if company is None:  # e.g. the button clicked twice
+        flash(request, "The sample company is already deleted.", "info")
+        return redirect("/companies")
+    try:
+        done = sample_cleanup.remove(company_id, str(form.get("plan") or ""))
+    except sample_cleanup.PlanChanged as exc:
+        if exc.plan is None:
+            flash(request, "The sample data is already removed.", "info")
+            return redirect(f"/c/{company_id}")
+        return _render_sample(request, exc.plan, status_code=409, changed=True)
+    if done.company_deleted:
+        if request.session.get(COMPANY_KEY) == company_id:
+            request.session.pop(COMPANY_KEY, None)
+        flash(request, f"Deleted the sample company {company.name}."
+              + (" A backup of your data was saved first." if done.backup else ""), "success")
+        return redirect("/companies")
+    flash(request, f"Removed {plural(done.removed_leads, 'untouched sample lead')}. The company and its other "
+          f"{plural(done.kept_leads, 'lead')} stay.", "success")
+    return redirect(f"/c/{company_id}")

@@ -186,6 +186,10 @@ providers, Hostinger for example, forbid email to people who did not opt in.
 Your data in `.openberry` stays as it is. If you put the new version in a different place, copy the
 Claude Desktop settings again ([Connect Claude Desktop](#connect-claude-desktop)).
 
+**Upgrading from 0.1.x:** if you loaded the demo, open its company and click **Delete sample company** in the
+banner at the top. The next page shows what goes and what stays, and nothing is removed until you confirm.
+Its fictional people are never contacted in the meantime.
+
 ## Closing the app
 
 Closing the window stops OpenBerry (on a Mac, **OpenBerry → Quit OpenBerry** or Cmd+Q also works). Its

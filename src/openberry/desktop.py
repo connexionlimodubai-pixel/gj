@@ -61,7 +61,8 @@ HEALTHZ_APP = "openberry"  # /healthz answers {"ok": true, "app": "openberry"} (
 # as `openberry`: Claude Desktop can start `OpenBerry mcp`, and CI can run `OpenBerry desktop --smoke`.
 # Any other first argument that isn't an option goes there too, so a typo or a removed command gets
 # argparse's "invalid choice" instead of starting the app.
-CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "rescore", "init-db", "--version", "-h", "--help"})
+CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "rescore", "init-db", "remove-sample", "--version", "-h",
+                          "--help"})
 
 
 class DesktopError(RuntimeError):

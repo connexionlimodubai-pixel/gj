@@ -527,7 +527,7 @@ def mcp_start_check(settings: Settings, host: str) -> StartCheck:
     if not settings.api_token:
         check.refusals.append(
             f"The MCP server has no API token, and on {host} other computers can reach it. Its tools read, change and "
-            "delete all your data, so it needs one there, even with OPENBERRY_ALLOW_NO_PASSWORD=true. Set "
+            "delete all your data, so it needs a token there, even with OPENBERRY_ALLOW_NO_PASSWORD=true. Set "
             f"OPENBERRY_API_TOKEN ({MIN_SECRET_CHARS} characters or more), or use --host 127.0.0.1. To make one: "
             f"{SECRET_COMMAND}")
     elif len(settings.api_token) < MIN_SECRET_CHARS:
@@ -545,8 +545,8 @@ PRIVATE_UMASK = 0o077
 def private_files() -> None:
     """Files and folders this process creates are for this user only (Linux, macOS, Docker; Windows ignores it).
 
-    The data folder (OPENBERRY_HOME) and its .env file are made private too when they exist and this user owns them:
-    an older version, or a text editor, may have left them readable by every account.
+    The data folder (OPENBERRY_HOME) and the .env file the dashboard saves (settings_file()) are made private too when
+    they exist and this user owns them: an older version, or a text editor, may have left them readable by everyone.
     """
     os.umask(PRIVATE_UMASK)
     if os.name != "nt":

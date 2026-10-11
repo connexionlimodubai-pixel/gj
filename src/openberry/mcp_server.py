@@ -634,9 +634,9 @@ def list_companies() -> dict[str, Any]:
     and a dashboard link per company. A company that holds sample data an older version created has
     a "note" saying what to leave alone.
     """
-    plans = {i: sample_cleanup.cleanup_plan(i) for i in sample_cleanup.sample_company_ids()}
-    rows = [_company_row(c) | ({"note": sample_cleanup.company_note(plans[c.id])} if plans.get(c.id) else {})
-            for c in repo.list_companies()]
+    notes = {i: sample_cleanup.company_note(plan) for i in sample_cleanup.sample_company_ids()
+             if (plan := sample_cleanup.cleanup_plan(i))}
+    rows = [_company_row(c) | ({"note": notes[c.id]} if notes.get(c.id) else {}) for c in repo.list_companies()]
     out: dict[str, Any] = {"companies": rows, "dashboard": _base_url()}
     if not rows:
         out["hint"] = "No company registered yet. Use the onboard_company prompt or call register_company."

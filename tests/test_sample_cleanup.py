@@ -450,41 +450,62 @@ async def test_claude_is_told_which_company_is_the_sample(company):
     assert rows[sample_id]["note"] == sample_cleanup.COMPANY_NOTE and "note" not in rows[company.id]
 
 
-@pytest.mark.parametrize("made_own", ["profile", "leads"])
-def test_a_sample_company_the_user_made_their_own_isnt_called_fictional(client, monkeypatch, made_own):
-    """UPG-4: the user turned the old demo company into their own (a new profile, or leads they added). Claude's note
-    and the banner say only which sample leads it still holds, and the button removes those, not the company."""
+def list_companies_note(company_id: int) -> str | None:
+    """The note Claude gets with this company from MCP list_companies (None without one)."""
+    async def call() -> Any:
+        async with Client(build_server()) as mcp:
+            return await mcp.call_tool("list_companies", {})
+    rows = asyncio.run(call()).structured_content["companies"]
+    return next(row.get("note") for row in rows if row["id"] == company_id)
+
+
+def sample_banner(client: TestClient, company_id: int) -> str:
+    page = client.get(f"/c/{company_id}/leads").text
+    return html.unescape(re.search(r'<div class="sample-banner".*?</div>', page, re.S).group(0))
+
+
+def test_a_sample_company_the_user_made_their_own_isnt_called_fictional(client, monkeypatch):
+    """UPG-4: the user turned the old demo company into their own: a new profile, and leads they added. Claude's note
+    and the banner say only which sample leads it still holds (also the ones changed since), and the button removes
+    those, not the company. With none left, Claude gets no note and the banner only offers to remove the marker."""
     sample_id = seed_sample_company(legacy_demo=True)
-
-    def note() -> str:
-        async def call() -> Any:
-            async with Client(build_server()) as mcp:
-                return await mcp.call_tool("list_companies", {})
-        rows = asyncio.run(call()).structured_content["companies"]
-        return next(row["note"] for row in rows if row["id"] == sample_id)
-
-    def banner() -> str:
-        page = client.get(f"/c/{sample_id}/leads").text
-        return html.unescape(re.search(r'<div class="sample-banner".*?</div>', page, re.S).group(0))
-
-    assert note() == sample_cleanup.COMPANY_NOTE  # untouched: fictional, leave it alone
-    assert f"{sample_cleanup.BANNER_TEXT} Nothing is ever sent to them." in banner()
-    assert "Delete sample company" in banner()
+    assert list_companies_note(sample_id) == sample_cleanup.COMPANY_NOTE  # untouched: fictional, leave it alone
+    assert f"{sample_cleanup.BANNER_TEXT} Nothing is ever sent to them." in sample_banner(client, sample_id)
+    assert "Delete sample company" in sample_banner(client, sample_id)
     later(monkeypatch)
-    if made_own == "profile":
-        repo.update_company(sample_id, {"name": "Gulf Executive Cars", "website": "https://gulfexec.example"})
-    else:
-        repo.upsert_lead(sample_id, LeadIn(full_name="Pat Real", source="claude",
-                                           linkedin_url="https://www.linkedin.com/in/pat-real"))
-    text = "This company still holds 13 untouched sample leads from the old demo. Sample leads are never contacted."
-    assert note() == f"{text} The user can remove them with the banner on its dashboard."
-    shown = banner()
+    repo.update_company(sample_id, {"name": "Gulf Executive Cars", "website": "https://gulfexec.example"})
+    repo.upsert_lead(sample_id, LeadIn(full_name="Pat Real", source="claude",
+                                       linkedin_url="https://www.linkedin.com/in/pat-real"))
+    repo.update_lead(lead_named(sample_id, "Priya Nair"), {"notes": "call her"})  # still a sample lead
+    text = "This company still holds 13 sample leads from the old demo. Sample leads are never contacted."
+    note, shown = list_companies_note(sample_id), sample_banner(client, sample_id)
+    assert note == f"{text} The user can remove them with the banner on its dashboard."
     assert text in shown and f'href="/c/{sample_id}/sample">' in shown and "Remove sample leads" in shown
     for words in ("fictional", "Don't work on it", "Nothing is ever sent", "Delete sample company"):
-        assert words not in note() and words not in shown, words
+        assert words not in note and words not in shown, words
     page = html.unescape(client.get(f"/c/{sample_id}/sample").text)  # the removal page the button opens
-    assert f"{text} Nothing is removed until you click" in page and "Remove 13 sample leads" in page
+    assert f"{text} Nothing is removed until you click" in page and "Remove 12 sample leads" in page
     assert "fictional" not in page
+    for lead in repo.list_leads(sample_id, limit=100)[0]:
+        if is_sample_lead(lead):
+            repo.delete_lead(lead.id)
+    assert list_companies_note(sample_id) is None
+    shown = sample_banner(client, sample_id)
+    assert "No sample leads from the old demo are left in this company." in shown and "Remove sample marker" in shown
+    assert "0 sample leads" not in shown and "Remove the sample marker" in client.get(f"/c/{sample_id}/sample").text
+
+
+def test_leads_added_to_the_sample_company_dont_make_it_the_users(client, monkeypatch):
+    """0.1.x scanned the demo company like any other, so it may hold leads a scan found. Its profile is still the
+    fictional one: Claude is still told to leave it alone, and the banner still says it is the sample company."""
+    sample_id = seed_sample_company(legacy_demo=True)
+    later(monkeypatch)
+    repo.upsert_lead(sample_id, LeadIn(full_name="Real HN user", source="hackernews",
+                                       profile_url="https://news.ycombinator.com/user?id=x"))
+    assert list_companies_note(sample_id) == sample_cleanup.COMPANY_NOTE
+    shown = sample_banner(client, sample_id)
+    assert f"{sample_cleanup.BANNER_TEXT} Nothing is ever sent to them." in shown
+    assert "Remove sample leads" in shown  # the company holds a lead that isn't sample data: it stays
 
 
 # --------------------------------------------------------------------------------------

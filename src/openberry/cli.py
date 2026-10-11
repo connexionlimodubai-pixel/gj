@@ -164,28 +164,37 @@ def _backup(args: argparse.Namespace) -> None:
         sys.exit(f"openberry backup: there is no data to back up yet ({db.db_path()} doesn't exist).")
     db.prepare()  # a file a newer version wrote is refused, an older one is upgraded (with its own copy) first
     try:
-        path = backups.manual_backup(args.path)
+        path = backups.manual_backup(args.path, overwrite=args.overwrite)
+    except backups.BackupRefused as exc:
+        sys.exit(f"openberry backup: {exc} Nothing was saved.")
     except (OSError, sqlite3.Error) as exc:
         sys.exit(f"openberry backup: the backup failed: {exc}")
     print(f"Backup saved: {path}")
 
 
 def _restore(args: argparse.Namespace) -> None:
-    from . import backups
+    from . import backups, db
 
     try:
         done = backups.restore(args.file)
     except backups.RestoreRefused as exc:
         sys.exit(f"openberry restore: {exc} Nothing was changed.")
+    except (OSError, sqlite3.Error, db.DatabaseProblem) as exc:  # restore() refuses whatever fails before the swap
+        sys.exit(f"openberry restore: the backup is now in place, and email sending and AI agent sending are off for "
+                 f"every company. Something failed after that: {exc}")
     print(f"Restored {args.file}.")
     if done.previous:
         print(f"Your data from before the restore was saved first: {done.previous}")
+    if done.kept_email_history:
+        print("The opt-outs, the never-email list and the record of sent emails were kept from it.")
+    elif done.previous:
+        print("It could not be read, so its opt-outs, never-email list and record of sent emails were not kept.")
     if done.sending_turned_off:
-        print("Email sending and AI agent sending are now off for: " + ", ".join(done.sending_turned_off) + ". "
-              "Emails sent after this backup was made are not in it: check the Outreach page before you turn "
-              "sending back on.")
+        print("Email sending and AI agent sending are now off for: " + ", ".join(done.sending_turned_off) + ".")
     else:
         print("Email sending and AI agent sending are off for every company.")
+    print("Emails sent after this backup was made may show as not sent yet: before you turn sending back on, "
+          "compare the Outreach page with your mailbox's Sent folder.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -220,7 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("backup", help="save a copy of your data (safe while OpenBerry runs)")
     p.add_argument("path", nargs="?", type=Path,
-                   help="file or folder to save it to (default: the backups folder in your data folder)")
+                   help="a folder to save a new copy in (a name without an extension is a folder, made if needed), "
+                        "or a file name (default: the backups folder in your data folder)")
+    p.add_argument("--overwrite", action="store_true", help="replace the file at PATH if there is one already")
     p.set_defaults(func=_backup)
 
     p = sub.add_parser("restore", help="put a backup back (close OpenBerry and quit Claude Desktop first)")

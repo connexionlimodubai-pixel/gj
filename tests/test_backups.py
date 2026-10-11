@@ -4,6 +4,8 @@ guard, `openberry backup` and `openberry restore`, and the Your data page."""
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -403,6 +405,33 @@ def test_openberry_backup_without_data_says_so(settings, capsys):
     assert not settings.db_path.exists()
 
 
+def test_openberry_backup_to_a_folder_not_made_yet_makes_it(settings, tmp_path):
+    """DOC-3: `backup D:\\Backups` before the folder exists made a file called Backups, replaced by every later run."""
+    a_company()
+    folder = tmp_path / "Backups"
+    cli.main(["backup", str(folder)])
+    cli.main(["backup", str(folder)])  # again: a second copy, even within the same second
+    copies = sorted(folder.glob("openberry-*.db"))
+    assert folder.is_dir() and len(copies) == 2 and all(counts(c) == counts(settings.db_path) for c in copies)
+    if sys.platform != "win32":
+        assert folder.stat().st_mode & 0o777 == 0o700  # made private
+
+
+def test_openberry_backup_never_replaces_a_file_unless_told_to(settings, tmp_path):
+    a_company()
+    target = tmp_path / "mine.db"
+    cli.main(["backup", str(target)])
+    before = target.read_bytes()
+    a_company("Other Co")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["backup", str(target)])
+    said = str(exc.value.code)
+    assert f"There is already a file at {target}." in said and "Nothing was saved." in said
+    assert target.read_bytes() == before
+    cli.main(["backup", str(target), "--overwrite"])
+    assert counts(target) == counts(settings.db_path)
+
+
 def test_the_app_executable_runs_backup_and_restore(monkeypatch):
     calls: list[list[str]] = []
     monkeypatch.setattr(cli, "main", calls.append)
@@ -484,7 +513,9 @@ def test_restore_from_the_command_line_prints_what_it_did(settings, tmp_path, mo
     cli.main(["restore", str(backup)])
     out = capsys.readouterr().out
     assert f"Restored {backup}." in out and "saved first" in out
+    assert "The opt-outs, the never-email list and the record of sent emails were kept from it." in out
     assert "Email sending and AI agent sending are now off for: Acme Chauffeurs." in out
+    assert "compare the Outreach page with your mailbox's Sent folder" in out
     assert repo.get_company(company_id).outreach.agent_sending is False
 
 
@@ -494,7 +525,8 @@ def test_restore_upgrades_an_older_backup(settings, tmp_path):
     set_version(backup, 3)
     done = backups.restore(backup, app_running=lambda: False)
     assert done.version == 3 and version_of(settings.db_path) == db.SCHEMA_VERSION
-    assert len(snaps(backups.PRE_UPGRADE)) == 1 and version_of(backup) == 3
+    # Upgraded in the copy, before the swap: the backup file, untouched, is its pre-upgrade copy.
+    assert snaps(backups.PRE_UPGRADE) == [] and version_of(backup) == 3
 
 
 @pytest.mark.parametrize("problem", ["missing", "damaged", "not_openberry", "too_new", "same_file"])
@@ -550,16 +582,227 @@ def test_restore_refuses_while_another_program_writes(settings, tmp_path, monkey
     assert [c.name for c in repo.list_companies()] == ["Acme Chauffeurs"]
 
 
-def test_restore_replaces_a_damaged_file_and_keeps_it(settings, tmp_path):
+def test_restore_replaces_a_damaged_file_and_keeps_it(settings, tmp_path, monkeypatch, capsys, caplog):
     a_company()
     backup = db.backup_to(tmp_path / "b.db")
     live = settings.db_path
     raw = bytearray(live.read_bytes())
     raw[:100] = b"\x00" * 100  # "file is not a database"
     live.write_bytes(bytes(raw))
-    done = backups.restore(backup, app_running=lambda: False)
-    assert done.previous is not None and done.previous.read_bytes()[:100] == b"\x00" * 100  # kept as it was
+    monkeypatch.setattr(backups, "_app_running", lambda: False)
+    cli.main(["restore", str(backup)])
+    [previous] = snaps(backups.BEFORE_RESTORE)
+    assert previous.path.read_bytes() == bytes(raw)  # kept as it was
     assert [c.name for c in repo.list_companies()] == ["Acme Chauffeurs"] and integrity(live) == "ok"
+    # Its opt-outs and sent emails can't be read: the restore goes on, and says so.
+    assert "were not kept" in capsys.readouterr().out and "are not kept" in caplog.text
+    assert [p.name for p in backups.folder().iterdir()] == [previous.name]
+
+
+def test_restore_replaces_a_file_with_a_damaged_table(settings, tmp_path, monkeypatch, capsys):
+    """The usual damage: the file opens, but a table in it is malformed, and the dashboard says to restore a backup.
+    Reading the email history from it failed, and that stopped the restore: nothing could be restored."""
+    a_company()
+    backup = db.backup_to(tmp_path / "b.db")
+    live = settings.db_path
+    with closing(sqlite3.connect(live)) as c:
+        root = c.execute("SELECT rootpage FROM sqlite_master WHERE name = 'messages'").fetchone()[0]
+        size = c.execute("PRAGMA page_size").fetchone()[0]
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    raw = bytearray(live.read_bytes())
+    raw[(root - 1) * size] = 0xFF  # not a kind of page SQLite knows: "database disk image is malformed"
+    live.write_bytes(bytes(raw))
+    monkeypatch.setattr(backups, "_app_running", lambda: False)
+    cli.main(["restore", str(backup)])
+    assert [c.name for c in repo.list_companies()] == ["Acme Chauffeurs"] and integrity(live) == "ok"
+    assert "were not kept" in capsys.readouterr().out
+
+
+def test_a_backup_path_that_cant_be_read_is_refused_and_nothing_changes(settings, tmp_path, monkeypatch):
+    """An error reading the backup's path (a name too long here; a network drive that is offline, say) came out of
+    restore() before the copy, and `openberry restore` said the backup was in place."""
+    a_company()
+    before = counts(settings.db_path)
+    monkeypatch.setattr(backups, "_app_running", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["restore", str(tmp_path / ("b" * 300 + ".db"))])
+    said = str(exc.value.code)
+    assert said.startswith("openberry restore: ") and said.endswith(" Nothing was changed.")
+    assert "in place" not in said
+    assert counts(settings.db_path) == before and snaps() == []
+
+
+def test_an_interruption_right_after_the_swap_leaves_sending_off(settings, tmp_path, monkeypatch):
+    """UPG-1: sending was turned off after the swap, so Ctrl-C or a power cut just after it left the backup in place
+    with sending on. Now the copy is ready (upgraded, sending off) before it takes the live file's place."""
+    company_id = a_company()
+    repo.update_company(company_id, {"outreach": {"email_sending": True, "agent_sending": True,
+                                                  "email_footer": FOOTER}})
+    backup = db.backup_to(tmp_path / "b.db")
+    set_version(backup, 3)  # an older backup: upgraded before the swap too
+    live = settings.db_path
+    replace = os.replace
+
+    def interrupted(src: Any, dst: Any) -> None:
+        replace(src, dst)
+        if Path(dst) == live:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "replace", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        backups.restore(backup, app_running=lambda: False)
+    with closing(sqlite3.connect(live)) as c:
+        outreach = json.loads(c.execute("SELECT outreach FROM companies").fetchone()[0])
+        version = c.execute("PRAGMA user_version").fetchone()[0]
+    assert outreach["email_sending"] is False and outreach["agent_sending"] is False
+    assert version == db.SCHEMA_VERSION
+
+
+def test_a_restore_that_fails_before_the_swap_changes_nothing_and_says_so(settings, tmp_path, monkeypatch):
+    a_company()
+    backup = db.backup_to(tmp_path / "b.db")
+    a_company("Made after the backup")
+    before = counts(settings.db_path)
+    monkeypatch.setattr(backups, "_app_running", lambda: False)
+
+    def disk_full(*args: Any, **kwargs: Any) -> None:
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(db, "init_db", disk_full)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["restore", str(backup)])
+    assert str(exc.value.code) == ("openberry restore: The restore stopped before your data was replaced (database or "
+                                   "disk is full). Nothing was changed.")
+    assert counts(settings.db_path) == before
+    assert not list(settings.db_path.parent.glob(f".{settings.db_path.name}.restore-*"))  # its copy is gone
+
+
+def test_an_error_after_the_swap_says_the_backup_is_in_place_with_sending_off(settings, tmp_path, monkeypatch):
+    company_id = a_company()
+    repo.update_company(company_id, {"outreach": {"email_sending": True, "agent_sending": True,
+                                                  "email_footer": FOOTER}})
+    backup = db.backup_to(tmp_path / "b.db")
+    monkeypatch.setattr(backups, "_app_running", lambda: False)
+    reset = db.reset_init_cache
+
+    def fails_once() -> None:  # after the swap: nothing that matters is left to do then
+        monkeypatch.setattr(db, "reset_init_cache", reset)
+        raise OSError("something unexpected")
+
+    monkeypatch.setattr(db, "reset_init_cache", fails_once)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["restore", str(backup)])
+    assert str(exc.value.code) == ("openberry restore: the backup is now in place, and email sending and AI agent "
+                                   "sending are off for every company. Something failed after that: something "
+                                   "unexpected")
+    db.reset_init_cache()
+    outreach = repo.get_company(company_id).outreach
+    assert outreach.email_sending is False and outreach.agent_sending is False
+
+
+def test_restore_keeps_opt_outs_and_never_email_entries_made_after_the_backup(settings):
+    """UPG-2: Jane phoned to say "don't email me" after the daily backup. Restoring that backup brought her approved
+    email back, without the opt-out."""
+    company_id = a_company(leads=0)
+    jane, _ = repo.upsert_lead(company_id, LeadIn(full_name="Jane Roe", lead_company="X", email="jane@x.example"))
+    msg = repo.create_message(jane.id, "Hi Jane", channel="email", subject="Hello", status="approved")
+    snap = backups.snapshot(backups.DAILY)
+    repo.record_opt_out(jane.id, "phone call")
+    late, _ = repo.upsert_lead(company_id, LeadIn(full_name="Omar Late", email="omar@y.example"))  # not in the backup
+    repo.record_opt_out(late.id, "LinkedIn message")
+    repo.add_suppression("ops@z.example", "manual", "asked by phone")
+    done = backups.restore(snap, app_running=lambda: False)
+    queue = repo.email_queue(company_id)
+    assert queue["items"] == [] and [s["message_id"] for s in queue["skipped"]] == [msg.id]
+    kept = {s["email"]: s for s in repo.list_suppressions()}
+    assert set(kept) == {"jane@x.example", "omar@y.example", "ops@z.example"}
+    assert kept["jane@x.example"]["lead_id"] == jane.id  # the backup has that lead
+    assert kept["omar@y.example"]["lead_id"] is None and kept["omar@y.example"]["company_id"] == company_id
+    assert done.kept_email_history
+
+
+def test_restore_keeps_the_record_of_emails_sent_after_the_backup(settings, mailbox, tmp_path):
+    """EMAIL-1: after the backup, Lina's email went out, Omar opted out and Rania's email was cut off in DATA. The
+    backup has all three approved and unsent: none goes out when sending is turned back on."""
+    company = repo.create_company(CompanyIn(name="Acme Chauffeurs"))
+    repo.update_company(company.id, {"outreach": {"email_sending": True, "email_footer": FOOTER}})
+    ids = {}
+    for name in ("sami", "lina", "omar", "rania"):
+        lead, _ = repo.upsert_lead(company.id, LeadIn(full_name=name.title(), email=f"{name}@gulfbank.example"))
+        ids[name] = repo.create_message(lead.id, f"Hello {name.title()}", channel="email", subject="Hi",
+                                        status="approved", generated_by="claude").id
+    with db.connect() as c:  # Sami's email went out before the backup: it is in it
+        c.execute("UPDATE messages SET status = 'sent', sent_at = ?, sent_via = 'smtp', email_state = 'sent', "
+                  "email_message_id = '<sami-1@acme-mail.example>', email_to = 'sami@gulfbank.example' WHERE id = ?",
+                  (repo.iso(NOW - timedelta(days=3)), ids["sami"]))
+    backup = db.backup_to(tmp_path / "Downloads" / "openberry-backup-2026-10-12.db")
+
+    assert services.send_next_email(now=NOW)["status"] == "sent" and mailbox.sent[-1]["to"] == "lina@gulfbank.example"
+    header_id = repo.get_message(ids["lina"]).email_message_id
+    repo.record_opt_out(repo.get_message(ids["omar"]).lead_id, "marked in the dashboard")
+    with db.connect() as c:  # the connection broke while the server was receiving Rania's email
+        c.execute("UPDATE messages SET email_state = 'data', email_claimed_at = ?, email_message_id = ? WHERE id = ?",
+                  (repo.iso(NOW + timedelta(minutes=10)), "<rania-1@acme-mail.example>", ids["rania"]))
+    done = backups.restore(backup, app_running=lambda: False)
+    assert {repo.get_message(ids[name]).status for name in ("lina", "omar", "rania")} == {"approved"}  # as backed up
+
+    repo.update_company(company.id, {"outreach": {"email_sending": True}})
+    for minutes in (30, 60, 90):
+        repo.save_inbox_check(FROM, True, now=NOW + timedelta(minutes=minutes))
+        assert services.send_next_email(now=NOW + timedelta(minutes=minutes))["status"] != "sent"
+    assert len(mailbox.sent) == 1
+    skipped = repo.email_queue(company.id, now=NOW + timedelta(hours=2))["skipped"]
+    reasons = {s["message_id"]: s["reason"] for s in skipped}
+    assert "step 1 was already emailed to lina@gulfbank.example" in reasons[ids["lina"]]
+    assert "step 1 was already emailed to rania@gulfbank.example" in reasons[ids["rania"]]  # may have been sent
+    assert repo.suppressed_addresses(["omar@gulfbank.example"])
+    assert header_id in repo.inbound_index(now=NOW)["ours"]  # a reply to it is still read
+    with db.connect() as c:  # Sami's email, in the backup already, isn't counted twice
+        logged = [tuple(r) for r in c.execute("SELECT address, email_state FROM email_sent_log ORDER BY address")]
+    assert logged == [("lina@gulfbank.example", "sent"), ("rania@gulfbank.example", "unknown")]
+    assert done.kept_email_history
+
+
+def test_restore_keeps_emails_sent_by_hand_from_data_older_than_the_email_tables(settings, tmp_path):
+    """The data being replaced may be older than email sending (0.1.x data restored over before 0.2.0 opened it): an
+    email marked sent there still counts."""
+    company_id = a_company(leads=0)
+    lead, _ = repo.upsert_lead(company_id, LeadIn(full_name="Lina Noor", email="lina@gulfbank.example"))
+    msg = repo.create_message(lead.id, "Hello Lina", channel="email", subject="Hi", status="approved")
+    backup = db.backup_to(tmp_path / "b.db")
+    repo.update_message(msg.id, status="sent")  # sent by hand after the backup
+    with closing(sqlite3.connect(settings.db_path)) as c:  # as version 4 had it: no email tables or columns
+        for table in ("email_suppressions", "email_events", "email_mailbox", "email_sent_log"):
+            c.execute(f"DROP TABLE {table}")
+        c.execute("CREATE TABLE messages_v4 AS SELECT id, company_id, lead_id, direction, channel, step, subject, "
+                  "body, status, generated_by, created_at, updated_at, sent_at, sent_via, auto_hold, approved_via, "
+                  "auto_blocked FROM messages")
+        c.execute("DROP TABLE messages")
+        c.execute("ALTER TABLE messages_v4 RENAME TO messages")
+        c.execute("PRAGMA user_version=4")
+        c.commit()
+    done = backups.restore(backup, app_running=lambda: False)
+    assert repo.get_message(msg.id).status == "approved"
+    [skipped] = repo.email_queue(company_id)["skipped"]
+    assert "step 1 was already emailed to lina@gulfbank.example" in skipped["reason"]
+    assert done.kept_email_history
+
+
+@pytest.mark.parametrize("folder_name", ["Backups #2", "A%41"])
+def test_restore_from_a_folder_with_a_hash_or_a_percent_in_its_name(settings, tmp_path, folder_name):
+    """UPG-5: the path went into a URI unencoded. '#' cut it short (SQLite made an empty file 'Backups ' and checked
+    that, read-write), and '%41' was read as 'A'. The data folder too: the copy a restore replaces is read that way."""
+    settings.db_path = tmp_path / folder_name / "data" / "openberry.db"
+    db.reset_init_cache()
+    company_id = a_company()
+    backup = db.backup_to(tmp_path / folder_name / "openberry-backup.db")
+    repo.add_suppression("ops@z.example", "manual")
+    repo.delete_company(company_id)
+    assert backups.check_backup_file(backup) == db.SCHEMA_VERSION
+    done = backups.restore(backup, app_running=lambda: False)
+    assert [c.name for c in repo.list_companies()] == ["Acme Chauffeurs"]
+    assert done.kept_email_history and repo.suppressed_addresses(["ops@z.example"])
+    assert not (tmp_path / "Backups ").exists()
 
 
 def test_restore_refused_on_the_command_line_exits_with_the_reason(settings, tmp_path):
@@ -582,6 +825,7 @@ def test_the_your_data_page(client, settings):
     assert str(settings.db_path.parent) in text and 'href="/data/backup"' in text
     assert "No automatic backups yet." not in text or not snaps()
     assert "Restore a backup" in text and "email sending and AI agent sending are off" in text
+    assert "the never-email list and the record of sent emails are kept" in text and "Sent folder" in text
 
     backups.daily_snapshot()
     backups.snapshot(backups.PRE_UPGRADE, version=3)

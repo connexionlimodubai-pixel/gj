@@ -695,6 +695,7 @@ a.lead-name:hover { color: var(--accent-text); }
 .data-steps .code-block { margin-top: var(--s2); color: var(--text); }
 .data-steps .small { margin-top: var(--s1); }
 .data-dl { width: 1%; text-align: right; }
+@media (max-width: 560px) { .data-size { display: none; } }  /* phones: room for the reason */
 .mailbox-form { display: grid; gap: var(--s3); }
 .mailbox-form .field { min-width: 0; }
 .provider-help { display: grid; gap: var(--s2); }

@@ -49,13 +49,13 @@
   {% if snapshots %}
   <div class="table-wrap">
     <table class="table data-table">
-      <thead><tr><th scope="col">Saved</th><th scope="col">Why</th><th scope="col" class="num">Size</th><th scope="col"><span class="sr-only">Download</span></th></tr></thead>
+      <thead><tr><th scope="col">Saved</th><th scope="col">Why</th><th scope="col" class="num data-size">Size</th><th scope="col"><span class="sr-only">Download</span></th></tr></thead>
       <tbody>
         {% for s in snapshots %}
         <tr>
           <td class="nowrap"><time datetime="{{ s.created|iso_dt }}" title="{{ s.created|abs_dt }}">{{ s.created|local_dt }}</time></td>
           <td>{{ s.label }}</td>
-          <td class="num nowrap">{{ s.size }}</td>
+          <td class="num nowrap data-size">{{ s.size }}</td>
           <td class="data-dl"><a class="btn btn-sm btn-ghost" href="/data/backups/{{ s.name }}" download="{{ s.name }}" title="{{ s.name }}">{{ m.icon("download", 14) }}<span class="sr-only">Download {{ s.name }}</span></a></td>
         </tr>
         {% endfor %}

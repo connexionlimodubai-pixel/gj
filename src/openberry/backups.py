@@ -200,16 +200,29 @@ def daily_snapshot(now: datetime | None = None) -> Path | None:
     return path
 
 
-def manual_backup(dest: Path | None = None, now: datetime | None = None) -> Path:
-    """`openberry backup [PATH]`: a copy at PATH (a folder gets the usual name inside it), else in the backups
-    folder. Never deleted by OpenBerry."""
+class BackupRefused(RuntimeError):
+    """`openberry backup` saved nothing. The message says why, in plain words."""
+
+
+def manual_backup(dest: Path | None = None, now: datetime | None = None, overwrite: bool = False) -> Path:
+    """`openberry backup [PATH]`: a copy at PATH, else in the backups folder. Never deleted by OpenBerry.
+
+    A folder, or a name without an extension that doesn't exist yet (made then, private), gets a new copy inside it
+    with the usual name. Any other name is the copy's file name: a file already there is replaced only with
+    `overwrite`, else BackupRefused."""
     source = db.db_path()
     if dest is None:
         return snapshot(MANUAL, source=source, now=now, prune_after=False)
     dest = Path(dest).expanduser()
-    if dest.is_dir():
-        dest = dest / snapshot_name(MANUAL, now)
-    return db.backup_to(dest, source)
+    if dest.is_dir() or (not dest.exists() and not dest.suffix):
+        target = dest
+        n = 1
+        while (dest := target / snapshot_name(MANUAL, now, n=n)).exists():
+            n += 1
+    elif dest.exists() and not overwrite:
+        raise BackupRefused(f"There is already a file at {dest}. Give a folder to save a new copy in it each time, or "
+                            "a new file name. To replace that file, add --overwrite.")
+    return db.backup_to(dest, source)  # makes a missing folder, private
 
 
 def delete_company(company_id: int) -> Path:
@@ -234,7 +247,8 @@ def download_name(now: datetime | None = None) -> str:
 # --------------------------------------------------------------------------------------
 
 class RestoreRefused(RuntimeError):
-    """The restore didn't start, and nothing changed. The message says why, in plain words."""
+    """The restore didn't start, or stopped before the backup took the live file's place: nothing changed. The message
+    says why, in plain words."""
 
 
 @dataclass(frozen=True)
@@ -242,6 +256,7 @@ class Restored:
     previous: Path | None  # the snapshot of the data the restore replaced (None: there was none)
     version: int  # the backup's database version (it was upgraded when older)
     sending_turned_off: list[str]  # companies whose email or AI agent sending was on in the backup
+    kept_email_history: bool = False  # the replaced data's opt-outs and sent emails were kept (repo.keep_email_history)
 
 
 def check_backup_file(path: Path) -> int:
@@ -251,7 +266,8 @@ def check_backup_file(path: Path) -> int:
     if not path.is_file():
         raise RestoreRefused(f"There is no file at {path}.")
     try:
-        with contextlib.closing(sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)) as conn:
+        # as_uri encodes the path: a '#' or '%' in a folder's name is part of it, not the URI's syntax.
+        with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
             result = conn.execute("PRAGMA integrity_check").fetchone()[0]
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             version = db.file_version(conn)
@@ -296,10 +312,10 @@ def _raw_copy(live: Path, now: datetime | None) -> Path:
     return dest
 
 
-def _set_aside(live: Path, now: datetime | None) -> Path:
+def _set_aside(live: Path, now: datetime | None) -> tuple[Path, bool]:
     """Snapshot the live data while holding its write lock, then fold its -wal file into it (a checkpoint), so
     deleting the -wal loses nothing. RestoreRefused while another program writes or reads it. A damaged file is kept
-    as it is (that is often why a backup is restored)."""
+    as it is (that is often why a backup is restored). Returns the copy, and whether it is a damaged file's."""
     busy = RestoreRefused("Another program is using your data right now. " + CLOSE_FIRST)
     conn = sqlite3.connect(live, timeout=RESTORE_LOCK_TIMEOUT, isolation_level=None)
     try:
@@ -314,23 +330,49 @@ def _set_aside(live: Path, now: datetime | None) -> Path:
             if _busy(exc):
                 raise busy from exc
             log.warning("the data being replaced is damaged (%s): keeping its files as they are", exc)
-            return _raw_copy(live, now)
+            return _raw_copy(live, now), True
         if blocked:
             raise busy
     finally:
         conn.close()
-    return previous
+    return previous, False
+
+
+def _keep_email_history(incoming: Path, previous: Path, damaged: bool) -> bool:
+    """repo.keep_email_history from `previous`, read-only. A damaged file's copy that can't be read is skipped, with a
+    warning, and the restore goes on: returns False. Any other error stops the restore. Reading `previous` makes -wal
+    and -shm files next to it: those are deleted after."""
+    from . import repo
+
+    made = [p for p in (previous.with_name(previous.name + s) for s in ("-wal", "-shm")) if not p.exists()]
+    try:
+        repo.keep_email_history(incoming, previous)
+    except sqlite3.Error as exc:
+        if not damaged:
+            raise
+        log.warning("could not read the damaged data being replaced (%s): its opt-outs, never-email list and record "
+                    "of sent emails are not kept", exc)
+        return False
+    finally:
+        for path in made:
+            with contextlib.suppress(OSError):
+                path.unlink()
+    return True
 
 
 def restore(backup: Path, *, app_running: Callable[[], bool] | None = None, now: datetime | None = None) -> Restored:
     """Put `backup` back as the live database (`openberry restore FILE`).
 
     Refuses while the desktop app runs or another program is writing the database. The backup is checked first
-    (integrity_check, a version this OpenBerry can open), then copied next to the live file; the live data is saved
+    (integrity_check, a version this OpenBerry can open), then copied next to the live file, and the copy is made
+    ready: upgraded when older, email sending and AI agent sending turned off for every company (emails sent after the
+    backup was made aren't in it, so its approved emails would go out a second time), and the replaced data's
+    opt-outs, never-email list and record of sent emails copied in (repo.keep_email_history). The live data is saved
     as a before-restore snapshot, its -wal and -shm files are deleted (they belong to the replaced data and would be
-    replayed into the backup), and the copy takes its place (os.replace). Last, email sending and AI agent sending
-    are turned off for every company: emails sent after the backup was made aren't in it, so its approved emails
-    would go out a second time.
+    replayed into the backup), and the copy takes its place (os.replace).
+
+    That swap is the last step: stopped before it, the live data is as it was (anything that fails raises
+    RestoreRefused); after it, nothing is left to do.
     """
     from . import repo  # repo imports db, which this module's callers import first
 
@@ -345,25 +387,27 @@ def restore(backup: Path, *, app_running: Callable[[], bool] | None = None, now:
         raise RestoreRefused("OpenBerry is open. " + CLOSE_FIRST)
     private_dir(live.parent)
     incoming = live.with_name(f".{live.name}.restore-{os.getpid()}.tmp")
-    db.backup_to(incoming, backup)  # the user's file stays where it is, untouched
     previous: Path | None = None
+    kept = False
     try:
+        db.backup_to(incoming, backup)  # the user's file stays where it is, untouched
+        db.init_db(incoming, copy_first=False)  # an older backup is upgraded in the copy: the backup is its copy
+        turned_off = repo.turn_sending_off_in(incoming)
         if live.exists():
-            previous = _set_aside(live, now)
+            previous, damaged = _set_aside(live, now)
+            kept = _keep_email_history(incoming, previous, damaged)
         for suffix in ("-wal", "-shm", "-journal"):
             leftover = live.with_name(live.name + suffix)
             if leftover.exists():
                 leftover.unlink()
-        os.replace(incoming, live)
+        os.replace(incoming, live)  # the commit point: the backup is in place, ready, with sending off
     except PermissionError as exc:  # Windows: another program has the file open
         raise RestoreRefused("Another program is using your data right now. " + CLOSE_FIRST) from exc
+    except (OSError, sqlite3.Error, db.DatabaseProblem) as exc:  # a full disk, say
+        raise RestoreRefused(f"The restore stopped before your data was replaced ({exc}).") from exc
     finally:
-        with contextlib.suppress(OSError):
-            incoming.unlink()
-    db.reset_init_cache()  # the next connection upgrades the restored file if it is older (with its own snapshot)
-    turned_off = []
-    for company in repo.list_companies():
-        if company.outreach.email_sending or company.outreach.agent_sending:
-            repo.update_company(company.id, {"outreach": {"email_sending": False, "agent_sending": False}})
-            turned_off.append(company.name)
-    return Restored(previous, version, turned_off)
+        for path in (incoming, *(incoming.with_name(incoming.name + s) for s in ("-wal", "-shm"))):
+            with contextlib.suppress(OSError):
+                path.unlink()
+    db.reset_init_cache()  # the next connection opens the restored file afresh
+    return Restored(previous, version, turned_off, kept)

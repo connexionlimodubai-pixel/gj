@@ -73,7 +73,7 @@
     <span class="keys-icon" aria-hidden="true">{{ m.icon("history", 20) }}</span>
     <div class="min0 grow">
       <h2 id="restore-title">Restore a backup</h2>
-      <p class="keys-intro">Restoring replaces all your data with the backup's. OpenBerry checks the backup first, and keeps a copy of your current data.</p>
+      <p class="keys-intro">Restoring replaces your data with the backup's. OpenBerry checks the backup first, and keeps a copy of your current data.</p>
     </div>
   </header>
   {% if restore.docker %}
@@ -94,6 +94,6 @@
     <li>Open OpenBerry again.</li>
   </ol>
   {% endif %}
-  <p class="callout callout-warning">{{ m.icon("alert", 14) }}<span>After a restore, email sending and AI agent sending are off for every company: emails sent after the backup was made are not in it, and would go out again. Check the Outreach page, then turn them back on.</span></p>
+  <p class="callout callout-warning">{{ m.icon("alert", 14) }}<span>After a restore, email sending and AI agent sending are off for every company. The opt-outs, the never-email list and the record of sent emails are kept from the data the backup replaces. Emails sent after the backup was made may still show as not sent: before you turn sending back on, compare the Outreach page with your mailbox's Sent folder.</span></p>
 </section>
 {% endblock %}

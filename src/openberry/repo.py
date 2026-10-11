@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
@@ -2855,7 +2856,8 @@ def _email_send_problem(company: Company, msg: Message, lead: Lead, thread: list
             and (m.status in ("sent", "replied") or m.sent_at is not None or m.email_state == "unknown")]
     if repeat := next((m for m in sent if m.channel == "email" and m.step == msg.step), None):
         if repeat.lead_id == DELETED_LEAD:
-            return f"step {msg.step} was already emailed to {address} (that email was deleted since: it still counts)"
+            return (f"step {msg.step} was already emailed to {address} (that email was deleted since, or sent after "
+                    "the backup you restored: it still counts)")
         if repeat.lead_id != lead.id:
             return f"step {msg.step} was already emailed to {address} through another lead"
         return f"step {msg.step} was already emailed to this lead"
@@ -3688,3 +3690,104 @@ def email_attention(company_id: int, now: datetime | None = None,
                                    conn=c)
         hints = opt_out_hints(company_id, conn=c)
     return {"messages": [_message_from_row(r) for r in rows], "events": events, "hints": hints}
+
+
+# --------------------------------------------------------------------------------------
+# Restore (backups.restore): the backup's copy is made ready before it takes the live file's place
+# --------------------------------------------------------------------------------------
+
+@contextmanager
+def _file_write_locked(path: Path, attach: Path | None = None) -> Iterator[sqlite3.Connection]:
+    """_write_locked on a database file that isn't the one in use (a restore's copy of the backup). `attach` is opened
+    read-only as "prev" before the write lock is taken: ATTACH can't run inside a transaction."""
+    conn = sqlite3.connect(path, timeout=30, uri=True)  # uri: the ATTACH names its file read-only
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        if attach is not None:
+            conn.execute("ATTACH DATABASE ? AS prev", (attach.resolve().as_uri() + "?mode=ro",))
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def turn_sending_off_in(path: Path) -> list[str]:
+    """Turn email sending and AI agent sending off for every company in the database file at `path` (a restore's
+    copy, before it takes the live file's place): emails sent after the backup was made aren't in it. Plain SQL on
+    the outreach JSON, so no lead is rescored. Returns the companies where either was on."""
+    with _file_write_locked(path) as c:
+        names = [r["name"] for r in c.execute(
+            "SELECT name FROM companies WHERE CASE WHEN json_valid(outreach) THEN json_extract(outreach, "
+            "'$.email_sending') OR json_extract(outreach, '$.agent_sending') END ORDER BY created_at DESC, id DESC")]
+        # Text that isn't JSON reads as the defaults: sending off.
+        c.execute("UPDATE companies SET outreach = json_set(outreach, '$.email_sending', json('false'), "
+                  "'$.agent_sending', json('false')) WHERE json_valid(outreach)")
+    return names
+
+
+def _same_row(table: str, column: str) -> str:
+    """SQL for keep_email_history: `column`, an id in the replaced data, when the restored data has that same row (same
+    id and created_at), else NULL: a row added after the backup was made isn't in it."""
+    return (f"(SELECT r.id FROM main.{table} r JOIN prev.{table} p ON p.id = r.id AND p.created_at = r.created_at "
+            f"WHERE r.id = {column})")
+
+
+def keep_email_history(path: Path, previous: Path) -> None:
+    """Copy into the database file at `path` (a restore's copy, before it takes the live file's place) what
+    `previous`, the data it replaces, knows and must never forget: the never-email list and opt-outs, email_sent_log,
+    and an email_sent_log entry for each email that went out or may have (sent, unknown, or being sent: unknown) and
+    that `path` doesn't have as sent. The claim's never-twice check, the follow-up wait, the daily limits and the
+    inbox check then count what happened after the backup was made. Ids are kept only where `path` has the same row.
+
+    `previous` may be older than the email tables. Raises sqlite3.Error when it can't be read (a damaged file), and
+    nothing is copied then."""
+    # `path` already has this email as sent, or as maybe sent: it counts there.
+    known = "(r.sent_at IS NOT NULL OR r.status IN ('sent', 'replied') OR r.email_state IN ('unknown', 'data'))"
+    with _file_write_locked(path, attach=previous) as c:
+        tables = {r[0] for r in c.execute("SELECT name FROM prev.sqlite_master WHERE type = 'table'")}
+        if not {"companies", "leads", "messages"} <= tables:  # an empty file: nothing to keep
+            return
+        if "email_suppressions" in tables:
+            c.execute("INSERT OR IGNORE INTO main.email_suppressions (email, reason, company_id, lead_id, message_id, "
+                      f"detail, created_at) SELECT s.email, s.reason, {_same_row('companies', 's.company_id')}, "
+                      f"{_same_row('leads', 's.lead_id')}, {_same_row('messages', 's.message_id')}, s.detail, "
+                      "s.created_at FROM prev.email_suppressions s")
+        if "email_sent_log" in tables:
+            c.execute("INSERT INTO main.email_sent_log (address, step, email_message_id, email_state, sent_via, "
+                      "sent_at, claimed_at, replied_at, company_id, created_at) SELECT s.address, s.step, "
+                      "s.email_message_id, s.email_state, s.sent_via, s.sent_at, s.claimed_at, s.replied_at, "
+                      f"{_same_row('companies', 's.company_id')}, s.created_at FROM prev.email_sent_log s "
+                      "WHERE NOT EXISTS (SELECT 1 FROM main.email_sent_log r WHERE r.address = s.address "
+                      "AND r.step = s.step AND r.created_at = s.created_at "
+                      "AND r.email_message_id IS s.email_message_id) "
+                      "AND NOT EXISTS (SELECT 1 FROM main.messages r WHERE r.email_message_id = s.email_message_id "
+                      f"AND {known})")
+        # Columns an older version didn't have (sent_via: version 3, the email ones: 5) read as their defaults.
+        have = {r[1] for r in c.execute("PRAGMA prev.table_info(messages)")}
+        m = {name: f"m.{name}" if name in have else default for name, default in (
+            ("sent_via", "''"), ("email_state", "''"), ("email_to", "''"), ("email_message_id", "NULL"),
+            ("email_claimed_at", "NULL"))}
+        address = f"COALESCE(NULLIF(lower(trim({m['email_to']})), ''), lower(trim(l.email)))"
+        c.execute(
+            "INSERT INTO main.email_sent_log (address, step, email_message_id, email_state, sent_via, sent_at, "
+            f"claimed_at, replied_at, company_id, created_at) SELECT {address}, m.step, {m['email_message_id']}, "
+            f"CASE WHEN {m['email_state']} IN ('claimed', 'data') THEN 'unknown' ELSE {m['email_state']} END, "
+            f"{m['sent_via']}, COALESCE(m.sent_at, CASE WHEN m.status IN ('sent', 'replied') THEN m.updated_at END), "
+            f"{m['email_claimed_at']}, reply.at, {_same_row('companies', 'm.company_id')}, ? "
+            "FROM prev.messages m JOIN prev.leads l ON l.id = m.lead_id "
+            "LEFT JOIN (SELECT lead_id, MAX(created_at) AS at FROM prev.messages WHERE direction = 'inbound' "
+            "AND channel = 'email' GROUP BY lead_id) reply ON reply.lead_id = m.lead_id "
+            "WHERE m.direction = 'outbound' AND m.channel = 'email' AND (m.sent_at IS NOT NULL "
+            f"OR m.status IN ('sent', 'replied') OR {m['email_state']} IN ('sent', 'unknown', 'claimed', 'data')) "
+            f"AND {address} != '' "
+            "AND NOT EXISTS (SELECT 1 FROM main.messages r WHERE r.id = m.id AND r.created_at = m.created_at "
+            f"AND {known}) "
+            f"AND NOT EXISTS (SELECT 1 FROM main.messages r WHERE r.email_message_id = {m['email_message_id']} "
+            f"AND {known}) "
+            f"AND NOT EXISTS (SELECT 1 FROM main.email_sent_log r WHERE r.email_message_id = {m['email_message_id']})",
+            (iso(),))

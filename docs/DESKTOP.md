@@ -190,15 +190,17 @@ providers, Hostinger for example, forbid email to people who did not opt in.
 - **Automatic backups:** while it is open, OpenBerry saves a copy in `.openberry/backups` every day, and keeps 7 days
   and 4 weeks of them. It also saves one before an update changes your data, before you delete a company and before a
   restore. **Your data** lists them, and each one can be downloaded there.
-- **From the command line:** `openberry-cli backup` saves a copy in the backups folder, and `openberry-cli backup
-  D:\Backups` saves it in that folder. It works while OpenBerry is open.
+- **From the command line:** `openberry-cli backup` saves a copy in the backups folder. `openberry-cli backup
+  D:\Backups` saves a new copy in that folder each time, and makes the folder if it isn't there yet (a name without
+  an extension is a folder). `openberry-cli backup D:\mine.db` saves it as that file, but never replaces a file that
+  is already there unless you add `--overwrite`. It works while OpenBerry is open.
 - **By hand:** close OpenBerry **and** quit Claude Desktop (it keeps `openberry-cli` running), then copy the whole
   `.openberry` folder, with every file in it: `openberry.db`, `openberry.db-wal` and `openberry.db-shm` if they are
   there, and `.env`. Copying `openberry.db` alone while either is open can miss your latest changes.
 
 ## Restore a backup
 
-Restoring replaces all your data with the backup's.
+Restoring replaces your data with the backup's.
 
 1. Close OpenBerry, and quit Claude Desktop (right-click Claude's icon next to the clock, **Quit**; on a Mac,
    **Claude → Quit Claude**).
@@ -210,9 +212,10 @@ Restoring replaces all your data with the backup's.
 3. Open OpenBerry and Claude Desktop again.
 
 OpenBerry checks the backup first, and refuses one that is damaged or was saved by a newer version. It saves your
-current data in `backups/` before replacing it. Then it turns **email sending and AI agent sending off** for every
-company: emails sent after the backup was made are not in it, so they would go out a second time. Check the
-Outreach pages, then turn sending back on.
+current data in `backups/` before replacing it. It turns **email sending and AI agent sending off** for every
+company, and keeps the opt-outs, the never-email list and the record of sent emails from the data it replaces.
+Emails sent after the backup was made may still show as not sent: before you turn sending back on, compare the
+Outreach pages with your mailbox's **Sent** folder.
 
 ## Updating
 
@@ -287,7 +290,9 @@ Task Manager (Windows: Ctrl+Shift+Esc).
 - **"This data was saved by a newer OpenBerry".** You opened an older version after a newer one updated your data.
   Open the newer version, or [restore a backup](#restore-a-backup) made with this version.
 - **"OpenBerry's data file is damaged".** [Restore a backup](#restore-a-backup), for example the newest one in
-  `.openberry/backups`. The restore keeps the damaged file there too.
+  `.openberry/backups`. The restore keeps the damaged file there too. If it can't read that file, the opt-outs, the
+  never-email list and the record of sent emails in it are not kept, and the restore says so: check your mailbox
+  before you turn sending back on.
 - **"Your disk is full".** OpenBerry can't save anything until there is free space. Free some, then try again.
 - **Windows: it opens in the browser instead of a window.** Install the
   [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).

@@ -440,7 +440,7 @@ def file_version(conn: sqlite3.Connection) -> int:
     return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
-def _before_upgrade(conn: sqlite3.Connection, path: Path) -> None:
+def _before_upgrade(conn: sqlite3.Connection, path: Path, copy_first: bool = True) -> None:
     """Refuse a file a newer version wrote, and copy a file an older version wrote before anything in it changes.
 
     Runs before executescript(SCHEMA), which creates tables outside the migration's transaction, and writes nothing.
@@ -448,7 +448,7 @@ def _before_upgrade(conn: sqlite3.Connection, path: Path) -> None:
     version = file_version(conn)
     if version > SCHEMA_VERSION:
         raise DatabaseTooNew(version)
-    if 0 < version < SCHEMA_VERSION and str(path) != ":memory:":
+    if copy_first and 0 < version < SCHEMA_VERSION and str(path) != ":memory:":
         from . import backups  # it imports this module
 
         try:
@@ -533,14 +533,16 @@ def _use_wal(conn: sqlite3.Connection, timeout: float = 30.0) -> None:
             time.sleep(0.05)
 
 
-def init_db(path: Path | None = None) -> Path:
+def init_db(path: Path | None = None, copy_first: bool = True) -> Path:
+    """Create or upgrade the database. copy_first=False: an older file is upgraded without a pre-upgrade copy (a
+    restore's copy of a backup: the backup file itself stays as it was)."""
     path = path or db_path()
     if str(path) != ":memory:":
         private_dir(path.parent)
     conn = sqlite3.connect(path, timeout=30)  # another process may be upgrading the same file
     try:
         _use_wal(conn)
-        _before_upgrade(conn, path)
+        _before_upgrade(conn, path, copy_first)
         conn.executescript(SCHEMA)
         _migrate(conn)
         if str(path) != ":memory:":  # lead personal data and inbox replies: for this user only

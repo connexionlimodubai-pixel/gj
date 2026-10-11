@@ -3385,24 +3385,29 @@ def record_opt_out(lead_id: int, source: str, detail: str = "", message_id: int 
         return updated
 
 
+# Emailed in the lookback: sent (also by hand), or may have been sent, also once Send again put it back in the queue
+# (its first copy may have arrived).
+_EMAILED_SQL = ("(m.sent_at > ? OR (m.email_claimed_at > ? AND (m.email_state = 'unknown' OR (m.email_state = '' "
+                "AND m.id IN (SELECT message_id FROM email_events WHERE kind = 'unknown')))))")
+
+
 def inbound_index(now: datetime | None = None, own_domains: Iterable[str] = (),
                   conn: sqlite3.Connection | None = None) -> dict[str, set[str]]:
     """What the inbox check looks for, so other mail is never read in full: the Message-IDs OpenBerry gave its emails
-    (also emails deleted since), the addresses emailed in the last REPLY_LOOKBACK (marked sent, also by hand, or that
-    may have been sent), and their companies' domains (not free mail, not `own_domains`): a colleague's Outlook forward
-    carries no References."""
+    (also emails deleted since, and one back in the queue: Send again keeps its Message-ID), the addresses emailed in
+    the last REPLY_LOOKBACK (marked sent, also by hand, or that may have been sent), and their companies' domains (not
+    free mail, not `own_domains`): a colleague's Outlook forward carries no References."""
     now = _utc(now or utcnow())
     since = iso(now - REPLY_LOOKBACK)
     with _conn(conn) as c:
         ours = {r[0] for r in c.execute("SELECT email_message_id FROM messages WHERE email_message_id IS NOT NULL "
-                                        "AND email_state != '' UNION SELECT email_message_id FROM email_sent_log "
+                                        "UNION SELECT email_message_id FROM email_sent_log "
                                         "WHERE email_message_id IS NOT NULL")}
         leads = {normalize_email(r[0]) for r in c.execute(
-            "SELECT l.email FROM leads l JOIN messages m ON m.lead_id = l.id WHERE m.direction = 'outbound' "
-            "AND m.channel = 'email' AND (m.sent_at > ? OR (m.email_state = 'unknown' AND m.email_claimed_at > ?)) "
-            "AND l.email != '' UNION SELECT email_to FROM messages WHERE direction = 'outbound' AND channel = 'email' "
-            "AND email_to != '' AND (sent_at > ? OR (email_state = 'unknown' AND email_claimed_at > ?)) "
-            "UNION SELECT address FROM email_sent_log WHERE COALESCE(sent_at, claimed_at) > ?",
+            f"SELECT l.email FROM leads l JOIN messages m ON m.lead_id = l.id WHERE m.direction = 'outbound' "
+            f"AND m.channel = 'email' AND {_EMAILED_SQL} AND l.email != '' UNION SELECT m.email_to FROM messages m "
+            f"WHERE m.direction = 'outbound' AND m.channel = 'email' AND m.email_to != '' AND {_EMAILED_SQL} "
+            f"UNION SELECT address FROM email_sent_log WHERE COALESCE(sent_at, claimed_at) > ?",
             (since, since, since, since, since))}
     own = {d.lower() for d in own_domains}
     domains = {d for d in (mailer.company_domain(a) for a in leads) if d and d not in own}
@@ -3418,10 +3423,6 @@ class _InboundMatch:
     logged: sqlite3.Row | None = None  # an email whose message, lead or company was deleted since (email_sent_log)
     by_domain: bool = False            # only the sender's company domain matched: a colleague of the lead wrote
     also_stop: tuple[int, ...] = ()    # by_domain and unsure which lead it is about: these leads' sequences stop too
-
-
-# Emailed in the lookback: sent (also by hand), or may have been sent.
-_EMAILED_SQL = "(m.sent_at > ? OR (m.email_state = 'unknown' AND m.email_claimed_at > ?))"
 
 
 def _match_inbound(c: sqlite3.Connection, inbound: mailer.Inbound, now: datetime) -> _InboundMatch:
@@ -3484,8 +3485,8 @@ def _match_inbound(c: sqlite3.Connection, inbound: mailer.Inbound, now: datetime
     if not rows:
         return _InboundMatch()
     # The lead the message names (a forward quotes the email we sent it), else the one whose email the subject answers.
-    # Still more than one lead: it is logged on the latest and the others' sequences stop too, so a colleague's "please
-    # remove him" can't be lost on the wrong person while he keeps getting follow-ups.
+    # Still more than one lead: it is logged on the latest and noted on the others too (record_inbound), so a
+    # colleague's "please remove him" can't be lost on the wrong person while he keeps getting follow-ups.
     mentioned = set(inbound.mentioned)
     named = [r for r in rows
              if normalize_email(r["sent_to"] or "") in mentioned or normalize_email(r["email"] or "") in mentioned]
@@ -3518,7 +3519,8 @@ def record_inbound(inbound: mailer.Inbound, key: str, now: datetime | None = Non
     or the mail app's Unsubscribe button) also suppresses the address and disqualifies the lead. A hard bounce
     suppresses the address and marks the email; auto-replies and soft bounces are only noted. Mail from a colleague
     of the lead (matched by its company's domain) counts only as a person's reply, and an opt-out in their words waits
-    for the user. Something about an email deleted since still suppresses its address (opt-outs, bounces) or stops it
+    for the user. When it may be about several leads there, it is noted on each, so none of them is emailed again.
+    Something about an email deleted since still suppresses its address (opt-outs, bounces) or stops it
     being emailed again (replies). A message about no lead is not stored.
 
     Returns {"status": "recorded" | "duplicate" | "unmatched", "kind", "lead_id", "message_id"}.
@@ -3541,7 +3543,10 @@ def record_inbound(inbound: mailer.Inbound, key: str, now: datetime | None = Non
             if kind == mailer.OPT_OUT and not inbound.token:  # someone else's words: the user decides
                 kind, hint = mailer.REPLY, inbound.opt_out
         message_id = msg.id if msg is not None else None
-        if msg is not None and msg.email_state == "unknown":  # something came back for it: it went out
+        # Something came back for it: it went out. Also the first copy of one that Send again put back in the queue
+        # (it keeps its Message-ID), so it isn't sent a second time.
+        if msg is not None and (msg.email_state == "unknown" or (
+                msg.email_state == "" and msg.email_claimed_at is not None and msg.sent_at is None)):
             stamp = iso(_utc(msg.email_claimed_at) if msg.email_claimed_at else now)
             c.execute("UPDATE messages SET status = CASE WHEN status IN ('approved', 'draft') THEN 'sent' ELSE status "
                       "END, sent_at = COALESCE(sent_at, ?), sent_via = 'smtp', email_state = 'sent', send_error = '' "
@@ -3585,10 +3590,19 @@ def record_inbound(inbound: mailer.Inbound, key: str, now: datetime | None = Non
                                addresses=[inbound.from_email, msg.email_to if msg is not None else ""],
                                automatic=True, conn=c)
         _email_event(c, lead.company_id, lead.id, message_id, kind, detail, inbound_key=key, now=now)
-        for other_id in found.also_stop:  # a colleague wrote and it may be about one of these: no more follow-ups
+        for other_id in found.also_stop:  # a colleague wrote and it may be about one of these: their emails stop too
             other = c.execute("SELECT company_id FROM leads WHERE id = ?", (other_id,)).fetchone()
             if other is not None:
                 _stop_sequence(c, other_id)
+                if not inbound.token:
+                    # Their note on this lead's page too, flagged the same way so the user decides for each lead.
+                    # Every check (follow-ups, auto-approve, agent and email sending) then sees a reply. The lead's
+                    # status stays: one reply moves one lead to Replied.
+                    note = create_message(other_id, inbound.text or NO_REPLY_TEXT, channel="email", status="received",
+                                          direction="inbound", generated_by="inbox", conn=c)
+                    c.execute("UPDATE messages SET email_from = ?, opt_out_hint = ? WHERE id = ?",
+                              (normalize_email(inbound.from_email), hint[:300] if kind == mailer.REPLY else "",
+                               note.id))
                 _email_event(c, other["company_id"], other_id, None, "reply",
                              f"Follow-ups stopped: {normalize_email(inbound.from_email)} wrote about one of the people "
                              f"you emailed at their company, see {lead.display_name}", now=now)

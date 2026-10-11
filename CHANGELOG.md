@@ -18,9 +18,9 @@ removes the demo. It also changes how your data is stored (database version 3 to
    data in `.openberry/backups` (named `openberry-pre-v3-…`), then upgrades it. Then open Claude Desktop again.
 4. **There is no downgrade.** Once 0.2.0 has upgraded your data, don't open it with 0.1.x. To go back, put the copy
    from step 1 back while everything is closed.
-5. **If you loaded the demo**, open its company and click **Delete sample company** in the banner at the top. The
-   next page shows what goes and what stays, and nothing is removed until you confirm. Its fictional people are
-   never contacted in the meantime.
+5. **If you loaded the demo**, open its company and click **Delete sample company** in the banner at the top
+   (**Remove sample leads** if you made it your own company). The next page shows what goes and what stays, and
+   nothing is removed until you confirm. Its fictional people are never contacted in the meantime.
 6. **Docker:** the container no longer starts without a password. Set `OPENBERRY_PASSWORD` (12 characters or more)
    in `.env`, or `OPENBERRY_ALLOW_NO_PASSWORD=true` if only you can reach it.
 

@@ -380,6 +380,34 @@ def test_lead_add_update_and_delete(client, company):
     assert resp.status_code == 303 and repo.find_lead(lead_id) is None
 
 
+def test_a_pipeline_form_opened_before_an_opt_out_keeps_it(client, company):
+    """EMAIL-4: the inbox check records an opt-out while the lead's page is open. Saving the Pipeline form shown
+    before saves the note but keeps the "unsubscribed" tag, the status and the dated note. Only a form that showed
+    the tag removes it."""
+    lead, _ = repo.upsert_lead(company.id, LeadIn(full_name="Lina Noor", email="lina@gulfbank.example"))
+    repo.update_lead(lead.id, {"status": "contacted"})
+    lead_url = f"/c/{company.id}/leads/{lead.id}"
+    reader = _FormReader(f"{lead_url}/update")
+    reader.feed(client.get(lead_url).text)
+    repo.record_opt_out(lead.id, "the Unsubscribe button", "Unsubscribed", automatic=True)
+    opted_out = repo.get_lead(lead.id)
+    assert opted_out.status == "disqualified" and "Asked not to be contacted" in opted_out.notes
+    resp = client.post(f"{lead_url}/update", data={**reader.fields, "notes": "Call back in March"},
+                       follow_redirects=False)
+    page = client.get(resp.headers["location"]).text
+    assert "Lead updated, except the status: the lead asked not to be contacted since you opened" in page
+    after = repo.get_lead(lead.id)
+    assert after.status == "disqualified" and after.tags == ["unsubscribed"]
+    assert after.notes == f"Call back in March\n{opted_out.notes}"
+    # The page shown again has the tag: removing it there is the user's decision.
+    browser_submit(client, lead_url, f"{lead_url}/update")
+    assert repo.get_lead(lead.id).tags == ["unsubscribed"]
+    reader = _FormReader(f"{lead_url}/update")
+    reader.feed(client.get(lead_url).text)
+    client.post(f"{lead_url}/update", data={**reader.fields, "tags": "", "status": "contacted"})
+    assert (repo.get_lead(lead.id).status, repo.get_lead(lead.id).tags) == ("contacted", [])
+
+
 def test_lead_from_another_company_is_404(client, company):
     other = repo.create_company(CompanyIn(name="Other Co"))
     lead, _ = repo.upsert_lead(other.id, LeadIn(full_name="Not Yours"))
@@ -418,7 +446,8 @@ def test_draft_approve_send_and_reply_flow(client, company, monkeypatch):
     drafts = client.get(f"{base}/outreach").text
     assert "Omar Haddad" in drafts and "/ 200 characters" in drafts  # a free LinkedIn account
 
-    resp = post(client, f"{base}/messages/{msg.id}", {"action": "approve", "next": f"{base}/outreach?tab=drafts"})
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "approve", "next": f"{base}/outreach?tab=drafts",
+                                                      "version": repo.message_version(msg)})
     assert resp.headers["location"] == f"{base}/outreach?tab=drafts"
     assert repo.get_message(msg.id).status == "approved"
     assert "Omar Haddad" in client.get(f"{base}/outreach?tab=approved").text
@@ -1505,13 +1534,16 @@ def test_agent_queue_lists_approved_linkedin_messages_with_escaped_names(client,
     item = re.search(rf'<li class="card queue-item" id="q-{email.id}">.*?</li>', approved, re.S).group(0)
     assert "Queued for your agent" not in item
     # Approving a LinkedIn draft says whether the agent will send it.
-    resp = post(client, f"{base}/messages/{draft.id}", {"action": "approve", "next": f"{base}/outreach"})
+    resp = post(client, f"{base}/messages/{draft.id}", {"action": "approve", "next": f"{base}/outreach",
+                                                        "version": repo.message_version(draft)})
     assert "Your AI agent will send it exactly as it is" in client.get(resp.headers["location"]).text
     later = repo.create_message(lead.id, "Follow-up", channel="linkedin_dm", step=2)
-    resp = post(client, f"{base}/messages/{later.id}", {"action": "approve", "next": f"{base}/outreach"})
+    resp = post(client, f"{base}/messages/{later.id}", {"action": "approve", "next": f"{base}/outreach",
+                                                        "version": repo.message_version(later)})
     assert ("It isn't in your AI agent's queue right now (another message to this lead is ahead in the queue"
             in html_lib.unescape(client.get(resp.headers["location"]).text))
-    resp = post(client, f"{base}/messages/{email.id}", {"action": "approve", "next": f"{base}/outreach"})
+    resp = post(client, f"{base}/messages/{email.id}", {"action": "approve", "next": f"{base}/outreach",
+                                                        "version": repo.message_version(email)})
     assert "Approved. Copy it and send it from your inbox." in client.get(resp.headers["location"]).text
 
 
@@ -1700,8 +1732,8 @@ def test_note_counters_follow_the_linkedin_account(client, company):
     assert ("250 / 200 characters: too long for a connection note from your free LinkedIn account"
             in text_of(item)) and "Queued for your agent" not in item
     # The agent won't send it, and approving it says why.
-    resp = post(client, f"{base}/messages/{msg.id}", {"action": "approve", "next": f"{base}/outreach"},
-                page=lead_page)
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "approve", "next": f"{base}/outreach",
+                                                      "version": repo.message_version(msg)}, page=lead_page)
     note = html_lib.unescape(client.get(resp.headers["location"]).text)
     assert ("It isn't in your AI agent's queue right now (the connection note is longer than 200 characters (250)"
             in note)

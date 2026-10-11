@@ -492,14 +492,45 @@ def test_approving_an_email_says_what_happens_and_needs_a_subject(client, compan
     assert "Approved. Copy it and send it from your inbox." in flashes(follow(client, resp))
     ready(company)
     second = repo.create_message(lead, "Hello again", channel="email", subject="Cars", step=2)
-    repo.update_message(draft.id, status="draft")
-    resp = post(client, f"{base}/messages/{draft.id}", {"action": "approve", "next": f"{base}/outreach"},
+    draft = repo.update_message(draft.id, status="draft")
+    resp = post(client, f"{base}/messages/{draft.id}", {"action": "approve", "next": f"{base}/outreach",
+                                                        "version": repo.message_version(draft)},
                 page=f"{base}/outreach")
     assert "OpenBerry will email it from your mailbox" in flashes(follow(client, resp))
-    resp = post(client, f"{base}/messages/{second.id}", {"action": "approve", "next": f"{base}/outreach"},
+    resp = post(client, f"{base}/messages/{second.id}", {"action": "approve", "next": f"{base}/outreach",
+                                                         "version": repo.message_version(second)},
                 page=f"{base}/outreach")
     assert "It won't be emailed now (another email to this lead or its address goes first" in flashes(
         follow(client, resp))
+
+
+def test_approve_on_the_outreach_page_covers_only_the_text_it_showed(client, company, offline_mail):
+    """SEC-2: the card's Approve posts no text, only the version of the text on the page. A draft Claude rewrote
+    after the page was opened isn't approved (or emailed) unread, nor is one approved from a page without it."""
+    ready(company)
+    msg = repo.create_message(lead_with_email(company), "Short note you read.", channel="email", subject="Hello")
+    base = f"/c/{company.id}"
+
+    def card_form() -> dict[str, str]:
+        page = client.get(f"{base}/outreach?tab=drafts").text
+        form = re.search(rf'<form method="post" action="{base}/messages/{msg.id}"[^>]*>(.*?)</form>', page, re.S)
+        assert form and 'value="approve"' in form.group(1)
+        return dict(re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)"', form.group(1)))
+
+    shown = card_form()
+    repo.update_message(msg.id, body="Text you never saw.")  # Claude rewrites it meanwhile (MCP update_message)
+    for fields in (shown, {k: v for k, v in shown.items() if k != "version"}):  # this page, and a page from before
+        resp = client.post(f"{base}/messages/{msg.id}", data={**fields, "action": "approve"}, follow_redirects=False)
+        assert resp.headers["location"] == f"{base}/outreach?tab=drafts"
+        assert "This draft changed since you opened the page: review it, then approve it." in flashes(
+            follow(client, resp))
+        assert repo.get_message(msg.id).status == "draft"
+    assert services.send_next_email()["status"] == "idle" and offline_mail.sent == []
+    # The page shown again approves the text it shows now.
+    resp = client.post(f"{base}/messages/{msg.id}", data={**card_form(), "action": "approve"}, follow_redirects=False)
+    assert "OpenBerry will email it from your mailbox" in flashes(follow(client, resp))
+    assert repo.get_message(msg.id).status == "approved" and services.send_next_email()["status"] == "sent"
+    assert b"Text you never saw." in offline_mail.sent[0]["data"]
 
 
 def test_an_email_being_sent_cant_be_deleted_from_the_dashboard(client, company):
@@ -717,7 +748,8 @@ def test_fix_the_address_opens_the_profile_form_and_says_the_email_changed(clien
     assert "LinkedIn" not in flashed
     stored = repo.get_message(msg.id)
     assert (stored.status, stored.email_state, stored.send_error) == ("draft", "", "")
-    resp = post(client, f"/c/{company.id}/messages/{msg.id}", {"action": "approve"}, page=f"/c/{company.id}/outreach")
+    resp = post(client, f"/c/{company.id}/messages/{msg.id}",
+                {"action": "approve", "version": repo.message_version(msg)}, page=f"/c/{company.id}/outreach")
     follow(client, resp)
     assert msg.id in [i["message_id"] for i in repo.email_queue(company.id)["items"]]
 

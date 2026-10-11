@@ -755,7 +755,7 @@ def _render_sample(request: Request, plan: sample_cleanup.CleanupPlan, *, status
     return render(request, "sample_cleanup.html", {
         "company": plan.company, "active": "sample", "title": "Remove sample data", "plan": plan,
         "sample_leads": leads["sample"], "touched_leads": leads["touched"], "other_leads": leads["other"],
-        "changed": changed,
+        "changed": changed, "banner_text": sample_cleanup.banner_text(plan),
     }, status_code=status_code)
 
 

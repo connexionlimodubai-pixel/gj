@@ -3,6 +3,8 @@ and removed safely on request (openberry.sample_cleanup)."""
 
 from __future__ import annotations
 
+import asyncio
+import html
 import re
 import sqlite3
 from contextlib import closing
@@ -446,6 +448,43 @@ async def test_claude_is_told_which_company_is_the_sample(company):
         result = await client.call_tool("list_companies", {})
     rows = {row["id"]: row for row in result.structured_content["companies"]}
     assert rows[sample_id]["note"] == sample_cleanup.COMPANY_NOTE and "note" not in rows[company.id]
+
+
+@pytest.mark.parametrize("made_own", ["profile", "leads"])
+def test_a_sample_company_the_user_made_their_own_isnt_called_fictional(client, monkeypatch, made_own):
+    """UPG-4: the user turned the old demo company into their own (a new profile, or leads they added). Claude's note
+    and the banner say only which sample leads it still holds, and the button removes those, not the company."""
+    sample_id = seed_sample_company(legacy_demo=True)
+
+    def note() -> str:
+        async def call() -> Any:
+            async with Client(build_server()) as mcp:
+                return await mcp.call_tool("list_companies", {})
+        rows = asyncio.run(call()).structured_content["companies"]
+        return next(row["note"] for row in rows if row["id"] == sample_id)
+
+    def banner() -> str:
+        page = client.get(f"/c/{sample_id}/leads").text
+        return html.unescape(re.search(r'<div class="sample-banner".*?</div>', page, re.S).group(0))
+
+    assert note() == sample_cleanup.COMPANY_NOTE  # untouched: fictional, leave it alone
+    assert f"{sample_cleanup.BANNER_TEXT} Nothing is ever sent to them." in banner()
+    assert "Delete sample company" in banner()
+    later(monkeypatch)
+    if made_own == "profile":
+        repo.update_company(sample_id, {"name": "Gulf Executive Cars", "website": "https://gulfexec.example"})
+    else:
+        repo.upsert_lead(sample_id, LeadIn(full_name="Pat Real", source="claude",
+                                           linkedin_url="https://www.linkedin.com/in/pat-real"))
+    text = "This company still holds 13 untouched sample leads from the old demo. Sample leads are never contacted."
+    assert note() == f"{text} The user can remove them with the banner on its dashboard."
+    shown = banner()
+    assert text in shown and f'href="/c/{sample_id}/sample">' in shown and "Remove sample leads" in shown
+    for words in ("fictional", "Don't work on it", "Nothing is ever sent", "Delete sample company"):
+        assert words not in note() and words not in shown, words
+    page = html.unescape(client.get(f"/c/{sample_id}/sample").text)  # the removal page the button opens
+    assert f"{text} Nothing is removed until you click" in page and "Remove 13 sample leads" in page
+    assert "fictional" not in page
 
 
 # --------------------------------------------------------------------------------------

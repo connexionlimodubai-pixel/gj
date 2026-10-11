@@ -550,8 +550,17 @@ def private_files() -> None:
     """
     os.umask(PRIVATE_UMASK)
     if os.name != "nt":
-        _owner_only(OPENBERRY_HOME, 0o700, folder=True)
+        if not _home_or_above(OPENBERRY_HOME):  # OPENBERRY_HOME=~ would otherwise lock other accounts out of it
+            _owner_only(OPENBERRY_HOME, 0o700, folder=True)
         _owner_only(settings_file(), 0o600, folder=False)
+
+
+def _home_or_above(path: Path) -> bool:
+    try:
+        home = Path.home().resolve()
+        return path.resolve() in {home, *home.parents}
+    except (OSError, RuntimeError):  # no home folder to compare with
+        return True
 
 
 def _owner_only(path: Path, mode: int, folder: bool) -> None:

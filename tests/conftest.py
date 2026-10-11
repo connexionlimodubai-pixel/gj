@@ -13,13 +13,14 @@ from typing import Any
 import pytest
 
 from email_fakes import offline_mail  # noqa: F401  (a fixture: fake mail servers, no network)
-from openberry import db
+from openberry import config, db
 from openberry.config import Settings, set_settings
 
 
 @pytest.fixture(autouse=True)
 def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("OPENBERRY_ENV_FILE", str(tmp_path / "missing.env"))
+    monkeypatch.setattr(config, "OPENBERRY_HOME", tmp_path / "openberry-home")  # never the real ~/.openberry
     s = Settings(db_path=tmp_path / "test.db", secret_key="test-secret", scheduler_enabled=False)
     set_settings(s)
     db.reset_init_cache()

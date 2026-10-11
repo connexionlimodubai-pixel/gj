@@ -267,8 +267,10 @@ def companies_board(request: Request) -> Response:
     samples = sample_cleanup.sample_company_ids()
     for company in repo.list_companies():
         stats = repo.company_stats(company.id)
+        plan = sample_cleanup.cleanup_plan(company.id) if company.id in samples else None
         cards.append({"company": company, "leads": stats["leads_total"], "hot": stats["tiers"]["hot"],
-                      "signals_7d": stats["signals_7d"], "sample": company.id in samples})
+                      "signals_7d": stats["signals_7d"],
+                      "sample": sample_cleanup.banner_text(plan) if plan else ""})  # the pill's tooltip
     return render(request, "companies.html", {"cards": cards, "active": "companies", "title": "Registration board"})
 
 

@@ -315,7 +315,7 @@ def remove(company_id: int, token: str, *, snapshot: Callable[[], Path | None] |
 
 def describe(plan: CleanupPlan) -> list[str]:
     """The plan in plain sentences, for the command line."""
-    lines = [f"Company {plan.company.id}: {plan.company.name}. {BANNER_TEXT}"]
+    lines = [f"Company {plan.company.id}: {plan.company.name}. {banner_text(plan)}"]
     if plan.whole_company_safe:
         rows = plan.counts
         lines.append(f"Nothing in it was changed: the whole company goes ({count_of(rows['leads'], 'lead')}, "

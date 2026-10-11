@@ -464,7 +464,7 @@ def sample_banner(client: TestClient, company_id: int) -> str:
     return html.unescape(re.search(r'<div class="sample-banner".*?</div>', page, re.S).group(0))
 
 
-def test_a_sample_company_the_user_made_their_own_isnt_called_fictional(client, monkeypatch):
+def test_a_sample_company_the_user_made_their_own_isnt_called_fictional(client, monkeypatch, capsys):
     """UPG-4: the user turned the old demo company into their own: a new profile, and leads they added. Claude's note
     and the banner say only which sample leads it still holds (also the ones changed since), and the button removes
     those, not the company. With none left, Claude gets no note and the banner only offers to remove the marker."""
@@ -472,6 +472,8 @@ def test_a_sample_company_the_user_made_their_own_isnt_called_fictional(client, 
     assert list_companies_note(sample_id) == sample_cleanup.COMPANY_NOTE  # untouched: fictional, leave it alone
     assert f"{sample_cleanup.BANNER_TEXT} Nothing is ever sent to them." in sample_banner(client, sample_id)
     assert "Delete sample company" in sample_banner(client, sample_id)
+    untouched = f'title="{sample_cleanup.BANNER_TEXT} Nothing is ever sent to them.">Sample</a>'
+    assert untouched in html.unescape(client.get("/companies").text)  # the Registration board's pill
     later(monkeypatch)
     repo.update_company(sample_id, {"name": "Gulf Executive Cars", "website": "https://gulfexec.example"})
     repo.upsert_lead(sample_id, LeadIn(full_name="Pat Real", source="claude",
@@ -486,6 +488,11 @@ def test_a_sample_company_the_user_made_their_own_isnt_called_fictional(client, 
     page = html.unescape(client.get(f"/c/{sample_id}/sample").text)  # the removal page the button opens
     assert f"{text} Nothing is removed until you click" in page and "Remove 12 sample leads" in page
     assert "fictional" not in page
+    board = html.unescape(client.get("/companies").text)
+    assert f'title="{text}">Sample</a>' in board and "fictional" not in board
+    cli.main(["remove-sample", "--dry-run"])
+    out = capsys.readouterr().out
+    assert text in out and "fictional" not in out
     for lead in repo.list_leads(sample_id, limit=100)[0]:
         if is_sample_lead(lead):
             repo.delete_lead(lead.id)

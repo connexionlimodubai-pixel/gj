@@ -350,6 +350,25 @@ def test_another_accounts_data_folder_is_left_alone_and_a_failed_chmod_never_sto
 
 
 @posix_only
+def test_a_data_folder_set_to_the_home_folder_keeps_its_permissions(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    me = tmp_path / "me"
+    me.mkdir()
+    for folder in (me, tmp_path):
+        folder.chmod(0o755)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: me))
+    monkeypatch.delenv("OPENBERRY_ENV_FILE")
+    for home in (me, tmp_path):  # OPENBERRY_HOME=~, or a folder above it
+        monkeypatch.setattr(config, "OPENBERRY_HOME", home)
+        config.private_files()
+        assert mode(me) == 0o755 and mode(home) == 0o755
+    monkeypatch.setattr(config, "OPENBERRY_HOME", me / ".openberry")
+    (me / ".openberry").mkdir(mode=0o755)
+    config.private_files()
+    assert mode(me / ".openberry") == 0o700 and mode(me) == 0o755
+
+
+@posix_only
 def test_an_existing_folder_keeps_its_permissions(tmp_path: Path, settings: Settings) -> None:
     shared = tmp_path / "shared"
     shared.mkdir(mode=0o755)

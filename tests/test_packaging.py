@@ -478,7 +478,8 @@ def test_smoke_test_passes_against_the_app(tmp_path: Path, capsys: pytest.Captur
     app = source_app(tmp_path / "bin" / "openberry")  # the name /help shows for a source install
     assert smoke.main([str(app), str(app)]) == 0
     out = capsys.readouterr().out
-    for check in ("version: openberry " + openberry.__version__, "demo:", "serve: served /c/1, /help",
+    for check in ("version: openberry " + openberry.__version__,
+                  "serve: registered a company and a lead, served /c/1, /c/1/leads/1, /help",
                   "mcp: protocol 2025-06-18, 25 tools, list_companies sees 1 company", "app --smoke: --smoke passed"):
         assert check in out
     assert "Smoke test passed" in out
@@ -522,7 +523,7 @@ def test_app_check_fails_without_proof_and_shows_the_log(tmp_path: Path) -> None
 
 def test_checks_include_the_app_only_when_given(tmp_path: Path) -> None:
     names = [name for name, _ in smoke.checks_for(tmp_path / "cli", None, tmp_path / "h", tmp_path)]
-    assert names == ["version", "demo", "serve", "mcp"]
+    assert names == ["version", "serve", "mcp"]
     names = [name for name, _ in smoke.checks_for(tmp_path / "cli", tmp_path / "app", tmp_path / "h", tmp_path)]
     assert names[-1] == "app --smoke"
 

@@ -53,12 +53,6 @@ def post(client: TestClient, path: str, data: dict[str, Any] | None = None, *, p
     return client.post(path, data=payload, follow_redirects=False, **kwargs)
 
 
-def demo(client: TestClient) -> int:
-    resp = post(client, "/demo")
-    assert resp.status_code == 303
-    return int(resp.headers["location"].rsplit("/", 1)[-1])
-
-
 def flat_values(company: CompanyIn) -> dict[str, Any]:
     """The registration form as the browser would submit it for this profile."""
     return {k: v for k, v in forms.company_to_values(company).items() if v not in ("", [])}
@@ -137,8 +131,8 @@ def test_pages_render_on_empty_database(client):
     assert client.get("/static/app.css").status_code == 200
 
 
-def test_every_page_renders_with_demo_data(client):
-    company_id = demo(client)
+def test_every_page_renders_with_sample_data(client, sample_company):
+    company_id = sample_company
     leads, _ = repo.list_leads(company_id, limit=100)
     person = next(lead for lead in leads if lead.kind == "person")
     account = next(lead for lead in leads if lead.kind == "account")
@@ -156,7 +150,7 @@ def test_every_page_renders_with_demo_data(client):
     assert f"read company {company_id}&#39;s profile" in dashboard
     assert "Signals, last 14 days" in dashboard and "View as table" in dashboard
     board = client.get("/companies").text
-    assert "Demo: Desert Line Chauffeurs" in board and "50 qualified corporate leads" in board
+    assert "Sample: Desert Line Chauffeurs" in board and "50 qualified corporate leads" in board
     account_page = client.get(f"{base}/leads/{account.id}").text
     assert "Ask Claude to find the decision-maker" in account_page
 
@@ -501,8 +495,8 @@ def test_csv_import_and_export(client, company):
     assert "Import failed: no recognisable columns" in client.get(bad.headers["location"]).text
 
 
-def test_leads_signals_and_outreach_filters(client):
-    company_id = demo(client)
+def test_leads_signals_and_outreach_filters(client, sample_company):
+    company_id = sample_company
     base = f"/c/{company_id}"
     hot = client.get(f"{base}/leads?tier=hot").text
     assert "Aisha Rahman" in hot and "Yousef Karim" not in hot
@@ -1212,10 +1206,8 @@ def test_dashboard_scan_that_found_no_sources_is_not_reported_as_fine(client, co
     assert "Last scan: No sources configured. No signal source is configured for this company." in page
 
 
-def test_people_tile_counts_people_added_this_week():
-    from openberry.seed import seed_demo
-
-    stats = repo.company_stats(seed_demo())
+def test_people_tile_counts_people_added_this_week(sample_company):
+    stats = repo.company_stats(sample_company)
     assert stats["accounts"] > 0 and stats["new_leads_7d"] == stats["people"] + stats["accounts"]
     assert stats["new_people_7d"] == stats["people"]  # accounts aren't counted under the People tile
     assert pages.kpi_tiles(1, stats)[0]["sub"] == f"{stats['people']} added in 7 days"

@@ -53,3 +53,11 @@ def company():
         },
         "outreach": {"sender_name": "Sam", "calendar_link": "https://cal.example/sam"},
     }))
+
+
+@pytest.fixture
+def sample_company() -> int:
+    """The test-only sample company (tests/sample_data.py): 10 people, 3 accounts, signals and 2 drafts. Its id."""
+    from sample_data import seed_sample_company
+
+    return seed_sample_company()

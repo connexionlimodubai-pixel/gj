@@ -1,13 +1,15 @@
-# Builds the OpenBerry desktop app for Windows, macOS (Apple silicon) and Linux, checks each build
-# end to end (packaging/smoke_test.py) and keeps the downloads for 14 days. A pushed tag vX.Y.Z also
-# publishes them as a GitHub Release. See docs/DESKTOP.md.
-# Every action runs on Node 24 (GitHub retired Node 20 for actions in 2026).
+# Runs the tests on Windows, macOS and Linux, builds the OpenBerry desktop app on each, checks each build end to end
+# (packaging/smoke_test.py) and keeps the downloads for 14 days. A pushed tag vX.Y.Z also publishes them as a GitHub
+# Release: a draft first, with the three downloads and SHA256SUMS, published as the latest release once complete, and
+# then the three .../releases/latest/download/... links are checked. See docs/DESKTOP.md ("Releasing").
+# Every action is pinned to a commit (the comment names its version; Dependabot proposes updates) and runs on Node 24.
 name: Desktop app
 
 on:
   pull_request:
     paths:
       - "src/**"
+      - "tests/**"
       - "packaging/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -18,6 +20,7 @@ on:
     tags: ["v*"]
     paths:
       - "src/**"
+      - "tests/**"
       - "packaging/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -53,20 +56,26 @@ jobs:
       run:
         shell: bash # Git Bash on Windows: one script for every runner
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           python-version: "3.12"
           enable-cache: true
 
       - name: Install OpenBerry and PyInstaller
-        run: |
-          uv sync --locked --extra dev ${{ matrix.extras }}
-          uv pip install "pyinstaller>=6.22,<7" "pyinstaller-hooks-contrib>=2026.8"
+        # PyInstaller comes from uv.lock too (the "build" dependency group).
+        run: uv sync --locked --extra dev ${{ matrix.extras }} --group build
+
+      - name: Lint
+        if: runner.os == 'Linux'
+        run: uvx ruff@0.16.8 check src tests packaging
+
+      - name: Install Chromium for the browser tests
+        if: runner.os == 'Linux'
+        run: uv run --no-sync playwright install --with-deps chromium
 
       - name: Run the tests
-        if: runner.os == 'Linux'
         run: uv run --no-sync pytest -q
 
       - name: Build the app
@@ -83,7 +92,7 @@ jobs:
         run: uv run --no-sync python packaging/smoke_test.py "$CLI" "$GUI"
 
       - name: Keep the download
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: OpenBerry-${{ steps.build.outputs.version }}-${{ matrix.name }}
           path: ${{ steps.build.outputs.archive }}
@@ -98,15 +107,57 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: OpenBerry-*
           path: downloads
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: downloads/*
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+      - name: Check the downloads and write their checksums
+        working-directory: downloads
+        run: |
+          for name in OpenBerry-windows-x64.zip OpenBerry-macos-arm64.zip OpenBerry-linux-x64.tar.gz; do
+            test -s "$name" || { echo "::error::$name is missing"; exit 1; }
+          done
+          sha256sum OpenBerry-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release as a draft
+        # A draft is invisible to "latest": the download links keep pointing at the previous release until this one
+        # has every file. A draft an earlier run of this job left is replaced; a published release for this tag (one
+        # made in GitHub's web page, say) stops the job: see docs/DESKTOP.md, "Releasing".
+        run: |
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
+            gh release delete "$TAG" --yes
+          fi
+          gh release create "$TAG" downloads/* --draft --verify-tag --title "OpenBerry $TAG" --generate-notes
+
+      - name: Publish it as the latest release
+        run: gh release edit "$TAG" --draft=false --latest
+
+  check-downloads:
+    name: Check the download links
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: The three latest-release links answer 200
+        env:
+          LATEST: ${{ github.server_url }}/${{ github.repository }}/releases/latest/download
+        run: |
+          failed=0
+          for name in OpenBerry-windows-x64.zip OpenBerry-macos-arm64.zip OpenBerry-linux-x64.tar.gz; do
+            code=000
+            for attempt in 1 2 3 4 5 6; do
+              code=$(curl -sSL -o /dev/null -w '%{http_code}' "$LATEST/$name" || true)
+              [ "$code" = 200 ] && break
+              sleep 10
+            done
+            echo "$name: $code"
+            [ "$code" = 200 ] || { echo "::error::$LATEST/$name answered $code"; failed=1; }
+          done
+          exit $failed

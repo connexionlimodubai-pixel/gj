@@ -42,7 +42,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
-from . import __version__, config, leads_csv, mailer, outreach, repo, services
+from . import __version__, config, db, leads_csv, mailer, outreach, repo, sample_cleanup, services
 from .collectors import COLLECTORS
 from .collectors.base import find_terms
 from .config import Settings, current_base_url, get_settings
@@ -631,9 +631,12 @@ def list_companies() -> dict[str, Any]:
 
     Each company is a separate workspace with its own offer, ICP, signals, leads and outreach.
     Returns id, name, website, status (active/paused), lead and hot-lead counts, last scan time
-    and a dashboard link per company.
+    and a dashboard link per company. The fictional sample company an older version created has a
+    "note" saying so: leave it alone.
     """
-    rows = [_company_row(c) for c in repo.list_companies()]
+    samples = sample_cleanup.sample_company_ids()
+    rows = [_company_row(c) | ({"note": sample_cleanup.COMPANY_NOTE} if c.id in samples else {})
+            for c in repo.list_companies()]
     out: dict[str, Any] = {"companies": rows, "dashboard": _base_url()}
     if not rows:
         out["hint"] = "No company registered yet. Use the onboard_company prompt or call register_company."
@@ -2265,9 +2268,22 @@ _PROMPTS: list[tuple[Callable[..., str], str]] = [
 ]
 
 
+class OpenBerryServer(MCPServer):
+    """The MCP server, checking the database before each tool call: a file this version can't open (written by a
+    newer OpenBerry, or an upgrade that couldn't save a copy first) is answered as a tool error that says so, which
+    Claude can pass on, instead of the SDK's bare "Error executing tool"."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
+        try:
+            await asyncio.to_thread(db.prepare)
+        except db.DatabaseProblem as exc:
+            raise ToolError(str(exc)) from exc
+        return await super().call_tool(name, arguments, context)
+
+
 def build_server() -> MCPServer:
     """The OpenBerry MCP server with every tool, resource and prompt registered."""
-    server: MCPServer = MCPServer(
+    server: MCPServer = OpenBerryServer(
         "openberry",
         title="OpenBerry",
         description="Open-source intent-signal lead generation: companies, scored leads, signals and outreach drafts.",
@@ -2346,10 +2362,13 @@ class MCPHTTPEndpoint:
     """
 
     def __init__(self, server: MCPServer, settings: Settings) -> None:
+        from .web.ratelimit import Limits
+
         self.server = server
         self.settings = settings
         self.security = transport_security(settings)
         self._manager: StreamableHTTPSessionManager | None = None
+        self._limits = Limits()  # used when the app has none of its own (app.state.limits)
 
     @asynccontextmanager
     async def lifespan(self) -> AsyncIterator[None]:
@@ -2363,8 +2382,30 @@ class MCPHTTPEndpoint:
             finally:
                 self._manager = None
 
+    def _throttled(self, scope: Scope, authorization: str) -> Response | None:
+        """429 for an address that sent 20 wrong API tokens in 10 minutes (the dashboard's /api counts too); a wrong
+        token sent now counts. None when the request may go on to check_auth."""
+        from starlette.requests import Request
+
+        from .web.auth import sent_token, too_many_tokens
+        from .web.ratelimit import client_key, retry_header
+
+        token = sent_token(authorization)
+        if not self.settings.api_token or not token:
+            return None
+        app_limits = getattr(getattr(scope.get("app"), "state", None), "limits", None)
+        failures = (app_limits or self._limits).token_failures
+        client = client_key(Request(scope))
+        if wait := failures.retry_after(client):
+            return JSONResponse({"error": "too_many_attempts", "message": too_many_tokens(wait)}, status_code=429,
+                                headers=retry_header(wait))
+        if not hmac.compare_digest(token.encode(), self.settings.api_token.encode()):
+            failures.hit(client)
+        return None
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        refusal = check_auth(self.settings, Headers(scope=scope).get("authorization", ""))
+        authorization = Headers(scope=scope).get("authorization", "")
+        refusal = self._throttled(scope, authorization) or check_auth(self.settings, authorization)
         if refusal is None and self._manager is None:
             refusal = JSONResponse({"error": "unavailable",
                                     "message": "The MCP endpoint is not running (app lifespan hooks not started)."},

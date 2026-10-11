@@ -512,22 +512,22 @@ NOT_EVEN_FLAGGED = [  # booking replies that don't even look like an opt-out
 ]
 
 
-@pytest.mark.parametrize("text", SURE_OPT_OUTS)
+@pytest.mark.parametrize("text", SURE_OPT_OUTS, ids=lambda text: text[:24])  # short ids: Arabic is escaped
 def test_a_reply_that_says_only_that_is_an_opt_out(text):
     assert mailer.read_opt_out(text)[0] == mailer.SURE, text
 
 
-@pytest.mark.parametrize("text", FLAGGED_OPT_OUTS)
+@pytest.mark.parametrize("text", FLAGGED_OPT_OUTS, ids=lambda text: text[:24])  # short ids: Arabic is escaped
 def test_an_opt_out_with_more_around_it_is_flagged_for_the_user(text):
     assert mailer.read_opt_out(text)[0] == mailer.MAYBE, text
 
 
-@pytest.mark.parametrize("text", BOOKING_REPLIES)
+@pytest.mark.parametrize("text", BOOKING_REPLIES, ids=lambda text: text[:24])  # short ids: Arabic is escaped
 def test_a_booking_reply_is_never_an_automatic_opt_out(text):
     assert mailer.read_opt_out(text)[0] != mailer.SURE, text
 
 
-@pytest.mark.parametrize("text", NOT_EVEN_FLAGGED)
+@pytest.mark.parametrize("text", NOT_EVEN_FLAGGED, ids=lambda text: text[:24])  # short ids: Arabic is escaped
 def test_a_booking_reply_doesnt_even_look_like_an_opt_out(text):
     assert mailer.read_opt_out(text) == ("", ""), text
 

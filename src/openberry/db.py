@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import logging
+import os
 import sqlite3
 import threading
 import time
@@ -9,7 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from .config import get_settings
+from .config import get_settings, make_private, private_dir
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -291,11 +295,177 @@ def _keep_email_events(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS ix_email_events_company ON email_events(company_id, created_at)")
 
 
+log = logging.getLogger(__name__)
+
+
+class DatabaseProblem(RuntimeError):
+    """The data file can't be opened as it is. The message says why and what to do, in plain words: the desktop app
+    shows it in a window, the dashboard on its error page, Claude as a tool error, and the command line prints it."""
+
+
+class DatabaseTooNew(DatabaseProblem):
+    """The file was written by a newer OpenBerry: this version would damage it (0.1.1 turned a v5 file into v3)."""
+
+    def __init__(self, version: int) -> None:
+        self.version = version
+        super().__init__(f"This data was saved by a newer OpenBerry (database v{version}). Open the newer app, "
+                         "or restore a backup.")
+
+
+class UpgradeBackupFailed(DatabaseProblem):
+    """The copy taken before a schema upgrade failed (a full disk, a folder that can't be written): nothing changed."""
+
+    def __init__(self, folder: Path, reason: object) -> None:
+        super().__init__(f"OpenBerry has to update your data for this version, but it could not save a copy of it "
+                         f"first in {folder} ({reason}). Nothing was changed. Free some disk space, or check that you "
+                         "can write to that folder, then open OpenBerry again.")
+
+
+# --------------------------------------------------------------------------------------
+# Database errors in plain words (the dashboard's error page, the desktop app, the logs)
+# --------------------------------------------------------------------------------------
+
+DISK_FULL = "Your disk is full, so OpenBerry can't save anything. Free some space, then try again."
+DAMAGED = "OpenBerry's data file is damaged: restore a backup (Your data)."
+BUSY = "The database is busy, try again in a moment."
+DAMAGED_WORDS = ("malformed", "not a database", "disk i/o error")
+
+
+def log_location() -> str:
+    """Where this process's log goes: the desktop app's log file, else the terminal or service that runs it."""
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            return handler.baseFilename
+    return "the window or terminal where OpenBerry runs"
+
+
+def is_disk_full(exc: BaseException | None) -> bool:
+    text = str(exc).lower()
+    return (isinstance(exc, OSError) and exc.errno == errno.ENOSPC) or (
+        isinstance(exc, (OSError, sqlite3.Error)) and ("disk is full" in text or "no space left" in text))
+
+
+def problem_text(exc: BaseException, path: Path | None = None) -> str | None:
+    """A database error in plain words, naming the data folder and the log file; None for any other error."""
+    text = str(exc).lower()
+    code = str(getattr(exc, "sqlite_errorname", "") or "")
+    if is_disk_full(exc) or code.startswith("SQLITE_FULL"):
+        base = DISK_FULL
+    elif isinstance(exc, sqlite3.DatabaseError) and (code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB", "SQLITE_IOERR"))
+                                                     or any(w in text for w in DAMAGED_WORDS)):
+        base = DAMAGED
+    elif isinstance(exc, sqlite3.OperationalError) and (code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED"))
+                                                        or "locked" in text or "busy" in text):
+        base = BUSY
+    else:
+        return None
+    return f"{base} {_where(path)}"
+
+
+def _where(path: Path | None = None) -> str:
+    return f"Your data is in {Path(path or db_path()).resolve().parent}. Details are in {log_location()}."
+
+
+def damaged_text(path: Path | None = None) -> str:
+    return f"{DAMAGED} {_where(path)}"
+
+
+_reported: set[str] = set()
+
+
+def report_once(logger: logging.Logger, what: str, exc: BaseException) -> None:
+    """Log a database problem (a full disk, a damaged or too new file) once, with its traceback, rather than on every
+    scheduler tick or request until it is fixed. Repeats go to the debug level."""
+    key = f"{type(exc).__name__}: {exc}"
+    if key in _reported:
+        logger.debug("%s: %s (again)", what, key)
+        return
+    _reported.add(key)
+    logger.error("%s: %s", what, exc, exc_info=exc)
+
+
+def forget_reported() -> None:
+    """Things work again: log the next problem, even one seen before."""
+    _reported.clear()
+
+
+_checked: dict[str, str] = {}
+
+
+def quick_check(path: Path | None = None) -> str:
+    """PRAGMA quick_check, once per process and file: "" when the file is sound (or doesn't exist yet), else what
+    SQLite found wrong."""
+    path = Path(path or db_path())
+    if str(path) == ":memory:" or not path.is_file():
+        return ""
+    key = str(path.resolve())
+    if key not in _checked:
+        try:
+            with contextlib.closing(sqlite3.connect(path, timeout=30)) as conn:
+                rows = [str(r[0]) for r in conn.execute("PRAGMA quick_check(5)")]
+            _checked[key] = "" if rows == ["ok"] else "; ".join(rows)
+        except sqlite3.DatabaseError as exc:
+            _checked[key] = str(exc)
+    return _checked[key]
+
+
+def backup_to(dest: Path, source: Path | None = None) -> Path:
+    """Copy the database (`source`, else the configured one) to `dest` with SQLite's backup API.
+
+    The copy is consistent and complete: it holds what is still in the -wal file, and other connections keep reading
+    and writing while it is made. It is written under a temporary name first, so `dest` is either a whole copy or
+    absent. Returns `dest`.
+    """
+    source = Path(source or db_path())
+    dest = Path(dest)
+    if not source.is_file():
+        raise FileNotFoundError(f"there is no database at {source}")
+    private_dir(dest.parent)
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}-{threading.get_ident()}.tmp")
+    try:
+        with contextlib.closing(sqlite3.connect(source, timeout=30)) as src, \
+                contextlib.closing(sqlite3.connect(tmp)) as out:
+            src.execute("PRAGMA busy_timeout=30000")
+            src.backup(out)
+        make_private(tmp)  # a copy of the same personal data
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    return dest
+
+
+def file_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _before_upgrade(conn: sqlite3.Connection, path: Path) -> None:
+    """Refuse a file a newer version wrote, and copy a file an older version wrote before anything in it changes.
+
+    Runs before executescript(SCHEMA), which creates tables outside the migration's transaction, and writes nothing.
+    """
+    version = file_version(conn)
+    if version > SCHEMA_VERSION:
+        raise DatabaseTooNew(version)
+    if 0 < version < SCHEMA_VERSION and str(path) != ":memory:":
+        from . import backups  # it imports this module
+
+        try:
+            copy = backups.snapshot(backups.PRE_UPGRADE, source=path, version=version)
+        except (OSError, sqlite3.Error) as exc:
+            raise UpgradeBackupFailed(backups.folder(path), exc) from exc
+        log.info("upgrading the data from database v%s to v%s; a copy of it was saved first: %s", version,
+                 SCHEMA_VERSION, copy)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Bring a database written by an older version up to SCHEMA (CREATE IF NOT EXISTS adds no columns)."""
     conn.execute("BEGIN IMMEDIATE")  # two processes starting at once must not both add the column
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:  # a newer version upgraded it since _before_upgrade looked
+            raise DatabaseTooNew(version)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(leads)")}
         if "alerted_at" not in columns:
             conn.execute("ALTER TABLE leads ADD COLUMN alerted_at TEXT")
@@ -366,12 +536,15 @@ def _use_wal(conn: sqlite3.Connection, timeout: float = 30.0) -> None:
 def init_db(path: Path | None = None) -> Path:
     path = path or db_path()
     if str(path) != ":memory:":
-        path.parent.mkdir(parents=True, exist_ok=True)
+        private_dir(path.parent)
     conn = sqlite3.connect(path, timeout=30)  # another process may be upgrading the same file
     try:
         _use_wal(conn)
+        _before_upgrade(conn, path)
         conn.executescript(SCHEMA)
         _migrate(conn)
+        if str(path) != ":memory:":  # lead personal data and inbox replies: for this user only
+            make_private(path, *(path.with_name(path.name + suffix) for suffix in ("-wal", "-shm")))
     finally:
         conn.close()
     return path
@@ -381,6 +554,19 @@ _initialized: set[str] = set()
 _init_lock = threading.Lock()  # one thread per process creates and upgrades the file; the others wait for it
 
 
+def prepare(path: Path | None = None) -> Path:
+    """Create or upgrade the database once per process (init_db), before its first connection. Raises a
+    DatabaseProblem when the file can't be used; it is tried again on the next connection."""
+    path = path or db_path()
+    key = str(path.resolve()) if str(path) != ":memory:" else ":memory:"
+    if key not in _initialized:
+        with _init_lock:
+            if key not in _initialized:
+                init_db(path)
+                _initialized.add(key)
+    return path
+
+
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     """Open a connection, commit on success, roll back on error.
@@ -388,13 +574,7 @@ def connect() -> Iterator[sqlite3.Connection]:
     A fresh connection per unit of work keeps us thread-safe across FastAPI's
     threadpool, the scheduler task, and the MCP server process.
     """
-    path = db_path()
-    key = str(path.resolve()) if str(path) != ":memory:" else ":memory:"
-    if key not in _initialized:
-        with _init_lock:
-            if key not in _initialized:
-                init_db(path)
-                _initialized.add(key)
+    path = prepare()
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -410,5 +590,6 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 
 def reset_init_cache() -> None:
-    """Forget which DB files were initialised (tests switch DB paths)."""
+    """Forget which DB files were initialised and checked (tests switch DB paths; a restore swaps the file)."""
     _initialized.clear()
+    _checked.clear()

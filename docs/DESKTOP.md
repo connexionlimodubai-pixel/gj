@@ -7,8 +7,8 @@ system-wide. Your data stays on your computer.
 - [Download](#download)
 - Install it on [Windows](#windows), a [Mac](#mac) or [Linux](#linux)
 - [Connect Claude Desktop](#connect-claude-desktop)
-- [Your data and settings](#your-data-and-settings)
-- [Updating](#updating) and [closing the app](#closing-the-app)
+- [Your data and settings](#your-data-and-settings), [backups](#back-up-your-data) and [restoring one](#restore-a-backup)
+- [Updating](#updating), [closing the app](#closing-the-app) and [uninstalling it](#uninstall)
 - [If something goes wrong](#if-something-goes-wrong)
 - For developers: [building it yourself](#building-it-yourself) and [releasing a new version](#releasing-a-new-version)
 
@@ -24,6 +24,8 @@ release, and under **Assets** download the file for your computer:
 | Linux, 64-bit | `OpenBerry-linux-x64.tar.gz` |
 
 The file names are the same for every version (version 0.1.0 used names like `OpenBerry-0.1.0-windows-x64.zip`); the release title says which version you have.
+`SHA256SUMS` in the same list holds each file's checksum. To check a download on Windows, run
+`certutil -hashfile OpenBerry-windows-x64.zip SHA256` in a terminal and compare; on a Mac or Linux, `shasum -a 256 <file>`.
 
 There is no download for Macs with an Intel processor yet. To check which kind you have, open the
 Apple menu and click **About This Mac**: "Chip: Apple M…" means Apple silicon.
@@ -39,7 +41,9 @@ GitHub wraps each of these downloads in an extra zip file. Unzip it first to get
 ## Windows
 
 1. **Unzip it.** Right-click the downloaded `.zip` file, choose **Extract All…**, and pick a folder
-   where the app can stay, such as your **Documents** folder. Don't run the app from inside the zip file.
+   where the app can stay. We suggest `%LOCALAPPDATA%\Programs` (type it in the box, Windows turns it into
+   `C:\Users\<you>\AppData\Local\Programs`). Avoid **Documents** and **Desktop**: OneDrive often syncs
+   them, and moves or locks the app's files. Don't run the app from inside the zip file.
 2. **Open it.** Open the new `OpenBerry` folder and double-click **OpenBerry** (`OpenBerry.exe`).
 3. **The first time**, Windows may show a blue box saying *"Windows protected your PC"*. Click
    **More info**, then **Run anyway**. Windows shows this box because the app isn't code-signed: a signing
@@ -83,8 +87,8 @@ The window uses Microsoft Edge WebView2, which Windows 10 and 11 already include
 
 ## Using the app
 
-- The first time, choose **Load demo data** to look around with made-up leads, or **Register your company**
-  to start for real.
+- The first time, choose **Register your company** and fill in the form, or [connect Claude](#connect-claude-desktop)
+  and ask it to interview you and register your company.
 - The dashboard runs on your computer at `http://127.0.0.1:8000`, or at the next free number up to 8099
   if 8000 is taken. Only your own computer can open it.
 - If you open the app while it is already running, it doesn't start a second copy. On a Mac it brings
@@ -124,7 +128,7 @@ The settings look like this. The paths are examples, and your own are in the **C
 }
 ```
 
-On Windows the command is like `C:\\Users\\you\\Documents\\OpenBerry\\openberry-cli.exe`: in this file every
+On Windows the command is like `C:\\Users\\you\\AppData\\Local\\Programs\\OpenBerry\\openberry-cli.exe`: in this file every
 `\` is written twice. The copied settings already do that for you.
 
 - **When OpenBerry is closed,** Claude can still use its tools: Claude starts `openberry-cli` in the
@@ -147,9 +151,11 @@ Everything OpenBerry stores is in a folder named `.openberry` in your home folde
 
 Inside the folder:
 
-- **`openberry.db`** holds all your companies, leads, signals and messages. To back up, copy this file while
-  OpenBerry is closed.
-- **`.env`** holds your settings and keys, if you have any (see below).
+- **`openberry.db`** holds all your companies, leads, signals, messages and email opt-outs. While OpenBerry or
+  Claude uses it, the newest changes are in `openberry.db-wal` next to it. [Back it up](#back-up-your-data) from the
+  app rather than copying it.
+- **`backups/`** holds the copies OpenBerry saves by itself (see [Back up your data](#back-up-your-data)).
+- **`.env`** holds your settings and keys, if you have any (see below), and your mailbox password.
 - **`logs/desktop.log`** records what the app did. Look here, or send it along, when something goes wrong.
 - **`webview/`** and **`desktop-secret-key`** keep you logged in to the window between runs.
 
@@ -173,18 +179,67 @@ in the same `.env` file and never shown again. Then turn on **Email sending** on
 out only while the app is open; close it and sending waits. Read [EMAIL_SENDING.md](EMAIL_SENDING.md) first: some
 providers, Hostinger for example, forbid email to people who did not opt in.
 
+## Back up your data
+
+- **Download backup:** open **Your data** in the menu and click **Download backup**. You get one file,
+  `openberry-backup-<date>.db`, with all your companies, leads, messages and email opt-outs, made safely while
+  OpenBerry runs. Keep it somewhere else too: another drive, a USB stick or cloud storage. Your settings and
+  passwords (`.env`) are not in it.
+- **Automatic backups:** while it is open, OpenBerry saves a copy in `.openberry/backups` every day, and keeps 7 days
+  and 4 weeks of them. It also saves one before an update changes your data, before you delete a company and before a
+  restore. **Your data** lists them, and each one can be downloaded there.
+- **From the command line:** `openberry-cli backup` saves a copy in the backups folder, and `openberry-cli backup
+  D:\Backups` saves it in that folder. It works while OpenBerry is open.
+- **By hand:** close OpenBerry **and** quit Claude Desktop (it keeps `openberry-cli` running), then copy the whole
+  `.openberry` folder, with every file in it: `openberry.db`, `openberry.db-wal` and `openberry.db-shm` if they are
+  there, and `.env`. Copying `openberry.db` alone while either is open can miss your latest changes.
+
+## Restore a backup
+
+Restoring replaces all your data with the backup's.
+
+1. Close OpenBerry, and quit Claude Desktop (right-click Claude's icon next to the clock, **Quit**; on a Mac,
+   **Claude → Quit Claude**).
+2. Open a terminal (on Windows, **Command Prompt**) and run the app's `openberry-cli` with `restore` and the backup
+   file. **Your data → Restore a backup** shows the exact line for your computer, for example:
+   ```
+   "C:\Users\you\AppData\Local\Programs\OpenBerry\openberry-cli.exe" restore "C:\Users\you\Downloads\openberry-backup-2026-10-11.db"
+   ```
+3. Open OpenBerry and Claude Desktop again.
+
+OpenBerry checks the backup first, and refuses one that is damaged or was saved by a newer version. It saves your
+current data in `backups/` before replacing it. Then it turns **email sending and AI agent sending off** for every
+company: emails sent after the backup was made are not in it, so they would go out a second time. Check the
+Outreach pages, then turn sending back on.
+
 ## Updating
 
-1. Close OpenBerry.
-2. Download the new version.
-3. Replace the old app with it:
+1. **Back up:** in OpenBerry, open **Your data** and click **Download backup**. Version 0.1.x has no Your data page:
+   after step 2, copy the whole `.openberry` folder instead ([by hand](#back-up-your-data)).
+2. Close OpenBerry, and **quit Claude Desktop** (right-click Claude's icon next to the clock, **Quit**; on a Mac,
+   **Claude → Quit Claude**). Claude Desktop keeps the old `openberry-cli` running in the background until you quit it.
+3. Download the new version.
+4. Replace the old app with it:
    - **Windows:** delete the old `OpenBerry` folder, then extract the new one in the same place.
    - **Mac:** drag the new OpenBerry into Applications and choose **Replace**.
    - **Linux:** extract the new version over the old one.
-4. The first time you open the new version, Windows or macOS asks you to confirm again, as when you installed it.
+5. Open the new version. The first time, Windows or macOS asks you to confirm again, as when you installed it.
+   If the new version stores data differently, it updates your data by itself, after saving a copy in
+   `.openberry/backups` (named `openberry-pre-v…`).
+6. Open Claude Desktop again.
 
 Your data in `.openberry` stays as it is. If you put the new version in a different place, copy the
 Claude Desktop settings again ([Connect Claude Desktop](#connect-claude-desktop)).
+
+**There is no going back to an older version** once a newer one has updated your data. From 0.2.0 on, an older
+version refuses to open it ("This data was saved by a newer OpenBerry"). Version 0.1.x doesn't check and can damage
+it, which is why step 2 quits Claude Desktop: it may still run the old `openberry-cli`. To go back anyway, put the
+backup from step 1 back first ([restore](#restore-a-backup), or copy the folder back by hand while everything is
+closed).
+
+**Upgrading from 0.1.x:** if you loaded the demo, open its company and click **Delete sample company** in the
+banner at the top. The next page shows what goes and what stays, and nothing is removed until you confirm.
+Its fictional people are never contacted in the meantime.
 
 ## Closing the app
 
@@ -196,9 +251,25 @@ If OpenBerry opened in your web browser instead of its own window (see below), c
 not stop it: it keeps running in the background. Restart your computer to stop it, or end **OpenBerry** in
 Task Manager (Windows: Ctrl+Shift+Esc).
 
+## Uninstall
+
+1. If you want to keep your data, open **Your data** and click **Download backup** first.
+2. Close OpenBerry, and quit Claude Desktop.
+3. Delete the app: on Windows the `OpenBerry` folder, on a Mac **OpenBerry** in Applications (drag it to the Trash),
+   on Linux its folder.
+4. Delete the `.openberry` folder in your home folder ([where it is](#your-data-and-settings)). It holds your data
+   and your mailbox password.
+5. In Claude Desktop, open **Settings → Developer → Edit Config**, remove the `"openberry": { … }` entry from
+   `claude_desktop_config.json` (and the comma before it, if there is one), save, and restart Claude Desktop.
+
 ## If something goes wrong
 
 - **The app doesn't open, or closes straight away.** Read `.openberry/logs/desktop.log`. The last lines say why.
+- **"This data was saved by a newer OpenBerry".** You opened an older version after a newer one updated your data.
+  Open the newer version, or [restore a backup](#restore-a-backup) made with this version.
+- **"OpenBerry's data file is damaged".** [Restore a backup](#restore-a-backup), for example the newest one in
+  `.openberry/backups`. The restore keeps the damaged file there too.
+- **"Your disk is full".** OpenBerry can't save anything until there is free space. Free some, then try again.
 - **Windows: it opens in the browser instead of a window.** Install the
   [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - **Windows: "Smart App Control blocked an app that may be unsafe".** There is no *Run anyway* button for
@@ -228,8 +299,7 @@ PyInstaller can't make a Windows app on a Mac, for example. You need [uv](https:
 copy of this repository.
 
 ```bash
-uv sync --extra desktop                     # on Linux: uv sync (no window there)
-uv pip install pyinstaller pyinstaller-hooks-contrib
+uv sync --extra desktop --group build       # on Linux: uv sync --group build (no window there)
 uv run --no-sync python packaging/build.py  # build the app and its download
 uv run --no-sync python packaging/smoke_test.py dist/OpenBerry/openberry-cli dist/OpenBerry/OpenBerry
 ```
@@ -244,6 +314,7 @@ What the build makes in `dist/`:
 | The app | `OpenBerry/OpenBerry.exe` | `OpenBerry.app` | `OpenBerry/OpenBerry` |
 | Command line (Claude Desktop runs `openberry-cli mcp`) | `OpenBerry/openberry-cli.exe` | `OpenBerry.app/Contents/MacOS/openberry-cli` | `OpenBerry/openberry-cli` |
 | The download | `OpenBerry-windows-x64.zip` | `OpenBerry-macos-arm64.zip` | `OpenBerry-linux-x64.tar.gz` |
+| Licenses | `OpenBerry/LICENSE.txt`, `OpenBerry/THIRD_PARTY_NOTICES.txt` | `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt` next to `OpenBerry.app` in the download (`licenses/` in `dist/`) | as on Windows |
 
 How it fits together:
 
@@ -251,21 +322,26 @@ How it fits together:
   `packaging/launcher.py`, and they share the `_internal` folder:
   - `OpenBerry` has no console.
   - `openberry-cli` has a console, for Claude Desktop's stdio and for every `openberry` command
-    (`openberry-cli serve`, `openberry-cli demo`, …).
+    (`openberry-cli serve`, `openberry-cli scan`, …).
 
   Both run `openberry.desktop.main`. On a Mac the spec wraps the folder into `OpenBerry.app`
   (`io.openberry.desktop`), with both executables in `Contents/MacOS`. On Linux it leaves out pywebview.
+  It leaves out Python's `readline` and `curses` modules everywhere: on Linux `readline` would bring
+  GNU Readline (GPL-3.0) into the download.
 - **`packaging/build.py`** runs PyInstaller, then packs the download. On a Mac it uses `ditto`, which keeps
-  the app's symlinks and signature. Its options:
+  the app's symlinks and signature. Every download holds `LICENSE.txt` (OpenBerry's MIT license) and
+  `THIRD_PARTY_NOTICES.txt`: the licenses of Python, OpenSSL, SQLite, the PyInstaller bootloader, the WebView2
+  SDK (Windows) and every Python package the app bundles, read from the build's environment (installed from
+  `uv.lock`). On a Mac they sit next to `OpenBerry.app`: files added inside it would break its signature. Its options:
   - `--skip-build` only repacks.
   - `--no-archive` only builds.
   - `--release-tag vX.Y.Z` checks the version.
 - **`packaging/smoke_test.py`** checks a build with a temporary data folder:
   1. `--version`
-  2. `demo`
-  3. `serve`: health check, the demo dashboard, the Connect Claude page and a static file.
-  4. An MCP handshake over stdio with `tools/list` (25 tools) and a tool call.
-  5. `OpenBerry --smoke`: the app starts its server, checks it and stops, without a window.
+  2. `serve`: health check, then it registers a company and a lead through the JSON API and opens the dashboard,
+     the lead's page, the Connect Claude page and a static file.
+  3. An MCP handshake over stdio with `tools/list` (25 tools) and a tool call that sees that company.
+  4. `OpenBerry --smoke`: the app starts its server, checks it and stops, without a window.
 
   It exits with an error and says what broke.
 - **`packaging/icons/`** holds the app icons. `packaging/make_icons.py` makes them from the dashboard's logo.
@@ -275,6 +351,9 @@ To run the app from source instead, use `uv run openberry desktop`, after `uv sy
 
 ## Releasing a new version
 
+Push a tag, and only a tag. Never create the release in GitHub's web page: a release made there has no downloads,
+becomes "Latest" at once, and every download link in this guide and the README then answers 404.
+
 1. Set the same new version in `src/openberry/__init__.py` (`__version__`) and in `pyproject.toml`. Then run
    `uv lock` and merge the change into `main`.
 2. Tag the release and push the tag:
@@ -283,14 +362,29 @@ To run the app from source instead, use `uv run openberry desktop`, after `uv sy
    git push origin v0.2.0
    ```
 3. The **Desktop app** workflow (`.github/workflows/desktop.yml`) then:
-   1. Builds the app on Windows, macOS (Apple silicon) and Linux.
+   1. Runs the tests and builds the app on Windows, macOS (Apple silicon) and Linux.
    2. Smoke-tests each build.
-   3. Attaches the three downloads to a GitHub Release named after the tag, with notes generated from the merged changes.
+   3. Creates a draft release named "OpenBerry v0.2.0" with the three downloads, `SHA256SUMS` (their checksums)
+      and notes generated from the merged changes. A draft is invisible to the download links.
+   4. Publishes the draft as the latest release, once it holds every file.
+   5. Checks that the three `releases/latest/download/...` links answer 200.
 
-   If the tag doesn't match the version in the code, the build stops before anything is published.
+   If the tag doesn't match the version in the code, or a test or a build fails, nothing is published.
 
-Pull requests and pushes to `main` that change the app run the same build and smoke test. Their downloads stay
+Pull requests and pushes to `main` that change the app run the same tests, build and smoke test. Their downloads stay
 under the run's **Artifacts** for 14 days.
+
+**If a release goes wrong:**
+- *A build or a test failed:* nothing was published. Fix the problem on `main`, then move the tag to the fixed
+  commit and push it again: `git tag -f v0.2.0 && git push -f origin v0.2.0`.
+- *The workflow stopped at "Create the release as a draft" because the release exists:* someone created it in the
+  web page. Delete that release (keep the tag): `gh release delete v0.2.0 -R connexionlimodubai-pixel/gj`, then
+  re-run the failed jobs from the workflow run's page. A draft an earlier run left is replaced by itself.
+- *"Check the download links" failed:* open the release. If a file is missing, delete the release (keep the tag) and
+  re-run the failed jobs. If GitHub was only slow, re-run that job.
+- *The download links answer 404 after all:* another release without files is marked "Latest". Delete it
+  (`gh release delete <tag> --cleanup-tag`), or open the last good release, choose **Edit** and tick
+  **Set as the latest release**.
 
 **Not done yet:**
 - Code signing (Windows) and notarisation (macOS). Until then, people see the warnings described above.

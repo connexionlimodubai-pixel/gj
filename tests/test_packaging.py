@@ -46,6 +46,7 @@ def _load(name: str) -> ModuleType:
 launcher = _load("launcher")
 build = _load("build")
 smoke = _load("smoke_test")
+docker_check = _load("docker_check")
 
 
 def script(path: Path, body: str) -> Path:
@@ -209,6 +210,12 @@ def test_spec_uses_the_platforms_icon(specs: dict[str, Any], platform: str, icon
             assert Path(exe.kwargs["icon"]) == PACKAGING / "icons" / icon and Path(exe.kwargs["icon"]).is_file()
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_spec_leaves_out_gnu_readline_and_curses(specs: dict[str, Any], platform: str) -> None:
+    """Python's readline module links GNU Readline (GPL-3.0) on Linux: it must not be in any download."""
+    assert {"readline", "_curses", "curses"} <= set(calls_of(specs[platform], "Analysis")[0].kwargs["excludes"])
+
+
 def test_spec_makes_a_mac_app_bundle_that_is_a_normal_app(specs: dict[str, Any]) -> None:
     (bundle,) = calls_of(specs["darwin"], "BUNDLE")
     (collect,) = calls_of(specs["darwin"], "COLLECT")
@@ -293,6 +300,88 @@ def fake_app(folder: Path) -> Path:
     return folder
 
 
+def test_build_puts_the_license_files_in_every_download(built: tuple[Path, Path]) -> None:
+    dist, output = built
+    assert build.main(["--skip-build", "--dist", str(dist)]) == 0
+    archive = Path(github_outputs(output)["archive"])
+    if archive.name.endswith(".tar.gz"):
+        with tarfile.open(archive) as tar:
+            names = set(tar.getnames())
+    else:
+        with zipfile.ZipFile(archive) as zf:
+            names = set(zf.namelist())
+    top = "" if sys.platform == "darwin" else "OpenBerry/"  # next to OpenBerry.app on a Mac, else in the folder
+    assert {top + build.LICENSE_FILE, top + build.NOTICES_FILE} <= names, names
+
+
+@pytest.mark.parametrize("system", ["win32", "linux"])
+def test_windows_and_linux_downloads_hold_the_license_files_in_the_app_folder(tmp_path: Path, system: str) -> None:
+    app = fake_app(tmp_path / "dist" / "OpenBerry")
+    build.write_license_files(app, "1.0", system)
+    name = "OpenBerry-1.0-linux-x64.tar.gz" if system == "linux" else "OpenBerry-1.0-windows-x64.zip"
+    archive = build.make_archive(app, tmp_path / "dist" / name, system)
+    if system == "linux":
+        with tarfile.open(archive) as tar:
+            names = set(tar.getnames())
+    else:
+        with zipfile.ZipFile(archive) as zf:
+            names = set(zf.namelist())
+    assert {"OpenBerry/LICENSE.txt", "OpenBerry/THIRD_PARTY_NOTICES.txt"} <= names
+
+
+def test_mac_download_holds_the_license_files_next_to_the_app(tmp_path: Path,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    app = tmp_path / "OpenBerry.app"
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    files = build.write_license_files(tmp_path / "licenses", "1.0", "darwin")
+    staged: list[set[str]] = []
+
+    def ditto(command: list[str], **_: Any) -> None:
+        staged.append({p.name for p in Path(command[3]).iterdir()})
+        assert (Path(command[3]) / "OpenBerry.app" / "Contents" / "MacOS").is_dir()  # moved, with everything in it
+
+    monkeypatch.setattr(build.subprocess, "run", ditto)
+    archive = tmp_path / "OpenBerry-1.0-macos-arm64.zip"
+    build.make_archive(app, archive, "darwin", beside=files)
+    assert staged == [{"OpenBerry.app", "LICENSE.txt", "THIRD_PARTY_NOTICES.txt"}]
+    assert (app / "Contents" / "MacOS").is_dir()  # back where the smoke test looks for it
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []  # no staging folder left
+
+
+def test_license_file_is_openberrys_mit_license(tmp_path: Path) -> None:
+    license_file, notices = build.write_license_files(tmp_path, "1.0", "linux")
+    assert license_file.read_text(encoding="utf-8") == (ROOT / "LICENSE").read_text(encoding="utf-8")
+    assert "MIT License" in license_file.read_text(encoding="utf-8")
+    assert notices.name == "THIRD_PARTY_NOTICES.txt"
+
+
+def test_notices_list_what_the_app_bundles_with_license_texts() -> None:
+    text = build.notices_text("1.0", "linux")
+    packages = text.split("Python packages", 1)[1].split("\n\n=", 1)[0]
+    listed = {line[2:].split(":")[0].rsplit(" ", 1)[0].lower() for line in packages.splitlines()
+              if line.startswith("- ")}
+    assert {"fastapi", "starlette", "uvicorn", "httpx", "mcp", "pydantic", "jinja2", "certifi", "feedparser"} <= listed
+    assert not {"pytest", "pyinstaller", "playwright", "pillow"} & listed  # development tools are not bundled
+    assert "pywebview" not in listed  # the Linux app has no window
+    assert "- certifi " in text and "MPL-2.0" in text and "Mozilla Public License" in text  # its text, not only a name
+    for component in ("Python 3.", "OpenSSL", "SQLite", "PyInstaller bootloader"):
+        assert f"- {component}" in text, component
+    assert "WebView2" not in text
+
+
+def test_windows_notices_include_webview2_and_pywebview() -> None:
+    pytest.importorskip("webview")
+    text = build.notices_text("1.0", "win32")
+    assert "Microsoft Edge WebView2 SDK" in text and "Copyright (C) Microsoft Corporation" in text
+    assert "- pywebview " in text
+
+
+def test_bundled_distributions_follow_requirements_and_extras() -> None:
+    names = {build._normalize(d.metadata["Name"]) for d in build.bundled_distributions("openberry")}
+    assert {"fastapi", "starlette", "uvicorn", "httptools", "anyio"} <= names  # uvicorn[standard] brings httptools
+    assert "openberry" not in names and "pytest" not in names
+
+
 def test_linux_archive_keeps_the_folder_and_the_executable_bit(tmp_path: Path) -> None:
     app = fake_app(tmp_path / "dist" / "OpenBerry")
     archive = build.make_archive(app, tmp_path / "dist" / "OpenBerry-1.0-linux-x64.tar.gz", "linux")
@@ -312,7 +401,8 @@ def test_windows_archive_is_a_zip_of_the_folder(tmp_path: Path) -> None:
         assert {"OpenBerry/OpenBerry", "OpenBerry/_internal/lib.so"} <= set(zf.namelist())
 
 
-def test_mac_archive_is_made_with_ditto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mac_archive_without_extra_files_is_made_with_ditto(tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     app = tmp_path / "OpenBerry.app"
     app.mkdir()
     commands: list[list[str]] = []
@@ -478,7 +568,8 @@ def test_smoke_test_passes_against_the_app(tmp_path: Path, capsys: pytest.Captur
     app = source_app(tmp_path / "bin" / "openberry")  # the name /help shows for a source install
     assert smoke.main([str(app), str(app)]) == 0
     out = capsys.readouterr().out
-    for check in ("version: openberry " + openberry.__version__, "demo:", "serve: served /c/1, /help",
+    for check in ("version: openberry " + openberry.__version__,
+                  "serve: registered a company and a lead, served /c/1, /c/1/leads/1, /help",
                   "mcp: protocol 2025-06-18, 25 tools, list_companies sees 1 company", "app --smoke: --smoke passed"):
         assert check in out
     assert "Smoke test passed" in out
@@ -522,7 +613,7 @@ def test_app_check_fails_without_proof_and_shows_the_log(tmp_path: Path) -> None
 
 def test_checks_include_the_app_only_when_given(tmp_path: Path) -> None:
     names = [name for name, _ in smoke.checks_for(tmp_path / "cli", None, tmp_path / "h", tmp_path)]
-    assert names == ["version", "demo", "serve", "mcp"]
+    assert names == ["version", "serve", "mcp"]
     names = [name for name, _ in smoke.checks_for(tmp_path / "cli", tmp_path / "app", tmp_path / "h", tmp_path)]
     assert names[-1] == "app --smoke"
 
@@ -539,7 +630,7 @@ def workflow() -> dict[Any, Any]:
 
 def test_workflow_triggers(workflow: dict[Any, Any]) -> None:
     on = workflow.get("on", workflow.get(True))  # YAML 1.1 reads a bare `on` as true
-    watched = {"src/**", "packaging/**", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"}
+    watched = {"src/**", "tests/**", "packaging/**", "pyproject.toml", "uv.lock", ".github/workflows/desktop.yml"}
     assert set(on["pull_request"]["paths"]) == watched
     assert on["push"]["branches"] == ["main"] and set(on["push"]["paths"]) == watched
     assert on["push"]["tags"] == ["v*"]
@@ -562,35 +653,60 @@ def test_workflow_builds_and_smoke_tests_on_every_platform(workflow: dict[Any, A
     assert "desktop" in matrix["windows-latest"]["extras"] and "desktop" in matrix["macos-latest"]["extras"]
     assert "desktop" not in matrix["ubuntu-latest"]["extras"]  # no pywebview in the Linux app
     steps = job["steps"]
-    assert step_using(steps, "actions/checkout")["uses"] == "actions/checkout@v6"
+    step_using(steps, "actions/checkout")
     uv = step_using(steps, "astral-sh/setup-uv")
-    assert re.fullmatch(r"astral-sh/setup-uv@v\d+", uv["uses"]) and uv["with"]["python-version"] == "3.12"
+    assert uv["with"]["python-version"] == "3.12"
     install = step_running(steps, "uv sync")["run"]
-    assert "--locked" in install and "${{ matrix.extras }}" in install
-    assert "pyinstaller" in install and "pyinstaller-hooks-contrib" in install
-    assert step_running(steps, "pytest")["if"] == "runner.os == 'Linux'"
+    assert "--locked" in install and "${{ matrix.extras }}" in install and "--extra dev" in install
+    assert "--group build" in install and "uv pip install" not in install  # PyInstaller comes from uv.lock
+    tests = step_running(steps, "pytest")
+    assert "if" not in tests  # on Windows, macOS and Linux
+    lint = step_running(steps, "ruff")
+    assert re.fullmatch(r"uvx ruff@[\d.]+ check src tests packaging", lint["run"]) and lint["if"] == "runner.os == 'Linux'"
+    chromium = step_running(steps, "playwright install")
+    assert "--with-deps chromium" in chromium["run"] and chromium["if"] == "runner.os == 'Linux'"
+    assert steps.index(chromium) < steps.index(tests)
     build_step = step_running(steps, "packaging/build.py")
     assert build_step["id"] == "build" and '--release-tag "$RELEASE_TAG"' in build_step["run"]
     smoke_step = step_running(steps, "packaging/smoke_test.py")
     assert smoke_step["run"].endswith('packaging/smoke_test.py "$CLI" "$GUI"')
     assert smoke_step["env"] == {"CLI": "${{ steps.build.outputs.cli }}", "GUI": "${{ steps.build.outputs.gui }}"}
     upload = step_using(steps, "actions/upload-artifact")
-    assert upload["uses"] == "actions/upload-artifact@v6"
     assert upload["with"]["path"] == "${{ steps.build.outputs.archive }}" and upload["with"]["retention-days"] == 14
     assert upload["with"]["name"].startswith("OpenBerry-")
 
 
 # The first major version of each action that runs on Node 24: GitHub no longer runs Node 20 actions.
 NODE24_ACTIONS = {"actions/checkout": 5, "astral-sh/setup-uv": 7, "actions/upload-artifact": 6,
-                  "actions/download-artifact": 7, "softprops/action-gh-release": 3}
+                  "actions/download-artifact": 7}
+WORKFLOWS = (WORKFLOW, ROOT / ".github" / "workflows" / "docker.yml")
+PINNED = re.compile(r"^\s*(?:- )?uses: ([\w.-]+/[\w.-]+)@([0-9a-f]{40}) # v(\d+)\.\d+\.\d+$")
 
 
-def test_workflow_actions_run_on_node_24(workflow: dict[Any, Any]) -> None:
-    used = [step["uses"] for job in workflow["jobs"].values() for step in job["steps"] if "uses" in step]
-    assert {use.split("@")[0] for use in used} == set(NODE24_ACTIONS)
-    for use in used:
-        action, version = use.split("@")
-        assert re.fullmatch(r"v\d+", version) and int(version[1:]) >= NODE24_ACTIONS[action], use
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_workflow_actions_are_pinned_to_commits_and_run_on_node_24(path: Path) -> None:
+    """A tag can be moved to other code; a commit can't. The comment says which version it is, for Dependabot."""
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if "uses:" in line]
+    assert lines
+    for line in lines:
+        match = PINNED.match(line)
+        assert match, f"not pinned to a commit with a version comment: {line.strip()}"
+        action, _, major = match.groups()
+        assert action in NODE24_ACTIONS and int(major) >= NODE24_ACTIONS[action], line.strip()
+
+
+def test_the_same_action_is_pinned_to_the_same_commit_everywhere() -> None:
+    pins: dict[str, set[str]] = {}
+    for path in WORKFLOWS:
+        for match in filter(None, map(PINNED.match, path.read_text(encoding="utf-8").splitlines())):
+            pins.setdefault(match[1], set()).add(match[2])
+    assert pins and all(len(commits) == 1 for commits in pins.values()), pins
+
+
+def test_dependabot_updates_the_actions_and_the_base_images() -> None:
+    yaml = pytest.importorskip("yaml")
+    config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+    assert {u["package-ecosystem"] for u in config["updates"]} == {"github-actions", "docker"}
 
 
 def test_workflow_uses_only_outputs_the_build_script_writes(built: tuple[Path, Path]) -> None:
@@ -600,15 +716,125 @@ def test_workflow_uses_only_outputs_the_build_script_writes(built: tuple[Path, P
     assert used and used <= set(github_outputs(output))
 
 
-def test_workflow_publishes_tagged_releases(workflow: dict[Any, Any]) -> None:
+DOWNLOADS = ("OpenBerry-windows-x64.zip", "OpenBerry-macos-arm64.zip", "OpenBerry-linux-x64.tar.gz")
+
+
+def test_release_downloads_are_the_three_the_build_makes() -> None:
+    assert set(DOWNLOADS) == {build.archive_name(t) for t in ("windows-x64", "macos-arm64", "linux-x64")}
+
+
+def test_workflow_publishes_tagged_releases_as_a_draft_first(workflow: dict[Any, Any]) -> None:
     release = workflow["jobs"]["release"]
     assert release["needs"] == "build" and release["if"] == "startsWith(github.ref, 'refs/tags/v')"
     assert release["permissions"] == {"contents": "write"}
-    download = step_using(release["steps"], "actions/download-artifact")
+    assert release["env"]["TAG"] == "${{ github.ref_name }}" and release["env"]["GH_TOKEN"] == "${{ github.token }}"
+    steps = release["steps"]
+    download = step_using(steps, "actions/download-artifact")
     assert download["with"]["pattern"] == "OpenBerry-*" and download["with"]["merge-multiple"] is True
-    publish = step_using(release["steps"], "softprops/action-gh-release")
-    assert publish["uses"] == "softprops/action-gh-release@v3"
-    assert publish["with"]["files"] == f"{download['with']['path']}/*"
+    checksums = step_running(steps, "sha256sum")
+    assert checksums["working-directory"] == download["with"]["path"] == "downloads"
+    assert "sha256sum OpenBerry-* > SHA256SUMS" in checksums["run"]
+    assert all(name in checksums["run"] for name in DOWNLOADS)  # all three, or nothing is published
+    draft = step_running(steps, "gh release create")
+    create = next(line for line in draft["run"].splitlines() if "gh release create" in line)
+    assert '"$TAG" downloads/*' in create and "--draft" in create and '--title "OpenBerry $TAG"' in create
+    publish = step_running(steps, "gh release edit")
+    assert "--draft=false" in publish["run"] and "--latest" in publish["run"]
+    assert steps.index(download) < steps.index(checksums) < steps.index(draft) < steps.index(publish)
+
+
+def test_workflow_checks_the_latest_download_links_after_publishing(workflow: dict[Any, Any]) -> None:
+    check = workflow["jobs"]["check-downloads"]
+    assert check["needs"] == "release" and "permissions" not in check
+    (step,) = check["steps"]
+    assert step["env"]["LATEST"] == "${{ github.server_url }}/${{ github.repository }}/releases/latest/download"
+    assert all(name in step["run"] for name in DOWNLOADS)
+    assert '[ "$code" = 200 ]' in step["run"] and "exit $failed" in step["run"]
+
+
+# ======================================================================================
+# Docker
+# ======================================================================================
+
+def test_docker_image_installs_exactly_the_locked_packages() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY pyproject.toml uv.lock" in dockerfile
+    assert "uv export --frozen --no-dev --no-emit-project" in dockerfile
+    assert "pip install --require-hashes -r /tmp/requirements.txt" in dockerfile
+    assert "pip install --no-deps ." in dockerfile and "pip install ." not in dockerfile
+    froms = re.findall(r"^FROM (\S+)", dockerfile, re.MULTILINE)
+    assert len(froms) == 3
+    for image in froms:
+        assert re.fullmatch(r"[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}", image), image
+    assert any(re.match(r"python:3\.12\.\d+-slim", image) for image in froms)
+    assert 'CMD ["openberry", "serve", "--host", "0.0.0.0", "--port", "8000"]' in dockerfile  # cli._serve's checks
+    assert "chmod 700 /data" in dockerfile and "USER openberry" in dockerfile
+
+
+def test_compose_runs_the_app_hardened() -> None:
+    yaml = pytest.importorskip("yaml")
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    app = compose["services"]["openberry"]
+    assert app["stop_grace_period"] == "45s" and app["read_only"] is True and app["tmpfs"] == ["/tmp"]
+    assert app["security_opt"] == ["no-new-privileges:true"] and app["cap_drop"] == ["ALL"]
+    assert app["ports"] == ["127.0.0.1:8000:8000"]
+    ollama = compose["services"]["ollama"]["image"]
+    assert re.fullmatch(r"ollama/ollama:\d+\.\d+\.\d+", ollama)
+
+
+def test_docker_build_context_leaves_out_tests_scripts_and_docs() -> None:
+    ignored = set((ROOT / ".dockerignore").read_text(encoding="utf-8").split())
+    assert {"tests", "scripts", "docs", ".env", "*.db"} <= ignored
+
+
+def test_docker_workflow_builds_checks_and_runs_the_image() -> None:
+    yaml = pytest.importorskip("yaml")
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "docker.yml").read_text(encoding="utf-8"))
+    on = workflow.get("on", workflow.get(True))
+    watched = {"Dockerfile", "docker-compose.yml", "src/**", "uv.lock", "pyproject.toml"}
+    assert watched <= set(on["pull_request"]["paths"]) and watched <= set(on["push"]["paths"])
+    assert workflow["permissions"] == {"contents": "read"}
+    steps = workflow["jobs"]["image"]["steps"]
+    order = [step_running(steps, text) for text in (
+        "docker compose config", "docker compose build", "packaging/docker_check.py openberry:latest",
+        "OpenBerry has no password", "OPENBERRY_PASSWORD=", "State.Health.Status")]
+    assert [steps.index(step) for step in order] == sorted(steps.index(step) for step in order)
+    assert "docker compose up -d --no-build" in step_running(steps, "OPENBERRY_PASSWORD=")["run"]
+    assert step_running(steps, "docker compose down")["if"] == "always()"
+
+
+def test_docker_check_finds_every_difference() -> None:
+    wanted = {"fastapi": "0.143.0", "uvloop": "0.23.0", "Jinja2": "3.1.6"}
+    installed = {"fastapi": "0.143.0", "jinja2": "3.1.6", "uvloop": "0.23.0", "pip": "25.0", "openberry": "1.0"}
+    assert docker_check.differences(wanted, installed) == []
+    installed = {"fastapi": "0.144.0", "jinja2": "3.1.6", "rich": "14.0", "pip": "25.0"}
+    assert docker_check.differences(wanted, installed) == [
+        "fastapi: locked 0.143.0, installed 0.144.0", "uvloop 0.23.0 is locked but not installed",
+        "rich 14.0 is installed but not in uv.lock"]
+
+
+# ======================================================================================
+# The project's tooling
+# ======================================================================================
+
+def test_pyproject_locks_pyinstaller_and_the_test_tools() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    build_group = " ".join(pyproject["dependency-groups"]["build"])
+    assert "pyinstaller>=" in build_group and "pyinstaller-hooks-contrib" in build_group
+    dev = " ".join(pyproject["project"]["optional-dependencies"]["dev"])
+    assert "playwright" in dev and "pillow" in dev
+    assert pyproject["tool"]["ruff"]["lint"]["select"] == ["F", "E9", "B"]
+    assert {"error::DeprecationWarning", "error::PendingDeprecationWarning"} <= set(
+        pyproject["tool"]["pytest"]["ini_options"]["filterwarnings"])
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    for name in ("pyinstaller", "pyinstaller-hooks-contrib", "playwright", "pillow"):
+        assert f'name = "{name}"' in lock, name
+
+
+def test_collected_test_ids_stay_short(request: pytest.FixtureRequest) -> None:
+    """A parametrized test whose id is its whole input (200,000 spaces) floods every report."""
+    long = [item.nodeid[:80] for item in request.session.items if len(item.nodeid) > 300]
+    assert long == []
 
 
 # ======================================================================================
@@ -628,3 +854,9 @@ def test_desktop_guide_matches_the_build() -> None:
     for name in ("packaging/build.py", "packaging/smoke_test.py", "More info", "Run anyway", "Open Anyway",
                  "Connect Claude", "~/.openberry", "logs/desktop.log", "git tag v"):
         assert name in guide, name
+    # Building from the lock, the license files, and releasing by pushing a tag only, with recovery steps.
+    for name in ("--group build", build.LICENSE_FILE, build.NOTICES_FILE, "SHA256SUMS",
+                 "Never create the release in GitHub's web page", "If a release goes wrong",
+                 "Set as the latest release"):
+        assert name in guide, name
+    assert "uv pip install pyinstaller" not in guide

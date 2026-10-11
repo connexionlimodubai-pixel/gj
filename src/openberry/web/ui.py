@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from fastapi import Request
 from fastapi.templating import Jinja2Templates
 from starlette.responses import Response
 
-from .. import __version__, repo
+from .. import __version__, db, repo, sample_cleanup
 from ..collectors import google_places
 from ..config import get_settings
 from ..models import (
@@ -60,8 +61,9 @@ CHANNEL_LABELS = {
 SOURCE_LABELS = {
     "hackernews": "Hacker News", "reddit": "Reddit", "github": "GitHub", "greenhouse": "Greenhouse",
     "lever": "Lever", "ashby": "Ashby", "google_news": "Google News", "rss": "RSS", "linkedin": "LinkedIn",
-    "web": "Web", "manual": "Manual", "claude": "Claude", "csv": "CSV import", "demo": "Demo",
+    "web": "Web", "manual": "Manual", "claude": "Claude", "csv": "CSV import",
     "sec_edgar": "SEC EDGAR", "google_places": "Google Maps",
+    "demo": "Sample (old demo)",  # rows 0.1.x's demo left (sample_cleanup); no longer a filter option
 }
 LEAD_SOURCES = SIGNAL_SOURCES
 # ScanRun.status -> label; other statuses are shown humanized with a neutral badge.
@@ -339,7 +341,7 @@ def _build_env() -> jinja2.Environment:
         select_options=select_options, check_options=check_options, pending_review=pending_review,
         SCAN_STATUS_LABELS=SCAN_STATUS_LABELS,
         DOCS_URL=DOCS_URL, AGENT_DOCS_URL=AGENT_DOCS_URL, EMAIL_DOCS_URL=EMAIL_DOCS_URL, ICONS=ICONS, LOGO=LOGO,
-        EMAIL_EVENT_LABELS=EMAIL_EVENT_LABELS,
+        EMAIL_EVENT_LABELS=EMAIL_EVENT_LABELS, SAMPLE_BANNER_TEXT=sample_cleanup.BANNER_TEXT,
         AGENT_LIMIT_RANGE=AGENT_LIMIT_RANGE, AUTO_APPROVE_HOURS_RANGE=AUTO_APPROVE_HOURS_RANGE,
         EMAIL_LIMIT_RANGE=EMAIL_LIMIT_RANGE, EMAIL_GAP_RANGE=EMAIL_GAP_RANGE, WEEKDAYS=WEEKDAYS,
         message_version=repo.message_version, BULK_MESSAGES_MAX=repo.BULK_MESSAGES_MAX,
@@ -361,6 +363,15 @@ templates = Jinja2Templates(env=_build_env())
 ASSET_VERSION = _asset_version()
 
 
+def _nav_companies() -> list[Company]:
+    """The company switcher's list. Pages that don't need the database (Your data, API keys, Mailbox) still show,
+    without it, when the database can't be read: Your data's automatic backups stay downloadable."""
+    try:
+        return repo.list_companies()
+    except (sqlite3.Error, db.DatabaseProblem):
+        return []
+
+
 def render(request: Request, name: str, context: dict[str, Any] | None = None, *, status_code: int = 200,
            public: bool = False, headers: dict[str, str] | None = None) -> Response:
     """Render a page with the shared shell context (nav, flashes, CSRF token, mode flags).
@@ -373,12 +384,16 @@ def render(request: Request, name: str, context: dict[str, Any] | None = None, *
     show_nav = logged_in and not public
     ctx: dict[str, Any] = {"company": None, "active": "", "title": "", "values": {}, "errors": {}}
     ctx.update(context or {})
+    company = ctx["company"]
     ctx.update(
+        # The sample company an older version left (sample_cleanup): a banner on its pages leads to its removal page.
+        sample_banner=bool(show_nav and isinstance(company, Company) and ctx["active"] != "sample"
+                           and sample_cleanup.is_sample_company(company.id)),
         show_nav=show_nav,
         public=public,
         logged_in=logged_in,
         auth_enabled=bool(settings.password),
-        nav_companies=repo.list_companies() if show_nav else [],
+        nav_companies=_nav_companies() if show_nav else [],
         flashes=pop_flashes(request),
         csrf_token=csrf_token(request),
         asset_version=ASSET_VERSION,

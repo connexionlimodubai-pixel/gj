@@ -53,6 +53,9 @@ hiddenimports = [
 
 # Never needed by the app; some are installed next to it in a development environment.
 excludes = ["tkinter", "_tkinter", "pytest", "_pytest", "playwright", "PIL", "IPython"]
+# Interactive terminal modules the app never uses. Python's readline module links GNU Readline (GPL-3.0) on Linux:
+# leaving it out keeps libreadline out of the download.
+excludes += ["readline", "_curses", "curses"]
 # pywebview's window: Edge WebView2 through pythonnet on Windows (pyinstaller-hooks-contrib and
 # pywebview's own hook add pythonnet's and WebView2's DLLs), WebKit through PyObjC on macOS.
 # pywebview imports its backend inside a function; name it, and leave out the ones never used here.

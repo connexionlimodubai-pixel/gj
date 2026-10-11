@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import io
+import tempfile
+from collections.abc import Iterator
 from datetime import date
-from typing import Any
+from typing import IO, Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
+from starlette.background import BackgroundTask
 from starlette.datastructures import FormData, UploadFile
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from .. import leads_csv, outreach, repo
 from ..config import get_settings
@@ -26,6 +30,8 @@ router = APIRouter(dependencies=[Depends(require_login)], include_in_schema=Fals
 
 LEAD_SORTS = {"score": "Score", "recent": "Recently added", "signal": "Latest signal", "name": "Name"}
 MAX_CSV_BYTES = 5 * 1024 * 1024
+CSV_IN_MEMORY_BYTES = 4 * 1024 * 1024  # a larger export goes to a temporary file
+CSV_CHUNK_BYTES = 64 * 1024
 MESSAGE_ACTIONS = {"save": None, "approve": "approved", "sent": "sent", "skip": "skipped", "draft": "draft"}
 # Auto-approve: hold a waiting draft (it is never approved automatically), or let a held one auto-approve again.
 HOLD_ACTIONS = {"hold": True, "release": False}
@@ -77,15 +83,33 @@ def leads_page(request: Request, company_id: int, tier: str = "", status: str = 
     })
 
 
+def _csv_file(company_id: int, filters: dict[str, Any]) -> IO[bytes]:
+    """Every matching lead as CSV, in a temporary file (in memory while small), read back from the start."""
+    out = tempfile.SpooledTemporaryFile(max_size=CSV_IN_MEMORY_BYTES)  # noqa: SIM115 (closed after the response)
+    text = io.TextIOWrapper(out, encoding="utf-8", newline="")
+    leads_csv.write_leads_csv(text, repo.iter_leads(company_id, **filters))
+    text.flush()
+    text.detach()  # keep `out` open
+    out.seek(0)
+    return out
+
+
+def _chunks(fh: IO[bytes]) -> Iterator[bytes]:
+    while chunk := fh.read(CSV_CHUNK_BYTES):
+        yield chunk
+
+
 @router.get("/c/{company_id}/leads.csv")
 def leads_export(company_id: int, tier: str = "", status: str = "", kind: str = "", source: str = "",
                  q: str = "", sort: str = "score") -> Response:
+    """Every lead the Leads page's filters match, with no row limit, from one snapshot of the database."""
     company = repo.get_company(company_id)
-    items, _ = repo.list_leads(company_id, **_lead_filters(tier, status, kind, source, q, sort), limit=5000)
+    fh = _csv_file(company_id, _lead_filters(tier, status, kind, source, q, sort))
     slug = "".join(ch if ch.isalnum() else "-" for ch in company.name.lower()).strip("-")[:40] or "company"
     filename = f"openberry-leads-{slug}-{date.today().isoformat()}.csv"
-    return Response(leads_csv.export_leads_csv(items), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    return StreamingResponse(_chunks(fh), media_type="text/csv; charset=utf-8", background=BackgroundTask(fh.close),
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                      "Cache-Control": "no-store"})
 
 
 def _nothing_imported_reason(stats: dict[str, Any]) -> str:

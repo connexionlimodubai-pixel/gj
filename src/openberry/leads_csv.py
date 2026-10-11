@@ -6,18 +6,20 @@ import csv
 import io
 import itertools
 import re
-from typing import Any
+from collections.abc import Iterable
+from typing import IO, Any
 
 from . import repo
 from .db import connect
 from .models import Lead, LeadIn
 
 EXPORT_COLUMNS = [
-    "id", "full_name", "title", "lead_company", "company_domain", "industry", "company_size", "location",
+    "id", "kind", "full_name", "title", "lead_company", "company_domain", "industry", "company_size", "location",
     "linkedin_url", "email", "phone", "website", "github_username", "twitter", "profile_url", "bio", "score",
-    "tier", "icp_score", "intent_score", "ai_score", "status", "source", "tags", "last_signal_at", "top_reasons",
-    "notes",
+    "tier", "icp_score", "intent_score", "ai_score", "ai_rationale", "status", "source", "tags", "last_signal_at",
+    "created_at", "updated_at", "top_reasons", "notes",
 ]
+_TIME_COLUMNS = ("last_signal_at", "created_at", "updated_at")
 
 # header (lowercased, non-alphanumerics removed) -> LeadIn field
 HEADER_ALIASES: dict[str, str] = {
@@ -59,20 +61,35 @@ def _norm_header(h: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (h or "").lower())
 
 
+def _export_row(lead: Lead) -> dict[str, Any]:
+    row: dict[str, Any] = lead.model_dump()
+    row["tags"] = ", ".join(lead.tags)
+    row["top_reasons"] = " | ".join(lead.score_reasons[:4])
+    for key in _TIME_COLUMNS:
+        value = getattr(lead, key)
+        row[key] = value.isoformat() if value else ""
+    # Neutralise spreadsheet formula injection (=, +, -, @ at the start of a cell).
+    for key, value in row.items():
+        if isinstance(value, str) and value[:1] in _FORMULA_PREFIXES:
+            row[key] = "'" + value
+    return row
+
+
+def write_leads_csv(out: IO[str], pages: Iterable[Iterable[Lead]]) -> int:
+    """Write the header and every lead of every page (repo.iter_leads gives them page by page). Returns the rows."""
+    writer = csv.DictWriter(out, fieldnames=EXPORT_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    rows = 0
+    for page in pages:
+        for lead in page:
+            writer.writerow(_export_row(lead))
+            rows += 1
+    return rows
+
+
 def export_leads_csv(leads: list[Lead]) -> str:
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=EXPORT_COLUMNS, extrasaction="ignore")
-    writer.writeheader()
-    for lead in leads:
-        row: dict[str, Any] = lead.model_dump()
-        row["tags"] = ", ".join(lead.tags)
-        row["top_reasons"] = " | ".join(lead.score_reasons[:4])
-        row["last_signal_at"] = lead.last_signal_at.isoformat() if lead.last_signal_at else ""
-        # Neutralise spreadsheet formula injection (=, +, -, @ at the start of a cell).
-        for key, value in row.items():
-            if isinstance(value, str) and value[:1] in _FORMULA_PREFIXES:
-                row[key] = "'" + value
-        writer.writerow(row)
+    write_leads_csv(buf, [leads])
     return buf.getvalue()
 
 

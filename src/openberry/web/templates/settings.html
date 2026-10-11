@@ -43,10 +43,10 @@
       <div class="danger-row">
         <div>
           <p class="strong">Delete this company</p>
-          <p class="muted small">Permanently removes the profile and all of its leads, signals, messages and scan history.</p>
+          <p class="muted small">Permanently removes the profile and all of its leads, signals, messages and scan history. A backup of your data is saved first (<a href="/data">Your data</a>).</p>
         </div>
         <form method="post" action="/c/{{ company.id }}/delete">{{ m.csrf() }}
-          <button class="btn btn-danger" type="submit" data-confirm="Delete {{ company.name }} and all of its data? This cannot be undone.">{{ m.icon("trash") }}Delete company</button>
+          <button class="btn btn-danger" type="submit" data-confirm="Delete {{ company.name }} and all of its data? A backup of your data is saved first, in Your data.">{{ m.icon("trash") }}Delete company</button>
         </form>
       </div>
     </section>

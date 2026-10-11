@@ -75,6 +75,11 @@ _PATHS = {
     "target": '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
     "bot": '<path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/>'
            '<path d="M2 14h2M20 14h2M15 13v2M9 13v2"/>',
+    "database": '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/>'
+                '<path d="M3 12a9 3 0 0 0 18 0"/>',
+    "folder": '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2'
+              'v13a2 2 0 0 0 2 2Z"/>',
+    "history": '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
 }
 
 ICONS: dict[str, Markup] = {name: Markup(path) for name, path in _PATHS.items()}

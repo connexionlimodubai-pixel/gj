@@ -12,7 +12,7 @@ import re
 import sqlite3
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
@@ -88,6 +88,12 @@ def _write_locked(conn: sqlite3.Connection | None) -> Iterator[sqlite3.Connectio
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
         yield c
+
+
+def write_locked(conn: sqlite3.Connection | None = None) -> AbstractContextManager[sqlite3.Connection]:
+    """_write_locked for a module that decides what to change and changes it through this one, in one transaction
+    (sample_cleanup checks its plan again under the lock before it deletes anything)."""
+    return _write_locked(conn)
 
 
 def _loads(value: str | None, default: Any) -> Any:
@@ -348,6 +354,31 @@ def delete_company(company_id: int, conn: sqlite3.Connection | None = None) -> N
         c.execute("DELETE FROM companies WHERE id = ?", (company_id,))
 
 
+def company_contents(company_id: int, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Every lead and message of a company (no limit), the sources and the number of each lead's signals, and how
+    many rows the company has: what sample_cleanup reads to tell untouched sample data from what changed since.
+
+    {"leads": [Lead], "messages": [Message], "signal_sources": {lead_id: {source}}, "signal_counts": {lead_id: n},
+    "counts": {"leads", "messages", "signals", "scan_runs"}}. Signals not tied to a lead count only in counts."""
+    with _conn(conn) as c:
+        leads = [_lead_from_row(r) for r in c.execute("SELECT * FROM leads WHERE company_id = ? ORDER BY id",
+                                                       (company_id,))]
+        messages = [_message_from_row(r) for r in c.execute("SELECT * FROM messages WHERE company_id = ? ORDER BY id",
+                                                             (company_id,))]
+        sources: dict[int, set[str]] = {}
+        per_lead: dict[int, int] = {}
+        signals = 0
+        for r in c.execute("SELECT lead_id, source, COUNT(*) AS n FROM signals WHERE company_id = ? "
+                           "GROUP BY lead_id, source", (company_id,)):
+            signals += r["n"]
+            if r["lead_id"] is not None:
+                sources.setdefault(r["lead_id"], set()).add(r["source"])
+                per_lead[r["lead_id"]] = per_lead.get(r["lead_id"], 0) + r["n"]
+        runs = c.execute("SELECT COUNT(*) FROM scan_runs WHERE company_id = ?", (company_id,)).fetchone()[0]
+    return {"leads": leads, "messages": messages, "signal_sources": sources, "signal_counts": per_lead,
+            "counts": {"leads": len(leads), "messages": len(messages), "signals": signals, "scan_runs": runs}}
+
+
 def set_last_scan(company_id: int, when: datetime | None = None, conn: sqlite3.Connection | None = None) -> None:
     with _conn(conn) as c:
         c.execute("UPDATE companies SET last_scan_at = ? WHERE id = ?", (iso(when), company_id))
@@ -357,12 +388,18 @@ RETRY_FAILED_SCAN_AFTER = timedelta(hours=1)
 
 
 def companies_due_for_scan(now: datetime | None = None) -> list[Company]:
-    """Active companies whose interval has passed (an hour after a failed scan), unless a scan is running."""
+    """Active companies whose interval has passed (an hour after a failed scan), unless a scan is running.
+
+    Never the untouched sample company an older version left (sample_cleanup): its profile is fictional, so
+    scanning for it would only collect leads for nobody."""
+    from .sample_cleanup import skips_scheduled_scans  # sample_cleanup imports repo
+
     now = _utc(now or utcnow())
     due = []
     with connect() as c:
         for company in list_companies(conn=c):
-            if company.status != "active" or running_scan_run(company.id, now, conn=c):
+            if (company.status != "active" or running_scan_run(company.id, now, conn=c)
+                    or skips_scheduled_scans(company, conn=c)):
                 continue
             interval = timedelta(hours=company.scan_interval_hours)
             last_run = next(iter(list_scan_runs(company.id, limit=1, conn=c)), None)
@@ -666,8 +703,8 @@ def refresh_identity_keys(conn: sqlite3.Connection | None = None) -> int:
 _LEAD_SORTS = {
     "score": "score DESC, last_signal_at DESC, id DESC",
     "recent": "created_at DESC, id DESC",
-    "signal": "last_signal_at IS NULL, last_signal_at DESC, score DESC",
-    "name": "full_name COLLATE NOCASE, lead_company COLLATE NOCASE",
+    "signal": "last_signal_at IS NULL, last_signal_at DESC, score DESC, id DESC",
+    "name": "full_name COLLATE NOCASE, lead_company COLLATE NOCASE, id",
 }
 
 
@@ -705,6 +742,22 @@ def list_leads(company_id: int, *, tier: str | None = None, status: str | None =
         rows = c.execute(f"SELECT * FROM leads WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",
                          [*params, limit, max(0, int(offset))]).fetchall()
     return [_lead_from_row(r) for r in rows], total
+
+
+def iter_leads(company_id: int, *, page_size: int = 1000, **filters: Any) -> Iterator[list[Lead]]:
+    """Every lead matching list_leads' filters, in its order, page by page and with no limit, read in one transaction:
+    an export sees the leads as they were when it started, however many there are and whatever a scan adds meanwhile.
+    Use it from one thread (one SQLite connection)."""
+    with connect() as c:
+        c.execute("BEGIN")  # a read transaction: every page comes from the same snapshot
+        offset = 0
+        while True:
+            page, _ = list_leads(company_id, **filters, limit=page_size, offset=offset, conn=c)
+            if page:
+                yield page
+            if len(page) < page_size:
+                return
+            offset += len(page)
 
 
 def contacts_at_account(lead: Lead, conn: sqlite3.Connection | None = None) -> list[Lead]:
@@ -1224,6 +1277,24 @@ def get_scan_run(run_id: int, conn: sqlite3.Connection | None = None) -> ScanRun
     return _scan_from_row(row)
 
 
+def scan_run_with_trigger(company_id: int, trigger: str, conn: sqlite3.Connection | None = None) -> ScanRun | None:
+    """The company's first scan run recorded with this trigger, if any."""
+    with _conn(conn) as c:
+        row = c.execute("SELECT * FROM scan_runs WHERE company_id = ? AND trigger = ? ORDER BY id LIMIT 1",
+                        (company_id, trigger)).fetchone()
+    return _scan_from_row(row) if row else None
+
+
+def company_ids_with_scan_trigger(trigger: str, conn: sqlite3.Connection | None = None) -> set[int]:
+    with _conn(conn) as c:
+        return {r[0] for r in c.execute("SELECT DISTINCT company_id FROM scan_runs WHERE trigger = ?", (trigger,))}
+
+
+def delete_scan_run(run_id: int, conn: sqlite3.Connection | None = None) -> None:
+    with _conn(conn) as c:
+        c.execute("DELETE FROM scan_runs WHERE id = ?", (run_id,))
+
+
 # --------------------------------------------------------------------------------------
 # Paid API usage and Google Maps search state
 # --------------------------------------------------------------------------------------
@@ -1734,6 +1805,10 @@ def _sent_before_problem(msg: Message, sent: set[tuple[str, int]]) -> str:
 
 def _agent_send_problem(c: sqlite3.Connection, company: Company, msg: Message, lead: Lead, now: datetime) -> str:
     """Why the agent must not send this message, or "" if it may (status and company switches aside)."""
+    from .sample_cleanup import sample_lead_problem  # sample_cleanup imports repo
+
+    if problem := sample_lead_problem(lead):
+        return problem
     if msg.direction != "outbound":
         return "it is not an outbound message"
     if msg.sent_at is not None:  # e.g. sent, then set back to approved: never again, and never uncounted
@@ -2014,13 +2089,13 @@ def resume_agent_sending(company_id: int, conn: sqlite3.Connection | None = None
 # auto_approve_hours from when it was written or last edited, and at least that long after auto-approve was
 # turned on (auto_approve_since), so turning it on never approves a backlog at once. With AI agent sending on,
 # the user's browser agent may then send the approved LinkedIn messages, so auto-approve leaves alone whatever a
-# person should look at first: drafts the user held, leads a person handles or must never contact, a connection
-# note too long for the account, banned words, unfilled placeholders, an email without a subject, a step already
-# sent, the first LinkedIn message after a connection request (did they accept?), and a second message to the same
-# lead. A draft it leaves alone is flagged (messages.auto_blocked): once the reason goes away (the earlier message
-# was sent or skipped, the lead set back, a banned word removed...), it waits a full review window from then, so
-# nothing is approved the moment the reason goes away. send_queue and confirm_agent_sent still check every one of
-# the agent's own rules afterwards.
+# person should look at first: drafts the user held, fictional sample leads an older version left (sample_cleanup),
+# leads a person handles or must never contact, a connection note too long for the account, banned words, unfilled
+# placeholders, an email without a subject, a step already sent, the first LinkedIn message after a connection
+# request (did they accept?), and a second message to the same lead. A draft it leaves alone is flagged
+# (messages.auto_blocked): once the reason goes away (the earlier message was sent or skipped, the lead set back, a
+# banned word removed...), it waits a full review window from then, so nothing is approved the moment the reason
+# goes away. send_queue and confirm_agent_sent still check every one of the agent's own rules afterwards.
 
 AUTO_ONE_PER_LEAD_APPROVED = ("another message to this lead is approved and not sent yet (one message per lead at a "
                               "time)")
@@ -2052,6 +2127,8 @@ def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
     (a newer row) still goes before the step-2 message that follows it.
     A draft repeating a step already sent doesn't hold up the lead's other drafts: it is stale.
     """
+    from .sample_cleanup import sample_lead_problem  # sample_cleanup imports repo
+
     where, params = "company_id = ? AND direction = 'outbound' AND status = 'draft'", [company.id]
     if lead_id is not None:
         where += " AND lead_id = ?"
@@ -2088,7 +2165,8 @@ def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
         item["state"] = "due" if item["at"] <= now else "waiting"
         lead = leads.get(msg.lead_id)
         if lead is not None and lead.id not in lead_problems:
-            lead_problems[lead.id] = (_lead_status_problem(lead) or (LEAD_REPLIED if lead.id in replied else "")
+            lead_problems[lead.id] = (sample_lead_problem(lead) or _lead_status_problem(lead)
+                                      or (LEAD_REPLIED if lead.id in replied else "")
                                       or _excluded_problem(company, lead))
         sent_before = {(channel, step) for mid, channel, step in sent.get(msg.lead_id, []) if mid != msg.id}
         sent_channels = {channel for channel, _ in sent_before}
@@ -2715,6 +2793,10 @@ def _email_send_problem(company: Company, msg: Message, lead: Lead, thread: list
     """Why OpenBerry must not send this email now ("" if it may), the company-wide switches and limits aside.
 
     `thread` is _email_threads': the lead's messages and the other emails to its address."""
+    from .sample_cleanup import sample_lead_problem  # sample_cleanup imports repo
+
+    if problem := sample_lead_problem(lead):
+        return problem
     if msg.direction != "outbound" or msg.channel != "email" or msg.status != "approved":
         return "it is not an approved email"
     if msg.sent_at is not None:

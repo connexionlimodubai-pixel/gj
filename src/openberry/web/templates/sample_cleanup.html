@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% macro lead_item(lead, link=true) -%}
+<li><div class="lead-cell">{{ m.avatar(lead.full_name, lead.kind) }}<div class="min0">{% if link %}<a class="lead-name" href="/c/{{ company.id }}/leads/{{ lead.id }}">{{ m.lead_title(lead) }}</a>{% else %}<span class="lead-name">{{ m.lead_title(lead) }}</span>{% endif %}<span class="sub">{{ m.lead_sub(lead) }}{% if lead.lead_company and lead.kind == "person" %} · {{ lead.lead_company }}{% endif %}</span></div></div></li>
+{%- endmacro %}
+{% block content %}
+{% set safe = plan.whole_company_safe %}
+{% set removing = plan.sample_lead_ids|length %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">{{ company.name }}</p>
+    <h1>{{ "Delete the sample company" if safe else "Remove the sample data" }}</h1>
+    <p class="lede">{{ SAMPLE_BANNER_TEXT }} Nothing is ever sent to them. Nothing is removed until you click the button below.</p>
+  </div>
+</div>
+
+{% if changed %}
+<p class="callout callout-warning sample-changed" role="alert">{{ m.icon("alert", 14) }}<span>Something changed since you opened this page, so nothing was removed. Check the lists again.</span></p>
+{% endif %}
+
+<div class="sample-grid">
+  <section class="card" aria-labelledby="h-removed">
+    <h2 id="h-removed" class="title-icon">{{ m.icon("trash") }}What will be removed</h2>
+    {% if safe %}
+    <p>Nothing in this company changed since the old version created it, so all of it goes:</p>
+    <ul class="sample-facts">
+      <li>The company and its profile</li>
+      <li>{{ plan.counts.leads|plural("sample lead") }}, {{ plan.counts.signals|plural("signal") }} and {{ plan.counts.messages|plural("draft") }}</li>
+      <li>Its scan history ({{ plan.counts.scan_runs|plural("scan") }})</li>
+    </ul>
+    {% else %}
+    <ul class="sample-facts">
+      <li>{{ removing|plural("untouched sample lead") }}{% if plan.sample_signals %}, with {{ plan.sample_signals|plural("signal") }}{% if plan.sample_drafts %} and {{ plan.sample_drafts|plural("draft") }}{% endif %}{% endif %}</li>
+      <li>The sample marker: this banner goes away</li>
+    </ul>
+    {% endif %}
+    {% if sample_leads %}
+    <details class="sample-details">
+      <summary>Show the {{ sample_leads|length|plural("lead") }}</summary>
+      <ul class="sample-leads">{% for lead in sample_leads %}{{ lead_item(lead, link=false) }}{% endfor %}</ul>
+    </details>
+    {% endif %}
+  </section>
+
+  <section class="card" aria-labelledby="h-kept">
+    <h2 id="h-kept" class="title-icon">{{ m.icon("check") }}What stays</h2>
+    {% if safe %}
+    <p>Everything else: your other companies and their leads, the mailbox settings, the email opt-outs and bounces, and the Google Maps usage count.</p>
+    {% else %}
+    <p>The company profile{% if plan.profile_edited %}: it was changed since the old version created it{% endif %}.</p>
+    {% if plan.sample_fields %}
+    <p class="small muted">These fields still hold sample values:</p>
+    <dl class="sample-fields">
+      {% for f in plan.sample_fields %}<div><dt>{{ f.label }}</dt><dd>{{ f.value }}</dd></div>{% endfor %}
+    </dl>
+    <p class="small"><a href="/c/{{ company.id }}/settings">Edit the profile</a></p>
+    {% endif %}
+    {% if touched_leads %}
+    <h3 class="sample-h3">Sample leads that changed ({{ touched_leads|length }})</h3>
+    <p class="small muted">You, Claude or a scan changed these since they were added. Delete them yourself if you don't need them. Nothing is ever sent to them.</p>
+    <ul class="sample-leads">{% for lead in touched_leads %}{{ lead_item(lead) }}{% endfor %}</ul>
+    {% endif %}
+    {% if other_leads %}
+    <h3 class="sample-h3">Other leads ({{ plan.other_lead_ids|length }})</h3>
+    <p class="small muted">Added by you, Claude or a scan.</p>
+    <ul class="sample-leads">{% for lead in other_leads %}{{ lead_item(lead) }}{% endfor %}</ul>
+    {% if plan.other_lead_ids|length > other_leads|length %}<p class="small muted">And {{ (plan.other_lead_ids|length - other_leads|length)|plural("more lead") }}: see <a href="/c/{{ company.id }}/leads">Leads</a>.</p>{% endif %}
+    {% endif %}
+    {% if plan.sent_messages %}
+    <p class="small">{{ plan.sent_messages|length|plural("message was", "messages were") }} sent from this company. They stay with their leads.</p>
+    {% endif %}
+    {% endif %}
+  </section>
+</div>
+
+<section class="card sample-confirm" aria-label="Confirm">
+  <form method="post" action="/c/{{ company.id }}/sample" class="btn-row">{{ m.csrf() }}
+    <input type="hidden" name="plan" value="{{ plan.token }}">
+    <button class="btn btn-danger" type="submit">{{ m.icon("trash") }}{% if safe %}Delete the sample company{% elif removing %}Remove {{ removing|plural("sample lead") }}{% else %}Remove the sample marker{% endif %}</button>
+    <a class="btn btn-ghost" href="/c/{{ company.id }}">Cancel</a>
+  </form>
+  {% if safe %}<p class="small muted">A backup of your data is saved first.</p>{% endif %}
+  {% if not safe %}<p class="small muted">Want the whole company gone instead? <a href="/c/{{ company.id }}/leads.csv">Export its leads</a> first if you need them, then use <a href="/c/{{ company.id }}/settings#danger-zone">Company profile → Delete company</a>.</p>{% endif %}
+</section>
+{% endblock %}

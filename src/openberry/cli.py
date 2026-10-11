@@ -1,4 +1,4 @@
-"""Command line: `openberry serve | desktop | mcp | scan | demo | rescore | init-db`."""
+"""Command line: `openberry serve | desktop | mcp | scan | rescore | init-db | backup | restore | remove-sample`."""
 
 from __future__ import annotations
 
@@ -6,17 +6,37 @@ import argparse
 import asyncio
 import json
 import logging
+import sqlite3
 import sys
+from pathlib import Path
+from typing import Any
 
 from . import __version__
+
+
+def serve_options(settings: Any, host: str, port: int) -> dict[str, Any]:
+    """uvicorn.run's options for `openberry serve`."""
+    return {
+        "host": host, "port": port, "log_level": "info",
+        # X-Forwarded-For/-Proto from these proxies only (None: uvicorn's default, 127.0.0.1). Behind a proxy
+        # container every visitor would otherwise have the proxy's address and share one login limit.
+        "proxy_headers": True, "forwarded_allow_ips": settings.trusted_proxies or None,
+        "access_log": False,  # its lines would log every lead search's query string
+    }
 
 
 def _serve(args: argparse.Namespace) -> None:
     import uvicorn
 
-    from .web.app import create_app
+    from .config import get_settings
+    from .web.app import UnsafeStart, create_app
 
-    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info", proxy_headers=True)
+    settings = get_settings()
+    try:
+        app = create_app(host=args.host)  # refuses a host other computers reach without a (long enough) password
+    except UnsafeStart as exc:
+        sys.exit(f"openberry serve: {exc}")
+    uvicorn.run(app, **serve_options(settings, args.host, args.port))
 
 
 def _desktop(args: argparse.Namespace) -> None:
@@ -83,11 +103,44 @@ def _scan(args: argparse.Namespace) -> None:
         print(json.dumps({"company_id": company_id, **stats}, indent=2, default=str))
 
 
-def _demo(_: argparse.Namespace) -> None:
-    from .seed import seed_demo
+def _confirm(question: str) -> bool:
+    try:
+        return input(question).strip().lower() in ("y", "yes")
+    except EOFError:  # no terminal to answer from
+        print()
+        return False
 
-    company_id = seed_demo()
-    print(f"Demo company created with id {company_id}. Run `openberry serve` and open http://127.0.0.1:8000")
+
+def _remove_sample(args: argparse.Namespace) -> None:
+    from . import sample_cleanup
+
+    ids = sorted(sample_cleanup.sample_company_ids())
+    if args.company is not None:
+        ids = [i for i in ids if i == args.company]
+    if not ids:
+        print(sample_cleanup.NOT_FOUND)
+        return
+    for company_id in ids:
+        plan = sample_cleanup.cleanup_plan(company_id)
+        if plan is None:
+            continue
+        print("\n".join(sample_cleanup.describe(plan)))
+        if args.dry_run:
+            print("Dry run: nothing was changed.")
+            continue
+        if not args.yes and not _confirm("Remove it? [y/N] "):
+            print("Nothing was changed. Add --yes to remove it without being asked.")
+            continue
+        try:
+            done = sample_cleanup.remove(company_id, plan.token)
+        except sample_cleanup.PlanChanged as exc:
+            sys.exit(f"openberry remove-sample: {exc}")
+        if done.company_deleted:
+            print(f"Deleted {plan.company.name}." + (f" Backup saved first: {done.backup}" if done.backup else ""))
+        else:
+            kept = "lead" if done.kept_leads == 1 else sample_cleanup.count_of(done.kept_leads, "lead")
+            print(f"Removed {sample_cleanup.count_of(done.removed_leads, 'sample lead')}. {plan.company.name} and "
+                  f"its other {kept} stay.")
 
 
 def _rescore(_: argparse.Namespace) -> None:
@@ -102,6 +155,37 @@ def _init_db(_: argparse.Namespace) -> None:
     from .db import init_db
 
     print(f"Database ready at {init_db()}")
+
+
+def _backup(args: argparse.Namespace) -> None:
+    from . import backups, db
+
+    if not db.db_path().is_file():
+        sys.exit(f"openberry backup: there is no data to back up yet ({db.db_path()} doesn't exist).")
+    db.prepare()  # a file a newer version wrote is refused, an older one is upgraded (with its own copy) first
+    try:
+        path = backups.manual_backup(args.path)
+    except (OSError, sqlite3.Error) as exc:
+        sys.exit(f"openberry backup: the backup failed: {exc}")
+    print(f"Backup saved: {path}")
+
+
+def _restore(args: argparse.Namespace) -> None:
+    from . import backups
+
+    try:
+        done = backups.restore(args.file)
+    except backups.RestoreRefused as exc:
+        sys.exit(f"openberry restore: {exc} Nothing was changed.")
+    print(f"Restored {args.file}.")
+    if done.previous:
+        print(f"Your data from before the restore was saved first: {done.previous}")
+    if done.sending_turned_off:
+        print("Email sending and AI agent sending are now off for: " + ", ".join(done.sending_turned_off) + ". "
+              "Emails sent after this backup was made are not in it: check the Outreach page before you turn "
+              "sending back on.")
+    else:
+        print("Email sending and AI agent sending are off for every company.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,18 +215,51 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", action="append", help="only this collector (repeatable), e.g. hackernews")
     p.set_defaults(func=_scan)
 
-    sub.add_parser("demo", help="create a demo company with sample leads").set_defaults(func=_demo)
     sub.add_parser("rescore", help="recompute every lead score").set_defaults(func=_rescore)
     sub.add_parser("init-db", help="create the SQLite database").set_defaults(func=_init_db)
+
+    p = sub.add_parser("backup", help="save a copy of your data (safe while OpenBerry runs)")
+    p.add_argument("path", nargs="?", type=Path,
+                   help="file or folder to save it to (default: the backups folder in your data folder)")
+    p.set_defaults(func=_backup)
+
+    p = sub.add_parser("restore", help="put a backup back (close OpenBerry and quit Claude Desktop first)")
+    p.add_argument("file", type=Path, help="the backup file, e.g. openberry-backup-2026-10-11.db")
+    p.set_defaults(func=_restore)
+
+    from .sample_cleanup import CLI_HELP
+
+    p = sub.add_parser("remove-sample", help=CLI_HELP)
+    p.add_argument("--company", type=int, help="only this company id")
+    p.add_argument("--dry-run", action="store_true", help="show what would be removed and change nothing")
+    p.add_argument("--yes", action="store_true", help="remove without asking")
+    p.set_defaults(func=_remove_sample)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
+    from .config import private_files
+
+    private_files()  # the data folder, database and backups hold personal data: for this user only
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit:
+        from .sample_cleanup import REMOVED_COMMAND, REMOVED_COMMAND_NOTE
+
+        if argv[:1] == [REMOVED_COMMAND]:  # argparse said "invalid choice"; say why it's gone and what to do
+            print(REMOVED_COMMAND_NOTE, file=sys.stderr)
+        raise
     # Logs go to stderr: stdout belongs to the MCP protocol in `openberry mcp`.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # it logs full request URLs at INFO; webhook URLs are secrets
-    args.func(args)
+    from .db import DatabaseProblem
+
+    try:
+        args.func(args)
+    except DatabaseProblem as exc:  # a file a newer version wrote, an upgrade that couldn't save a copy first
+        print(f"openberry: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

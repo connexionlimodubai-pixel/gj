@@ -62,18 +62,19 @@ You need [uv](https://docs.astral.sh/uv/getting-started/installation/), a fast P
 
 ```bash
 git clone https://github.com/connexionlimodubai-pixel/gj.git openberry && cd openberry
-uv run openberry demo     # optional: a demo company with sample leads (all fictional)
 uv run openberry serve    # → open http://127.0.0.1:8000
 ```
 
-Click **Register company**, fill in the form, then **Run scan now** on your dashboard.
+Register your company (or ask Claude to interview you: see below), then click **Run scan now** on your dashboard.
 Data lives in `~/.openberry/openberry.db` (move it with `OPENBERRY_HOME` or `OPENBERRY_DB`).
 
 ### With Docker
 ```bash
-cp .env.example .env      # set OPENBERRY_PASSWORD, OPENBERRY_SECRET_KEY and OPENBERRY_API_TOKEN if others can reach it
+cp .env.example .env      # set OPENBERRY_PASSWORD (12+ characters), OPENBERRY_SECRET_KEY and OPENBERRY_API_TOKEN
 docker compose up -d      # → http://localhost:8000
 ```
+Inside the container OpenBerry listens on all addresses, so it refuses to start without a password. If only you can
+reach it (compose publishes it on 127.0.0.1), you can set `OPENBERRY_ALLOW_NO_PASSWORD=true` instead.
 
 ## Connect Claude (the AI SDR)
 
@@ -97,7 +98,7 @@ For **Claude Code**: run `claude` inside this folder (the included `.mcp.json` r
 
 Then ask Claude things like:
 - *"Set up OpenBerry for my company: read example.com, interview me, and register us."*
-- *"Run today's lead hunt for company 1 and show me the 10 hottest leads with why."*
+- *"Run today's lead hunt for my company and show me the 10 hottest leads with why."*
 - *"Find the decision-makers at the companies that are hiring, and add them."*
 - *"Draft LinkedIn connection notes for every hot lead that has no message yet."*
 
@@ -144,6 +145,16 @@ and the API can turn email sending off, never on. **Hostinger forbids email to p
 Mail allows one-to-one business email only: use a separate mailbox (ideally a separate domain) for outreach, set up
 SPF, DKIM and DMARC, and start with 5 to 10 a day. Read [docs/EMAIL_SENDING.md](docs/EMAIL_SENDING.md) first.
 
+## Back up your data
+
+Everything is in one SQLite file, `~/.openberry/openberry.db` (Docker: the `openberry-data` volume). OpenBerry saves a
+copy in the `backups` folder next to it every day (7 days and 4 weeks are kept), before a schema upgrade, before
+Delete company and before a restore. For a copy of your own, open **Your data** in the dashboard and click
+**Download backup**, or run `openberry backup`: both are safe while OpenBerry runs. Don't copy `openberry.db` alone
+while OpenBerry or Claude uses it: its newest changes are in `openberry.db-wal`. To put a backup back, close OpenBerry
+(and Claude Desktop) and run `openberry restore FILE`. [docs/DESKTOP.md](docs/DESKTOP.md#back-up-your-data) has the
+details, and how to update and uninstall.
+
 ## Configuration
 
 Everything is optional for local use. Put settings in `.env` (read from the current folder and `~/.openberry/.env`)
@@ -151,8 +162,10 @@ or in the environment. See [`.env.example`](.env.example) for the other settings
 
 | Variable | Purpose |
 |---|---|
-| `OPENBERRY_PASSWORD`, `OPENBERRY_SECRET_KEY` | Dashboard login. **Required** if anyone but you can reach the server. |
+| `OPENBERRY_PASSWORD`, `OPENBERRY_SECRET_KEY` | Dashboard login. **Required** if anyone but you can reach the server: `openberry serve` on an address other than 127.0.0.1 refuses to start without a password of 12 characters or more |
+| `OPENBERRY_ALLOW_NO_PASSWORD=true` | Start on such an address without a password anyway: when something in front of OpenBerry asks for a login, or Docker publishes it on 127.0.0.1 only |
 | `OPENBERRY_API_TOKEN` | Bearer token for `/api` and the HTTP MCP endpoint `/mcp` |
+| `OPENBERRY_TRUSTED_PROXIES` | Behind a reverse proxy: its address or network (comma separated, `*` for any), so `X-Forwarded-For` gives each visitor's own address |
 | `OPENBERRY_BASE_URL` | Public URL of the dashboard: links in Claude replies, an allowed host name, and Secure login cookies when it starts with `https://` |
 | `OPENBERRY_ALLOWED_HOSTS` | Extra host names to answer to in local mode (no password), e.g. a LAN IP so `/mcp` works there |
 | `OPENBERRY_PUBLIC_REGISTRATION=true` | Let clients fill in the registration form themselves (agency intake). Their companies wait, paused, for your review |
@@ -175,7 +188,10 @@ openberry desktop [--no-window]                # the dashboard in its own window
 openberry mcp                                  # MCP over stdio (what Claude Desktop runs)
 openberry mcp --http --port 8001               # standalone MCP over HTTP (bearer token)
 openberry scan [--company 1] [--source hackernews]
-openberry demo | rescore | init-db
+openberry rescore | init-db
+openberry backup [PATH]                        # a consistent copy of the database, safe while OpenBerry runs
+openberry restore FILE                         # put a backup back (OpenBerry closed); turns email and agent sending off
+openberry remove-sample [--dry-run]            # the sample company an older version created: shows what goes, asks first
 ```
 (Prefix with `uv run` if you haven't installed it with `pip install .`.)
 If you change `--host` or `--port`, set `OPENBERRY_BASE_URL` to the URL you open in the browser: Claude's links use it,
@@ -211,7 +227,9 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ```bash
 uv sync --extra dev
+uv run playwright install chromium        # once: the browser tests skip without it
 uv run pytest            # ~1,380 tests, no network needed
+uvx ruff@0.16.8 check src tests packaging # the lint CI runs
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

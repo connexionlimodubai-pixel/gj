@@ -830,8 +830,6 @@ def test_a_reply_to_an_email_sent_by_hand_is_found_by_its_sender(company, box):
 
 
 def test_a_failing_inbox_check_blocks_sending(company, box):
-    import imaplib
-
     turn_on(company)
     approved(lead(company))
     box.imap_fail["connect"] = ConnectionRefusedError(111, "Connection refused")

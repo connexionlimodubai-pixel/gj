@@ -1,13 +1,15 @@
-"""Background loops of the dashboard process: one runs each active company's signal scan on its own interval, sends
-hot-lead alerts and approves drafts whose auto-approve window has passed; the other sends approved emails from the
-user's mailbox and reads its inbox (email_loop)."""
+"""Background loops of the dashboard process: one saves the daily backup, runs each active company's signal scan on its
+own interval, sends hot-lead alerts and approves drafts whose auto-approve window has passed; the other sends approved
+emails from the user's mailbox and reads its inbox (email_loop)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+import sys
 
-from . import repo, services
+from . import backups, db, repo, services
 from .config import get_settings
 from .services import alert_active_companies, auto_approve_active_companies, scan_due_companies
 
@@ -16,8 +18,20 @@ log = logging.getLogger(__name__)
 MIN_TICK_SECONDS = 30  # OPENBERRY_SCHEDULER_TICK_SECONDS below this is raised to it
 
 
+def _failed(what: str) -> bool:
+    """Log the error being handled. A database problem (a full disk, a damaged or too new file) is logged once rather
+    than on every tick until it is fixed; anything else every time. Returns True."""
+    exc = sys.exc_info()[1]
+    if exc is not None and (isinstance(exc, (sqlite3.Error, db.DatabaseProblem)) or db.is_disk_full(exc)):
+        db.report_once(log, what, exc)
+    else:
+        log.exception(what)
+    return True
+
+
 async def scheduler_loop(stop: asyncio.Event | None = None) -> None:
-    """Every tick, scan companies whose last scan is older than their scan_interval_hours.
+    """Every tick, save the daily backup when it is due, then scan companies whose last scan is older than their
+    scan_interval_hours.
 
     Then alert on people who turned hot since the last tick outside a scan (Claude, API, CSV, edits), and
     approve the drafts whose review window has passed in companies that turned auto-approve on.
@@ -26,24 +40,31 @@ async def scheduler_loop(stop: asyncio.Event | None = None) -> None:
     tick = max(MIN_TICK_SECONDS, get_settings().scheduler_tick_seconds)
     log.info("scheduler started (tick %ss)", tick)
     while not stop.is_set():
+        failed = False
+        try:
+            await asyncio.to_thread(backups.daily_snapshot)  # before the day's scans change anything
+        except Exception:
+            failed = _failed("daily backup failed")
         try:
             results = await scan_due_companies()
             for r in results:
                 log.info("scheduled scan company=%s status=%s new_signals=%s", r.get("company_id"),
                          r.get("status"), r.get("signals_new"))
         except Exception:  # keep the loop alive whatever happens
-            log.exception("scheduler tick failed")
+            failed = _failed("scheduler tick failed")
         try:
             for company_id, r in (await alert_active_companies()).items():
                 log.info("hot-lead alert company=%s leads=%s notified=%s drafted=%s", company_id,
                          r["newly_hot"], r["notified"], r["drafted"])
         except Exception:
-            log.exception("hot-lead alerts failed")
+            failed = _failed("hot-lead alerts failed")
         try:
             for company_id, approved in (await auto_approve_active_companies()).items():
                 log.info("auto-approved company=%s messages=%s", company_id, approved)
         except Exception:
-            log.exception("auto-approve failed")
+            failed = _failed("auto-approve failed")
+        if not failed:
+            db.forget_reported()  # working again: a problem that comes back is logged again
         try:
             await asyncio.wait_for(stop.wait(), timeout=tick)
         except asyncio.TimeoutError:
@@ -75,7 +96,7 @@ async def email_loop(stop: asyncio.Event, wake: asyncio.Event | None = None, tic
             if result["status"] not in ("idle", "not_connected"):
                 log.info("email loop: %s", {k: v for k, v in result.items() if k != "text"})
         except Exception:  # keep the loop alive whatever happens
-            log.exception("email loop tick failed")
+            _failed("email loop tick failed")
         stopping = asyncio.ensure_future(stop.wait())
         woken = asyncio.ensure_future(wake.wait())
         try:

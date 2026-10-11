@@ -59,7 +59,10 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 HEALTHZ_APP = "openberry"  # /healthz answers {"ok": true, "app": "openberry"} (web/app.py)
 # First arguments handed to the command line (cli.main), so the packaged app's executable also works
 # as `openberry`: Claude Desktop can start `OpenBerry mcp`, and CI can run `OpenBerry desktop --smoke`.
-CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "demo", "rescore", "init-db", "--version", "-h", "--help"})
+# Any other first argument that isn't an option goes there too, so a typo or a removed command gets
+# argparse's "invalid choice" instead of starting the app.
+CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "rescore", "init-db", "backup", "restore",
+                          "remove-sample", "--version", "-h", "--help"})
 
 
 class DesktopError(RuntimeError):
@@ -106,8 +109,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         import multiprocessing
 
         multiprocessing.freeze_support()  # a packaged Windows app must not re-launch itself for child processes
+    config.private_files()  # the data folder, database, backups and logs: for this user only
     args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] in CLI_COMMANDS:
+    if args and (args[0] in CLI_COMMANDS or not args[0].startswith("-")):  # options (macOS's -psn_...) start the app
         from . import cli
 
         # The windowed executable has no console: `OpenBerry serve` would crash in uvicorn's log setup
@@ -180,7 +184,7 @@ def configure_logging(home: Path) -> Path | None:
     if getattr(sys, "frozen", False) or not (_usable(sys.stdout) and _usable(sys.stderr)):
         path = home / "logs" / "desktop.log"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            config.private_dir(path.parent)
             file_handler = RotatingFileHandler(path, maxBytes=LOG_FILE_BYTES, backupCount=LOG_FILE_BACKUPS,
                                                encoding="utf-8")
         except OSError:
@@ -230,7 +234,7 @@ class InstanceLock:
         if self._file is not None:
             return True
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            config.private_dir(self.path.parent)
             fh = open(self.path, "a+b")  # noqa: SIM115 (kept open while the lock is held)
         except OSError as exc:  # can't lock in this folder: start anyway, as without the lock
             log.warning("could not open %s (%s): not checking for another running OpenBerry", self.path, exc)
@@ -291,7 +295,7 @@ def app_is_running(home: Path) -> bool:
 def write_state(home: Path, url: str) -> None:
     """Write OPENBERRY_HOME/desktop.json for this process's server (atomically: readers never see half a file)."""
     path = home / DESKTOP_STATE_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
+    config.private_dir(path.parent)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps({"url": url, "pid": os.getpid(), "version": __version__}), encoding="utf-8")
@@ -329,13 +333,16 @@ def is_openberry_health(data: Any) -> bool:
 
 
 def answers_like_openberry(url: str, timeout: float = PROBE_TIMEOUT) -> bool:
-    """True if `url`/healthz answers as OpenBerry's does."""
+    """True if `url`/healthz answers as OpenBerry's does, healthy or not (503: its database has a problem, which its
+    pages then explain)."""
     import httpx
 
     try:
         # trust_env=False: never send a local address through an HTTP(S)_PROXY.
         resp = httpx.get(f"{url}/healthz", timeout=timeout, trust_env=False)
-        return resp.status_code == 200 and is_openberry_health(resp.json())
+        data = resp.json()
+        return (resp.status_code == 200 and is_openberry_health(data)) or (
+            resp.status_code == 503 and isinstance(data, dict) and data.get("app") == HEALTHZ_APP)
     except (httpx.HTTPError, ValueError):
         return False
 
@@ -435,7 +442,7 @@ def persistent_secret_key(home: Path) -> str:
             return key
     key = secrets.token_hex(32)
     try:
-        home.mkdir(parents=True, exist_ok=True)
+        config.private_dir(home)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # readable by this user only
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(key)
@@ -658,12 +665,39 @@ def _run_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Eve
         lock.release()
 
 
+def open_data(settings: Settings) -> None:
+    """Create or upgrade the database and check it (PRAGMA quick_check) before the window opens, so a problem with it
+    is shown in a window of its own (show_error) with what to do: a file a newer OpenBerry wrote, an upgrade that
+    couldn't save a copy first, a damaged file."""
+    import sqlite3
+
+    from . import backups, db
+
+    path = settings.db_path
+    try:
+        db.prepare(path)
+        problem = db.quick_check(path)
+    except db.DatabaseProblem as exc:
+        raise DesktopError(str(exc)) from exc
+    except sqlite3.DatabaseError as exc:
+        if (text := db.problem_text(exc, path)) and not text.startswith(db.DAMAGED):
+            raise DesktopError(text) from exc
+        problem = str(exc)
+    if problem:
+        raise DesktopError(
+            f"OpenBerry's data file is damaged (SQLite says: {problem[:200]}). Restore a backup: close this window, "
+            f"open a terminal and run openberry-cli restore with a backup file, such as the newest one in "
+            f"{backups.folder(path).resolve()}. Your data is in {Path(path).resolve().parent}.")
+
+
 def _serve_app(home: Path, ports: Sequence[int], window: bool, stop: threading.Event | None) -> None:
     """Start this process's server, show it, and stop it when the person is done."""
     sock = bind_port(ports)
     url = socket_url(sock)
     try:
-        server = start_server(desktop_settings(url, home), sock)
+        settings = desktop_settings(url, home)
+        open_data(settings)
+        server = start_server(settings, sock)
     except BaseException:
         sock.close()
         raise
@@ -715,6 +749,7 @@ def smoke(home: Path, ports: Sequence[int]) -> int:
     settings = desktop_settings(url, home)
     settings.scheduler_enabled = False  # a check must not start anyone's scheduled scans
     try:
+        open_data(settings)
         server = start_server(settings, sock)
     except BaseException:
         sock.close()

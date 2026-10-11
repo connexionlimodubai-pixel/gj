@@ -54,12 +54,6 @@ def post(client: TestClient, path: str, data: dict[str, Any] | None = None, *, p
     return client.post(path, data=payload, follow_redirects=False, **kwargs)
 
 
-def demo(client: TestClient) -> int:
-    resp = post(client, "/demo")
-    assert resp.status_code == 303
-    return int(resp.headers["location"].rsplit("/", 1)[-1])
-
-
 def flat_values(company: CompanyIn) -> dict[str, Any]:
     """The registration form as the browser would submit it for this profile."""
     return {k: v for k, v in forms.company_to_values(company).items() if v not in ("", [])}
@@ -126,7 +120,7 @@ def browser_submit(client: TestClient, page: str, action: str):
 def test_pages_render_on_empty_database(client):
     home = client.get("/")
     assert home.status_code == 200
-    assert "Register your company" in home.text and "Load demo data" in home.text
+    assert "Register your company" in home.text and "Load demo data" not in home.text
     for path in ("/companies", "/register", "/help"):
         resp = client.get(path)
         assert resp.status_code == 200, path
@@ -138,8 +132,8 @@ def test_pages_render_on_empty_database(client):
     assert client.get("/static/app.css").status_code == 200
 
 
-def test_every_page_renders_with_demo_data(client):
-    company_id = demo(client)
+def test_every_page_renders_with_sample_data(client, sample_company):
+    company_id = sample_company
     leads, _ = repo.list_leads(company_id, limit=100)
     person = next(lead for lead in leads if lead.kind == "person")
     account = next(lead for lead in leads if lead.kind == "account")
@@ -149,7 +143,7 @@ def test_every_page_renders_with_demo_data(client):
                  f"{base}/leads/{person.id}", f"{base}/leads/{account.id}", f"{base}/signals",
                  f"{base}/outreach", f"{base}/outreach?tab=approved", f"{base}/outreach?tab=sent",
                  f"{base}/outreach?tab=replies", f"{base}/outreach?tab=followups", f"{base}/settings",
-                 "/companies", "/register", "/help"):
+                 "/companies", "/register", "/help", "/data"):
         resp = client.get(path)
         assert resp.status_code == 200, path
     dashboard = client.get(base).text
@@ -157,7 +151,7 @@ def test_every_page_renders_with_demo_data(client):
     assert f"read company {company_id}&#39;s profile" in dashboard
     assert "Signals, last 14 days" in dashboard and "View as table" in dashboard
     board = client.get("/companies").text
-    assert "Demo: Desert Line Chauffeurs" in board and "50 qualified corporate leads" in board
+    assert "Sample: Desert Line Chauffeurs" in board and "50 qualified corporate leads" in board
     account_page = client.get(f"{base}/leads/{account.id}").text
     assert "Ask Claude to find the decision-maker" in account_page
 
@@ -502,8 +496,8 @@ def test_csv_import_and_export(client, company):
     assert "Import failed: no recognisable columns" in client.get(bad.headers["location"]).text
 
 
-def test_leads_signals_and_outreach_filters(client):
-    company_id = demo(client)
+def test_leads_signals_and_outreach_filters(client, sample_company):
+    company_id = sample_company
     base = f"/c/{company_id}"
     hot = client.get(f"{base}/leads?tier=hot").text
     assert "Aisha Rahman" in hot and "Yousef Karim" not in hot
@@ -1159,7 +1153,11 @@ def test_help_uses_the_address_the_page_was_opened_on(client, web_settings):
     blocks = _help_blocks(page)
     assert '"http://127.0.0.1:8977/mcp"' in blocks["cmd-http"]
     # Quoted, so zsh doesn't treat the "?" as a glob.
-    assert blocks["curl-example"].startswith('curl -s "http://127.0.0.1:8977/api/companies/1/leads?tier=hot" ')
+    assert blocks["curl-example"].startswith('curl -s "http://127.0.0.1:8977/api/companies" ')  # no company yet
+    company = repo.create_company(CompanyIn(name="Acme"))
+    blocks = _help_blocks(other_port.get("/help").text)
+    curl = f'curl -s "http://127.0.0.1:8977/api/companies/{company.id}/leads?tier=hot" '
+    assert blocks["curl-example"].startswith(curl)
     assert "8000" not in blocks["cmd-http"] + blocks["curl-example"]
     assert "but <code>OPENBERRY_BASE_URL</code> is <code>http://127.0.0.1:8000</code>" in page
     same = TestClient(client.app, base_url="http://127.0.0.1:8000").get("/help").text
@@ -1235,10 +1233,8 @@ def test_dashboard_scan_that_found_no_sources_is_not_reported_as_fine(client, co
     assert "Last scan: No sources configured. No signal source is configured for this company." in page
 
 
-def test_people_tile_counts_people_added_this_week():
-    from openberry.seed import seed_demo
-
-    stats = repo.company_stats(seed_demo())
+def test_people_tile_counts_people_added_this_week(sample_company):
+    stats = repo.company_stats(sample_company)
     assert stats["accounts"] > 0 and stats["new_leads_7d"] == stats["people"] + stats["accounts"]
     assert stats["new_people_7d"] == stats["people"]  # accounts aren't counted under the People tile
     assert pages.kpi_tiles(1, stats)[0]["sub"] == f"{stats['people']} added in 7 days"
@@ -1246,8 +1242,43 @@ def test_people_tile_counts_people_added_this_week():
 
 def test_source_filter_lists_each_source_once(client, company):
     assert len(ui.LEAD_SOURCES) == len(set(ui.LEAD_SOURCES))
-    assert client.get(f"/c/{company.id}/leads").text.count('<option value="demo"') == 1
-    assert client.get(f"/c/{company.id}/signals").text.count('<option value="demo"') == 1
+    for path in (f"/c/{company.id}/leads", f"/c/{company.id}/signals"):
+        page = client.get(path).text
+        assert page.count('<option value="manual"') == 1 and page.count('<option value="google_places"') == 1
+        assert '<option value="demo"' not in page  # the demo is gone: not a filter in every company any more
+
+
+# --------------------------------------------------------------------------------------
+# The demo is gone (0.2.0): first run, help, routes
+# --------------------------------------------------------------------------------------
+
+def test_first_run_has_no_demo_and_says_how_sending_works(client):
+    home = client.get("/").text
+    assert "demo" not in home.lower()
+    assert "Register your company" in home and "Set up with Claude" in home and 'href="/help#h-prompts"' in home
+    assert "sent without you" not in home
+    assert "Nothing is sent until it is approved: by you, or by auto-approve if you turn it on." in home
+    assert "Google Maps businesses (with your API key)" in home and "your own mailbox" in home
+    board = client.get("/companies").text
+    assert "No companies registered yet" in board and "demo" not in board.lower()
+
+
+def test_help_without_a_company_offers_the_onboarding_prompt(client):
+    page = client.get("/help").text
+    assert "company 1" not in page and "/api/companies/1" not in page
+    assert "onboard_company" in page and 'curl -s "http://testserver/api/companies" ' in page
+
+
+def test_help_with_a_company_names_it(client, company):
+    page = client.get("/help").text
+    assert f"company {company.id}&#39;s profile" in page and f"/api/companies/{company.id}/leads?tier=hot" in page
+
+
+def test_the_demo_route_is_gone(client):
+    from openberry.sample_cleanup import REMOVED_COMMAND
+
+    assert post(client, f"/{REMOVED_COMMAND}").status_code == 404  # with a valid CSRF token: the route is gone
+    assert repo.list_companies() == []
 
 
 def test_source_copy_uses_form_labels_and_points_reddit_at_the_server_setup(client, company):
@@ -1405,7 +1436,7 @@ def test_paused_agent_sending_shows_a_banner_and_can_be_resumed(client, company)
     assert "pill-agent-paused" in card and "Paused until" in text_of(card)
     assert f'action="{base}/outreach/agent/resume"' in card and "<script>alert(1)</script>" not in page
     assert "Nothing is queued while sending is paused." in text_of(card)
-    assert f'id="agent-prompt-1"' in card  # the prompt is still there for after the pause
+    assert 'id="agent-prompt-1"' in card  # the prompt is still there for after the pause
     # The message the agent was on stays approved, waiting for the user.
     assert repo.get_message(msg.id).status == "approved"
 

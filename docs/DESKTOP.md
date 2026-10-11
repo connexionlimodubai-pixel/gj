@@ -8,7 +8,8 @@ system-wide. Your data stays on your computer.
 - Install it on [Windows](#windows), a [Mac](#mac) or [Linux](#linux)
 - [Connect Claude Desktop](#connect-claude-desktop)
 - [Your data and settings](#your-data-and-settings), [backups](#back-up-your-data) and [restoring one](#restore-a-backup)
-- [Updating](#updating), [closing the app](#closing-the-app) and [uninstalling it](#uninstall)
+- [Updating](#updating) ([from 0.1.x](#upgrading-from-01x)), [closing the app](#closing-the-app) and
+  [uninstalling it](#uninstall)
 - [If something goes wrong](#if-something-goes-wrong)
 - For developers: [building it yourself](#building-it-yourself) and [releasing a new version](#releasing-a-new-version)
 
@@ -157,7 +158,8 @@ Inside the folder:
 - **`backups/`** holds the copies OpenBerry saves by itself (see [Back up your data](#back-up-your-data)).
 - **`.env`** holds your settings and keys, if you have any (see below), and your mailbox password.
 - **`logs/desktop.log`** records what the app did. Look here, or send it along, when something goes wrong.
-- **`webview/`** and **`desktop-secret-key`** keep you logged in to the window between runs.
+- **`webview/`** and **`desktop-secret-key`** let the window remember its session between runs, such as the company
+  you last opened. The app has no login (unless you set `OPENBERRY_PASSWORD`).
 
 **Settings.** OpenBerry works without any settings. For optional features, create a plain-text file called
 `.env` in the `.openberry` folder with one `NAME=value` per line. For example:
@@ -237,9 +239,26 @@ it, which is why step 2 quits Claude Desktop: it may still run the old `openberr
 backup from step 1 back first ([restore](#restore-a-backup), or copy the folder back by hand while everything is
 closed).
 
-**Upgrading from 0.1.x:** if you loaded the demo, open its company and click **Delete sample company** in the
-banner at the top. The next page shows what goes and what stays, and nothing is removed until you confirm.
-Its fictional people are never contacted in the meantime.
+Coming from 0.1.x? Read [Upgrading from 0.1.x](#upgrading-from-01x) first.
+
+## Upgrading from 0.1.x
+
+Version 0.2.0 stores your data differently (database version 3 becomes 6). Follow the [Updating](#updating) steps
+above, and keep these five things in mind:
+
+1. **Back up first.** Version 0.1.x has no **Your data** page. Close OpenBerry, quit Claude Desktop, then copy the
+   whole `.openberry` folder, with every file in it ([by hand](#back-up-your-data)).
+2. **Quit Claude Desktop from the tray**, not only its window: right-click Claude's icon next to the clock and choose
+   **Quit** (on a Mac, **Claude → Quit Claude**). Otherwise it keeps the old `openberry-cli` running, and that old
+   version must not open your data once 0.2.0 has upgraded it.
+3. **The upgrade is automatic.** The first time 0.2.0 opens your data, it saves a copy in `.openberry/backups`
+   (named `openberry-pre-v3-…`), then upgrades it. You don't need to do anything else.
+4. **There is no downgrade.** Don't open the upgraded data with 0.1.x. To go back, put the copy from step 1 back
+   while OpenBerry and Claude Desktop are closed.
+5. **Remove the sample company.** If you loaded the demo in 0.1.x, open its company: a banner at the top says it is
+   the sample company from the old demo. Click **Delete sample company**. The next page shows what goes and what
+   stays, and nothing is removed until you confirm. Its fictional people are never contacted in the meantime.
+   `openberry-cli remove-sample` does the same from the command line.
 
 ## Closing the app
 
@@ -354,8 +373,9 @@ To run the app from source instead, use `uv run openberry desktop`, after `uv sy
 Push a tag, and only a tag. Never create the release in GitHub's web page: a release made there has no downloads,
 becomes "Latest" at once, and every download link in this guide and the README then answers 404.
 
-1. Set the same new version in `src/openberry/__init__.py` (`__version__`) and in `pyproject.toml`. Then run
-   `uv lock` and merge the change into `main`.
+1. Set the same new version in `src/openberry/__init__.py` (`__version__`) and in `pyproject.toml`, and run
+   `uv lock`. Add a section for it at the top of `CHANGELOG.md` (`## 0.2.0`): what changed, and how to upgrade if
+   people need to do anything. It becomes the release notes. Merge the change into `main`.
 2. Tag the release and push the tag:
    ```bash
    git tag v0.2.0
@@ -364,12 +384,14 @@ becomes "Latest" at once, and every download link in this guide and the README t
 3. The **Desktop app** workflow (`.github/workflows/desktop.yml`) then:
    1. Runs the tests and builds the app on Windows, macOS (Apple silicon) and Linux.
    2. Smoke-tests each build.
-   3. Creates a draft release named "OpenBerry v0.2.0" with the three downloads, `SHA256SUMS` (their checksums)
-      and notes generated from the merged changes. A draft is invisible to the download links.
+   3. Creates a draft release named "OpenBerry v0.2.0" with the three downloads and `SHA256SUMS` (their checksums).
+      Its notes are the version's section of `CHANGELOG.md`, followed by the list of merged pull requests.
+      A draft is invisible to the download links.
    4. Publishes the draft as the latest release, once it holds every file.
    5. Checks that the three `releases/latest/download/...` links answer 200.
 
-   If the tag doesn't match the version in the code, or a test or a build fails, nothing is published.
+   If the tag doesn't match the version in the code, `CHANGELOG.md` has no section for it, or a test or a build
+   fails, nothing is published.
 
 Pull requests and pushes to `main` that change the app run the same tests, build and smoke test. Their downloads stay
 under the run's **Artifacts** for 14 days.

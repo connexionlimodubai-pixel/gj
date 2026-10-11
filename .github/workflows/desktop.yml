@@ -1,7 +1,8 @@
 # Runs the tests on Windows, macOS and Linux, builds the OpenBerry desktop app on each, checks each build end to end
 # (packaging/smoke_test.py) and keeps the downloads for 14 days. A pushed tag vX.Y.Z also publishes them as a GitHub
-# Release: a draft first, with the three downloads and SHA256SUMS, published as the latest release once complete, and
-# then the three .../releases/latest/download/... links are checked. See docs/DESKTOP.md ("Releasing").
+# Release: a draft first, with the three downloads, SHA256SUMS and the version's CHANGELOG.md section as its notes,
+# published as the latest release once complete, and then the three .../releases/latest/download/... links are checked.
+# See docs/DESKTOP.md ("Releasing").
 # Every action is pinned to a commit (the comment names its version; Dependabot proposes updates) and runs on Node 24.
 name: Desktop app
 
@@ -112,6 +113,15 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ github.ref_name }}
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Release notes from CHANGELOG.md
+        # The tag's section (## 0.2.0) becomes the release notes; GitHub adds the merged pull requests below it.
+        # No section for this version: nothing is published.
+        run: python3 packaging/release_notes.py "$TAG" > "$RUNNER_TEMP/release-notes.md"
+
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: OpenBerry-*
@@ -135,7 +145,8 @@ jobs:
           if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
             gh release delete "$TAG" --yes
           fi
-          gh release create "$TAG" downloads/* --draft --verify-tag --title "OpenBerry $TAG" --generate-notes
+          gh release create "$TAG" downloads/* --draft --verify-tag --title "OpenBerry $TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --generate-notes
 
       - name: Publish it as the latest release
         run: gh release edit "$TAG" --draft=false --latest

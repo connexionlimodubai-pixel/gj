@@ -11,7 +11,7 @@ thinking through MCP, and a web dashboard (with a registration board for your co
 | Windows 10/11 | Mac (Apple silicon) | Linux |
 |---|---|---|
 | [**OpenBerry for Windows**](https://github.com/connexionlimodubai-pixel/gj/releases/latest/download/OpenBerry-windows-x64.zip) (39 MB) | [**OpenBerry for Mac**](https://github.com/connexionlimodubai-pixel/gj/releases/latest/download/OpenBerry-macos-arm64.zip) (39 MB) | [**OpenBerry for Linux**](https://github.com/connexionlimodubai-pixel/gj/releases/latest/download/OpenBerry-linux-x64.tar.gz) (43 MB) |
-| Unzip (right-click → **Extract All**), then double-click **OpenBerry.exe**. If Windows says it protected your PC, click **More info → Run anyway**. | Unzip, drag **OpenBerry.app** to Applications, then right-click it → **Open** the first time. | Extract and run `./OpenBerry`: it opens in your browser. |
+| Unzip (right-click → **Extract All**), then double-click **OpenBerry.exe**. If Windows says it protected your PC, click **More info → Run anyway**. | Unzip, drag **OpenBerry.app** to Applications and open it. The first time, macOS blocks it: on macOS 15 or later, click **Open Anyway** in **System Settings → Privacy & Security** ([steps](docs/DESKTOP.md#mac)). | Extract and run `./OpenBerry`: it opens in your browser. |
 
 These links always download the newest version. Release notes and older versions are on the [Releases page](https://github.com/connexionlimodubai-pixel/gj/releases).
 The app isn't code-signed, which is why Windows and macOS ask you to confirm once. Step-by-step help: [docs/DESKTOP.md](docs/DESKTOP.md).
@@ -24,25 +24,35 @@ The app isn't code-signed, which is why Windows and macOS ask you to confirm onc
    - Hacker News, GitHub, Greenhouse/Lever/Ashby job boards, Google News, RSS and SEC EDGAR
    - Reddit, if you have API access
    - Google Maps businesses (hotels, event planners, law firms...) with the email and phone from their own websites,
-     if you add a Google Maps API key
+     once you paste a Google Maps API key on the **API keys** page
    - LinkedIn and anything else Claude can browse
 3. **Score every lead** transparently: ICP fit + time-decayed intent + signal stacking, plus Claude's own judgement.
    Every point is explained ("Title matches 'Travel Manager'", "Hiring for a relevant role, 3d ago").
 4. **Draft outreach** with Claude (or a free local Ollama model, or templates): LinkedIn notes, DMs, emails and follow-ups.
-   **Nothing is sent before it is approved.** You review, copy, send and mark as sent, or, if you choose, let your own
-   AI agent send the approved LinkedIn messages ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)),
-   or let OpenBerry email the approved emails from your own mailbox ([email sending](#email-sending-optional)).
-   Approve drafts one at a time, or tick several on the Outreach page and approve them together. If you can't keep up,
-   turn on **auto-approve** (off by default): drafts you don't approve, hold or skip are approved after a review window
-   you choose (2 hours by default, counted from the last edit), and never for leads who replied or are on your
-   never-contact list.
-5. **Alert you** on Slack or Discord when a person lead turns hot, whether a scan, Claude, the API, a CSV import or an edit
+   **Nothing is sent before it is approved**: by you, or by auto-approve if you turn it on. You review, copy, send and
+   mark as sent. If you choose, your own AI agent sends the approved LinkedIn messages
+   ([AI agent sending](#ai-agent-sending-optional-at-your-own-risk)), and OpenBerry emails the approved emails from
+   your own mailbox ([email sending](#email-sending-optional)). Both are off by default.
+   Approve drafts one at a time, or tick several on the Outreach page and approve them together. The page keeps your
+   place when it reloads. If you can't keep up, turn on **auto-approve** (off by default): drafts you don't approve,
+   hold or skip are approved after a review window you choose (2 hours by default, counted from the last edit), and
+   never for leads who replied or are on your never-contact list.
+5. **Read your mailbox** (if you connect it on the **Mailbox** page): a reply stops the sequence, an opt-out puts the
+   address on a never-email list, and a bounce marks the address as not working. A reply that only looks like an
+   opt-out is flagged **Looks like an opt-out**, and you decide.
+6. **Alert you** on Slack or Discord when a person lead turns hot, whether a scan, Claude, the API, a CSV import or an edit
    made it hot. Alerts go out after each scan and, while `openberry serve` runs, within a few minutes.
-   Export to CSV or use the JSON API with n8n or Activepieces.
+   Export every lead to CSV or use the JSON API with n8n or Activepieces.
+7. **Keep your data safe**: everything stays on your computer, in one file. OpenBerry saves a copy every day and
+   before every upgrade, and **Your data** downloads a backup in one click ([Back up your data](#back-up-your-data)).
 
 | Registration board | Register a company | Lead detail |
 |---|---|---|
 | ![Registration board](docs/screenshots/registration-board.png) | ![Register](docs/screenshots/register.png) | ![Lead](docs/screenshots/lead.png) |
+
+| Outreach: review, approve, send | Mailbox: email from your own address |
+|---|---|
+| ![Outreach](docs/screenshots/outreach.png) | ![Mailbox](docs/screenshots/mailbox.png) |
 
 See [docs/GOJIBERRY_COMPARISON.md](docs/GOJIBERRY_COMPARISON.md) for a feature-by-feature comparison.
 
@@ -71,10 +81,11 @@ Data lives in `~/.openberry/openberry.db` (move it with `OPENBERRY_HOME` or `OPE
 ### With Docker
 ```bash
 cp .env.example .env      # set OPENBERRY_PASSWORD (12+ characters), OPENBERRY_SECRET_KEY and OPENBERRY_API_TOKEN
-docker compose up -d      # → http://localhost:8000
+docker compose up -d      # → http://127.0.0.1:8000
 ```
 Inside the container OpenBerry listens on all addresses, so it refuses to start without a password. If only you can
 reach it (compose publishes it on 127.0.0.1), you can set `OPENBERRY_ALLOW_NO_PASSWORD=true` instead.
+For a server that other people reach, see [Run it on a server](#run-it-on-a-server).
 
 ## Connect Claude (the AI SDR)
 
@@ -102,14 +113,14 @@ Then ask Claude things like:
 - *"Find the decision-makers at the companies that are hiring, and add them."*
 - *"Draft LinkedIn connection notes for every hot lead that has no message yet."*
 
-Claude gets 25 tools (scan, prospecting plan, add leads, assess, outreach context, save draft, log reply, pipeline report…),
-plus prompts such as `daily_lead_hunt`. See [docs/CLAUDE_MCP.md](docs/CLAUDE_MCP.md).
+Claude gets 25 tools (scan, prospecting plan, add leads, assess, outreach context, save draft, log reply, pipeline report,
+the send queue for your own browser agent, the email sending status…), plus prompts such as `daily_lead_hunt`. See [docs/CLAUDE_MCP.md](docs/CLAUDE_MCP.md).
 To let Claude browse LinkedIn and the web too, add free open-source MCP servers next to OpenBerry
 (Playwright, fetch, SearXNG, and optionally a LinkedIn MCP server at your own risk). See [docs/OPEN_SOURCE_STACK.md](docs/OPEN_SOURCE_STACK.md).
 
 ## AI agent sending (optional, at your own risk)
 
-OpenBerry never opens LinkedIn or sends anything itself. If you turn on **AI agent sending** for a company (Outreach page,
+OpenBerry never opens LinkedIn or sends LinkedIn messages itself. If you turn on **AI agent sending** for a company (Outreach page,
 off by default), an AI agent running in your own browser, logged in to your LinkedIn, can send the approved LinkedIn
 messages. Claude in Chrome and Playwright MCP's extension mode both work. OpenBerry enforces the rules itself:
 - approved messages only, exactly as approved, and LinkedIn only (never email)
@@ -154,6 +165,44 @@ Delete company and before a restore. For a copy of your own, open **Your data** 
 while OpenBerry or Claude uses it: its newest changes are in `openberry.db-wal`. To put a backup back, close OpenBerry
 (and Claude Desktop) and run `openberry restore FILE`. [docs/DESKTOP.md](docs/DESKTOP.md#back-up-your-data) has the
 details, and how to update and uninstall.
+
+## Run it on a server
+
+On your own computer OpenBerry needs no login. On a server that other people can reach, it needs a password and
+HTTPS, so the password and the login cookie never cross the internet in plain text. `docker-compose.yml` has a
+**Caddy** service for that (the `caddy` profile): it gets a free certificate from Let's Encrypt and renews it by itself.
+
+1. Point a domain at the server (for example `leads.example.com`), and open ports 80 and 443 in its firewall.
+2. Make a secret key and an API token. Run this twice and copy each line it prints:
+   ```bash
+   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+   Choose a password of 12 characters or more (or run the command a third time and keep it in a password manager).
+3. `cp .env.example .env`, then set these in `.env`:
+   ```
+   OPENBERRY_BASE_URL=https://leads.example.com
+   OPENBERRY_PASSWORD=your-password
+   OPENBERRY_SECRET_KEY=the-first-line
+   OPENBERRY_API_TOKEN=the-second-line
+   OPENBERRY_TRUSTED_PROXIES=172.16.0.0/12,192.168.0.0/16
+   TZ=Asia/Dubai
+   ```
+4. Start it: `docker compose --profile caddy up -d`. Open `https://leads.example.com` and log in.
+
+What you get:
+- Caddy answers on ports 80 and 443 and sends every `http://` visit to `https://`. Because the address starts with
+  `https://`, the login cookie is only sent over HTTPS, and browsers are told to use HTTPS only (HSTS).
+- OpenBerry itself stays on Docker's internal network. Its own port is published on the server's 127.0.0.1 only, so
+  from outside only Caddy reaches it.
+- `OPENBERRY_TRUSTED_PROXIES` is Docker's private networks: OpenBerry believes the visitor's address that Caddy passes
+  on. Each visitor then has their own login limit, and someone else's wrong passwords can't lock you out.
+- Claude connects to `https://leads.example.com/mcp` with the API token (`Authorization: Bearer ...`), and the JSON API
+  is at `https://leads.example.com/api`.
+- OpenBerry refuses to start on a server address without a password of 12 characters or more. It warns when the secret
+  key or the API token is missing or shorter than 32 characters, or when the address doesn't start with `https://`.
+
+Another proxy (nginx, Traefik) works too: forward to OpenBerry's port, keep the `Host` header, pass `X-Forwarded-For`
+and `X-Forwarded-Proto`, and put the proxy's address in `OPENBERRY_TRUSTED_PROXIES`.
 
 ## Configuration
 
@@ -228,8 +277,19 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 ```bash
 uv sync --extra dev
 uv run playwright install chromium        # once: the browser tests skip without it
-uv run pytest            # ~1,380 tests, no network needed
+uv run pytest            # no network needed
 uvx ruff@0.16.8 check src tests packaging # the lint CI runs
 ```
+
+The README's screenshots come from `scripts/screenshots.py`. It fills a new, empty data folder with fictional sample
+data (paused, sending off), starts `openberry serve` on 127.0.0.1 and photographs the pages. It refuses a folder that
+holds anything, and it can't reach the internet: no Google, no mail server. It is for developers only, and not part
+of the app, the wheel or the Docker image.
+
+```bash
+OPENBERRY_HOME=/tmp/openberry-screenshots uv run --extra dev python scripts/screenshots.py  # docs/screenshots/*.png
+```
+
+Releases: [docs/DESKTOP.md](docs/DESKTOP.md#releasing-a-new-version) (what changed is in [CHANGELOG.md](CHANGELOG.md)).
 
 MIT licensed. Not affiliated with Gojiberry.

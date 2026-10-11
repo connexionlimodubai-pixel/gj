@@ -47,6 +47,7 @@ launcher = _load("launcher")
 build = _load("build")
 smoke = _load("smoke_test")
 docker_check = _load("docker_check")
+release_notes = _load("release_notes")
 
 
 def script(path: Path, body: str) -> Path:
@@ -729,6 +730,10 @@ def test_workflow_publishes_tagged_releases_as_a_draft_first(workflow: dict[Any,
     assert release["permissions"] == {"contents": "write"}
     assert release["env"]["TAG"] == "${{ github.ref_name }}" and release["env"]["GH_TOKEN"] == "${{ github.token }}"
     steps = release["steps"]
+    checkout = step_using(steps, "actions/checkout")
+    assert checkout["with"]["persist-credentials"] is False
+    notes = step_running(steps, "packaging/release_notes.py")
+    assert notes["run"] == 'python3 packaging/release_notes.py "$TAG" > "$RUNNER_TEMP/release-notes.md"'
     download = step_using(steps, "actions/download-artifact")
     assert download["with"]["pattern"] == "OpenBerry-*" and download["with"]["merge-multiple"] is True
     checksums = step_running(steps, "sha256sum")
@@ -738,9 +743,70 @@ def test_workflow_publishes_tagged_releases_as_a_draft_first(workflow: dict[Any,
     draft = step_running(steps, "gh release create")
     create = next(line for line in draft["run"].splitlines() if "gh release create" in line)
     assert '"$TAG" downloads/*' in create and "--draft" in create and '--title "OpenBerry $TAG"' in create
+    # The changelog section first, then GitHub's list of merged pull requests.
+    assert '--notes-file "$RUNNER_TEMP/release-notes.md" --generate-notes' in draft["run"]
     publish = step_running(steps, "gh release edit")
     assert "--draft=false" in publish["run"] and "--latest" in publish["run"]
+    assert steps.index(checkout) < steps.index(notes) < steps.index(draft)
     assert steps.index(download) < steps.index(checksums) < steps.index(draft) < steps.index(publish)
+
+
+CHANGELOG_TEXT = """# Changelog
+
+## 1.3.0 (soon)
+
+- Newer.
+
+## [1.2.0] - 2026-10-11
+
+### Upgrading
+
+- Back up first.
+
+## v1.1.0
+- Older.
+"""
+
+
+@pytest.mark.parametrize("tag", ["v1.2.0", "1.2.0"])
+def test_release_notes_are_the_versions_changelog_section(tag: str) -> None:
+    assert release_notes.section(CHANGELOG_TEXT, tag) == "### Upgrading\n\n- Back up first.\n"
+    assert release_notes.section(CHANGELOG_TEXT, "v1.1.0") == "- Older.\n"
+
+
+def test_release_notes_join_wrapped_lines_because_github_shows_every_line_break() -> None:
+    text = ("Intro that is\nwrapped.\n\n### Steps\n\n1. **Quit** it,\n   then back up.\n2. Open it.\n"
+            "- **Bold** item\n  goes on.\n  * nested\n| a |\n| b |\n```\ncode\n  kept\n```\nlast\nline\n")
+    assert release_notes.unwrap(text) == (
+        "Intro that is wrapped.\n\n### Steps\n\n1. **Quit** it, then back up.\n2. Open it.\n"
+        "- **Bold** item goes on.\n  * nested\n| a |\n| b |\n```\ncode\n  kept\n```\nlast line")
+
+
+def test_release_notes_refuse_a_version_without_a_section(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(release_notes.NoSection, match="no section for 1.0.0"):
+        release_notes.section(CHANGELOG_TEXT, "v1.0.0")
+    with pytest.raises(release_notes.NoSection, match="no section for 1.2.1"):
+        release_notes.section(CHANGELOG_TEXT + "## 1.2.10\n- x\n## 1.2.1-rc\n- y\n", "v1.2.1")
+    with pytest.raises(release_notes.NoSection, match="is empty"):
+        release_notes.section("## 2.0.0\n\n## 1.0.0\n- x\n", "2.0.0")
+    path = tmp_path / "CHANGELOG.md"
+    path.write_text(CHANGELOG_TEXT, encoding="utf-8")
+    assert release_notes.main(["v1.0.0", "--changelog", str(path)]) == 1
+    assert "CHANGELOG.md has no section for 1.0.0" in capsys.readouterr().err
+    assert release_notes.main(["v1.3.0", "--changelog", str(path)]) == 0
+    assert capsys.readouterr().out == "- Newer.\n"
+    assert release_notes.main([]) == 2
+
+
+def test_changelog_has_this_versions_release_notes_with_the_upgrade_steps() -> None:
+    """The release job stops without them: this catches it before the tag, in every CI run."""
+    notes = release_notes.section(release_notes.CHANGELOG.read_text(encoding="utf-8"), openberry.__version__)
+    assert release_notes.CHANGELOG == ROOT / "CHANGELOG.md"
+    if openberry.__version__ == "0.2.0":
+        for text in ("### Upgrading from 0.1.x", "Back up", "Quit Claude Desktop", "no downgrade",
+                     "Delete sample company", "OPENBERRY_ALLOW_NO_PASSWORD=true", "Email sending", "Auto-approve",
+                     "Google Maps", "API keys", "Mailbox", "Your data", "The demo is gone", "Keep your place"):
+            assert text.lower() in notes.lower(), text
 
 
 def test_workflow_checks_the_latest_download_links_after_publishing(workflow: dict[Any, Any]) -> None:
@@ -780,6 +846,40 @@ def test_compose_runs_the_app_hardened() -> None:
     assert app["ports"] == ["127.0.0.1:8000:8000"]
     ollama = compose["services"]["ollama"]["image"]
     assert re.fullmatch(r"ollama/ollama:\d+\.\d+\.\d+", ollama)
+
+
+def test_compose_caddy_profile_puts_https_in_front_of_the_app() -> None:
+    """README "Run it on a server": `docker compose --profile caddy up -d` (CI checks it with `docker compose config`)."""
+    yaml = pytest.importorskip("yaml")
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    caddy = compose["services"]["caddy"]
+    assert caddy["profiles"] == ["caddy"] and re.fullmatch(r"caddy:\d+\.\d+\.\d+", caddy["image"])
+    assert caddy["depends_on"] == ["openberry"] and {"80:80", "443:443"} <= set(caddy["ports"])
+    # Caddy needs the address only: none of OpenBerry's passwords, keys or mailbox settings.
+    assert caddy["environment"] == {"OPENBERRY_BASE_URL": "${OPENBERRY_BASE_URL:-}"} and "env_file" not in caddy
+    assert "./Caddyfile:/etc/caddy/Caddyfile:ro" in caddy["volumes"]
+    assert caddy["cap_drop"] == ["ALL"] and caddy["cap_add"] == ["NET_BIND_SERVICE"]
+    assert caddy["security_opt"] == ["no-new-privileges:true"]
+    assert {"caddy-data", "caddy-config"} <= set(compose["volumes"])
+    assert compose["services"]["openberry"]["ports"] == ["127.0.0.1:8000:8000"]  # only Caddy reaches it from outside
+    caddyfile = (ROOT / "Caddyfile").read_text(encoding="utf-8")
+    assert "{$OPENBERRY_BASE_URL} {" in caddyfile and "reverse_proxy openberry:8000" in caddyfile
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = readme.split("## Run it on a server", 1)[1].split("\n## ", 1)[0]
+    for text in ("docker compose --profile caddy up -d", "OPENBERRY_BASE_URL=https://", "OPENBERRY_PASSWORD=",
+                 "OPENBERRY_SECRET_KEY=", "OPENBERRY_API_TOKEN=", "OPENBERRY_TRUSTED_PROXIES=172.16.0.0/12",
+                 'secrets.token_urlsafe(32)', "127.0.0.1"):
+        assert text in section, text
+
+
+def test_the_documented_address_is_the_default_base_url() -> None:
+    """The help page warns when the address you opened differs from OPENBERRY_BASE_URL: the docs must not cause it."""
+    from openberry.config import DEFAULT_BASE_URL
+
+    assert DEFAULT_BASE_URL == "http://127.0.0.1:8000"
+    assert f"OPENBERRY_BASE_URL={DEFAULT_BASE_URL}\n" in (ROOT / ".env.example").read_text(encoding="utf-8")
+    for name in ("README.md", "docker-compose.yml", ".env.example", "docs/DESKTOP.md", "docs/CLAUDE_MCP.md"):
+        assert "localhost:8000" not in (ROOT / name).read_text(encoding="utf-8"), name
 
 
 def test_docker_build_context_leaves_out_tests_scripts_and_docs() -> None:

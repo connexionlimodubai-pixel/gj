@@ -16,9 +16,10 @@ from openberry.outreach import draft_template
 
 SAMPLE_NAME = "Sample: Desert Line Chauffeurs"
 LEGACY_NAME = "Demo: Desert Line Chauffeurs"
+SAMPLE_BRAND = "Desert Line"
 
 
-def _company(*, legacy_demo: bool, name: str, status: str) -> dict[str, Any]:
+def _company(*, legacy_demo: bool, name: str, status: str, brand: str = SAMPLE_BRAND) -> dict[str, Any]:
     return {
         "name": LEGACY_NAME if legacy_demo else name,
         "status": "active" if legacy_demo else status,
@@ -57,7 +58,7 @@ def _company(*, legacy_demo: bool, name: str, status: str) -> dict[str, Any]:
             "sender_title": "Corporate Accounts",
             "tone": "friendly",
             "call_to_action": "Worth a 10-minute call to set up a corporate account?",
-            "signature": "Sam — Desert Line Chauffeurs" + (" (demo)" if legacy_demo else ""),
+            "signature": f"Sam — {brand} Chauffeurs" + (" (demo)" if legacy_demo else ""),
         },
     }
 
@@ -80,7 +81,7 @@ SAMPLE_LEADS = [
      [("keyword_mention", "Uni project on Dubai transport", 2, 40)]),
     ("Hamza Siddiqui", "Chief of Staff", "Gulfstream Advisory", "Consulting", "51-200", "Dubai, UAE", []),
     ("Mei Chen", "Travel & Expense Lead", "Orbit Logistics", "Logistics", "5000+", "Dubai, UAE",
-     [("profile_visit", "Viewed the Desert Line company page", 1, 60)]),
+     [("profile_visit", "Viewed the {brand} company page", 1, 60)]),
     ("Yousef Karim", "Founder", "Sandstone Studio", "Design", "11-50", "Sharjah, UAE", []),
 ]
 
@@ -91,26 +92,30 @@ SAMPLE_ACCOUNTS = [
 ]
 
 
-def seed_sample_company(*, legacy_demo: bool = False, name: str = SAMPLE_NAME, status: str = "active") -> int:
+def seed_sample_company(*, legacy_demo: bool = False, name: str = SAMPLE_NAME, status: str = "active",
+                        brand: str = SAMPLE_BRAND) -> int:
     """Create the sample company with 10 people, 3 accounts, their signals and 2 drafts. Returns its id.
 
     By default the leads are `source="manual"` with `-sample` LinkedIn slugs, and the scan run is a `cli` one.
-    `legacy_demo=True` writes what 0.1.x's `openberry demo` wrote instead (name and status are then fixed):
+    `brand` names the company in its signature and in a lead's signal (scripts/screenshots.py uses its own).
+    `legacy_demo=True` writes what 0.1.x's `openberry demo` wrote instead (name, status and brand are then fixed):
     "Demo: ..." name, `source="demo"`, `-demo` slugs, demo@example.com and a finished scan run with trigger "demo".
     """
+    brand = SAMPLE_BRAND if legacy_demo else brand
     source = "demo" if legacy_demo else "manual"
     slug_suffix = "-demo" if legacy_demo else "-sample"
     label = "Demo" if legacy_demo else "Sample"
     company = repo.create_company(CompanyIn.model_validate(_company(legacy_demo=legacy_demo, name=name,
-                                                                    status=status)))
+                                                                    status=status, brand=brand)))
     now = repo.utcnow()
     for full_name, title, comp, industry, size, location, sigs in SAMPLE_LEADS:
         slug = full_name.lower().replace(" ", "-")
         repo.upsert_lead(company.id, LeadIn(
             full_name=full_name, title=title, lead_company=comp, industry=industry, company_size=size,
             location=location, linkedin_url=f"https://www.linkedin.com/in/{slug}{slug_suffix}", source=source,
-            signals=[SignalIn(type=t, title=st, source=source, strength=s, occurred_at=now - timedelta(days=d),
-                              summary=f"{label} signal for {full_name}") for t, st, d, s in sigs],
+            signals=[SignalIn(type=t, title=st.format(brand=brand), source=source, strength=s,
+                              occurred_at=now - timedelta(days=d), summary=f"{label} signal for {full_name}")
+                     for t, st, d, s in sigs],
         ))
     for comp, sigs in SAMPLE_ACCOUNTS:
         repo.upsert_lead(company.id, LeadIn(

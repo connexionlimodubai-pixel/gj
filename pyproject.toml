@@ -1,6 +1,6 @@
 [project]
 name = "openberry"
-version = "0.1.1"
+version = "0.2.0"
 description = "Free, self-hosted, open-source alternative to Gojiberry: intent-signal lead generation driven by Claude via MCP, with a web dashboard."
 readme = "README.md"
 license = "MIT"
@@ -46,6 +46,10 @@ filterwarnings = ["error::DeprecationWarning", "error::PendingDeprecationWarning
 
 [tool.ruff.lint]
 select = ["F", "E9", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Uses test_keep_scroll_browser's fixtures by importing them: pytest passes them in as same-named arguments.
+"tests/test_email_browser.py" = ["F811"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency markers are meant to be called in argument defaults.

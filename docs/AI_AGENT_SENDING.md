@@ -511,8 +511,9 @@ OpenBerry also never chooses who gets a message (you do, by approving, or by lea
 
 ## Questions
 
-**Does OpenBerry send anything when my agent isn't running?** No. Nothing is sent unless your agent is running and
-asks for the queue.
+**Are LinkedIn messages sent when my agent isn't running?** No. No LinkedIn message is sent unless your agent is
+running and asks for the queue: OpenBerry never sends one itself. [Email sending](EMAIL_SENDING.md) is separate: if
+you turn it on, OpenBerry emails the emails you approved while it is open.
 
 **Where does my data go?** OpenBerry keeps everything on your computer. Your agent reads the queued messages, names and
 profile links, so they go to the AI model you use, as in any chat with it.

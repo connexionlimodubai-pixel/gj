@@ -43,9 +43,10 @@ Step-by-step help: [docs/DESKTOP.md](https://github.com/connexionlimodubai-pixel
   only Google's Place ID, and stops at 900 searches a month by default (Google's free tier is 1,000).
 - **Backups.** A new **Your data** page with **Download backup**. OpenBerry also saves a copy by itself every day
   (7 days and 4 weeks are kept), before an upgrade, before Delete company and before a restore. New commands:
-  `openberry backup` and `openberry restore FILE`. A restore turns email sending and AI agent sending off, and keeps
-  the opt-outs, the never-email list and the record of sent emails from the data it replaces. Before you turn
-  sending back on, compare with your mailbox's Sent folder.
+  `openberry backup` and `openberry restore FILE`. A restore turns email sending and AI agent sending off. From the
+  data it replaces, it keeps the never-email list and the record of sent emails, and the opt-outs, replies and sends
+  recorded for the leads and messages in the backup. Before you turn sending back on, check LinkedIn and your
+  mailbox's Sent folder.
 - **Keep your place.** The Outreach tabs, Approve, Mark sent, bulk approve and the forms on the lead and profile
   pages reload the page where you were, not at the top.
 - **Clear error pages** when the disk is full, the data file is damaged or the database is busy, and a health check

@@ -54,6 +54,7 @@ MIN_WINDOW_SIZE = (960, 640)
 LOG_FILE_BYTES = 1_000_000
 LOG_FILE_BACKUPS = 2
 LOCK_FILE = "desktop.lock"
+SERVE_LOCK_FILE = "serve-{pid}.lock"  # held by `openberry serve` (serve_lock)
 SECRET_KEY_FILE = "desktop-secret-key"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 HEALTHZ_APP = "openberry"  # /healthz answers {"ok": true, "app": "openberry"} (web/app.py)
@@ -276,6 +277,17 @@ def _unlock_windows(fh: IO[bytes]) -> None:
     msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
+def _held(path: Path) -> bool:
+    """True while a process holds the lock on `path`. When the file can't be opened it can't tell, and says True."""
+    probe = InstanceLock(path)
+    if not probe.acquire():
+        return True
+    if not probe.held:
+        return True
+    probe.release()
+    return False
+
+
 def app_is_running(home: Path) -> bool:
     """True while an OpenBerry desktop app serves `home`: a process holds its desktop.lock.
 
@@ -283,13 +295,19 @@ def app_is_running(home: Path) -> bool:
     this tells it apart without connecting anywhere. When the lock file can't be opened it can't
     tell, and says True (desktop.json is then trusted, as without the lock).
     """
-    probe = InstanceLock(home / LOCK_FILE)
-    if not probe.acquire():
-        return True
-    if not probe.held:
-        return True
-    probe.release()
-    return False
+    return _held(home / LOCK_FILE)
+
+
+def serve_lock(home: Path) -> InstanceLock:
+    """The lock `openberry serve` holds while it runs (cli._serve), so a restore can tell it runs: it sends emails.
+    One file per process, OPENBERRY_HOME/serve-<pid>.lock, so two can run at once. Each deletes its own as it stops."""
+    return InstanceLock(home / SERVE_LOCK_FILE.format(pid=os.getpid()))
+
+
+def serve_is_running(home: Path) -> bool:
+    """True while an `openberry serve` serves `home`: a process holds one of its serve-*.lock files (one a crash left
+    behind is free)."""
+    return any(_held(path) for path in home.glob(SERVE_LOCK_FILE.format(pid="*")))
 
 
 def write_state(home: Path, url: str) -> None:

@@ -609,6 +609,18 @@ def test_app_is_running_follows_the_lock(home: Path) -> None:
     holder.release()
 
 
+def test_serve_is_running_follows_its_lock(home: Path) -> None:
+    """P2-RST-6: `openberry serve` holds serve-<pid>.lock while it runs, so a restore can tell (it sends emails)."""
+    assert desktop.serve_is_running(home) is False
+    lock = desktop.serve_lock(home)
+    assert lock.acquire()
+    assert desktop.serve_is_running(home) is True and desktop.app_is_running(home) is False
+    lock.release()
+    assert desktop.serve_is_running(home) is False  # a file a crash left behind is free
+    assert lock.acquire()  # the probe left it free
+    lock.release()
+
+
 def test_a_dead_apps_desktop_json_is_ignored_everywhere(home: Path) -> None:
     """Cmd+Q on macOS, End task, a crash or a power cut leave desktop.json behind; nothing may trust it."""
     script = ("import sys, time; from pathlib import Path; from openberry import desktop; "

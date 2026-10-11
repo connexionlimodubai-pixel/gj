@@ -213,9 +213,9 @@ Restoring replaces your data with the backup's.
 
 OpenBerry checks the backup first, and refuses one that is damaged or was saved by a newer version. It saves your
 current data in `backups/` before replacing it. It turns **email sending and AI agent sending off** for every
-company, and keeps the opt-outs, the never-email list and the record of sent emails from the data it replaces.
-Emails sent after the backup was made may still show as not sent: before you turn sending back on, compare the
-Outreach pages with your mailbox's **Sent** folder.
+company. From the data it replaces, it keeps the never-email list and the record of sent emails, and the opt-outs,
+replies and sends recorded for the leads and messages in the backup. Leads and messages added after the backup was
+made are not in it: before you turn sending back on, check LinkedIn and your mailbox's **Sent** folder.
 
 ## Updating
 
@@ -291,9 +291,9 @@ Task Manager (Windows: Ctrl+Shift+Esc).
 - **"This data was saved by a newer OpenBerry".** You opened an older version after a newer one updated your data.
   Open the newer version, or [restore a backup](#restore-a-backup) made with this version.
 - **"OpenBerry's data file is damaged".** [Restore a backup](#restore-a-backup), for example the newest one in
-  `.openberry/backups`. The restore keeps the damaged file there too. If it can't read that file, the opt-outs, the
-  never-email list and the record of sent emails in it are not kept, and the restore says so: check your mailbox
-  before you turn sending back on.
+  `.openberry/backups`. The restore keeps the damaged file there too. If it can't read that file, the never-email
+  list, opt-outs, replies and record of sent messages in it are not kept, and the restore says so: check LinkedIn and
+  your mailbox before you turn sending back on.
 - **"Your disk is full".** OpenBerry can't save anything until there is free space. Free some, then try again.
 - **Windows: it opens in the browser instead of a window.** Install the
   [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).

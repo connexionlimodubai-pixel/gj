@@ -10,9 +10,10 @@ import shutil
 import sqlite3
 import sys
 import threading
+import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -489,8 +490,8 @@ def test_restore_puts_the_backup_back_and_turns_sending_off(settings, mailbox, t
         holder.close()
     cli_done = backups.restore(backup, app_running=lambda: False)
     holder.close()
-    restored = repo.get_message(msg.id)
-    assert (restored.status, restored.sent_at, restored.email_state) == ("approved", None, "")  # as in the backup
+    restored = repo.get_message(msg.id)  # approved in the backup: kept as sent from the data it replaced
+    assert (restored.status, restored.email_state, restored.sent_via) == ("sent", "sent", "smtp")
     assert [c.name for c in repo.list_companies()] == ["Acme Chauffeurs"]  # the -wal wasn't replayed into it
     outreach = repo.get_company(company.id).outreach
     assert outreach.email_sending is False and outreach.agent_sending is False
@@ -513,9 +514,11 @@ def test_restore_from_the_command_line_prints_what_it_did(settings, tmp_path, mo
     cli.main(["restore", str(backup)])
     out = capsys.readouterr().out
     assert f"Restored {backup}." in out and "saved first" in out
-    assert "The opt-outs, the never-email list and the record of sent emails were kept from it." in out
+    assert ("The never-email list and the record of sent emails were kept from it. So were the opt-outs, replies and "
+            "sends it recorded for the leads and messages in the backup.") in out
     assert "Email sending and AI agent sending are now off for: Acme Chauffeurs." in out
-    assert "compare the Outreach page with your mailbox's Sent folder" in out
+    assert ("Leads and messages added after this backup was made are not in it: before you turn sending back on, "
+            "check LinkedIn and your mailbox's Sent folder.") in out
     assert repo.get_company(company_id).outreach.agent_sending is False
 
 
@@ -559,7 +562,8 @@ def test_restore_refuses_while_the_app_is_open(settings, tmp_path, monkeypatch):
     lock = desktop.InstanceLock(home / desktop.LOCK_FILE)
     assert lock.acquire()
     try:
-        with pytest.raises(backups.RestoreRefused, match="OpenBerry is open. Close OpenBerry and quit Claude"):
+        with pytest.raises(backups.RestoreRefused,
+                           match=r"OpenBerry is open\. Close OpenBerry \(or stop openberry serve\) and quit Claude"):
             backups.restore(backup)
     finally:
         lock.release()
@@ -712,8 +716,8 @@ def test_restore_keeps_opt_outs_and_never_email_entries_made_after_the_backup(se
     repo.record_opt_out(late.id, "LinkedIn message")
     repo.add_suppression("ops@z.example", "manual", "asked by phone")
     done = backups.restore(snap, app_running=lambda: False)
-    queue = repo.email_queue(company_id)
-    assert queue["items"] == [] and [s["message_id"] for s in queue["skipped"]] == [msg.id]
+    assert repo.email_queue(company_id)["items"] == []
+    assert repo.get_message(msg.id).status == "draft"  # her opt-out is kept on her lead too: the approval lapsed
     kept = {s["email"]: s for s in repo.list_suppressions()}
     assert set(kept) == {"jane@x.example", "omar@y.example", "ops@z.example"}
     assert kept["jane@x.example"]["lead_id"] == jane.id  # the backup has that lead
@@ -744,7 +748,9 @@ def test_restore_keeps_the_record_of_emails_sent_after_the_backup(settings, mail
         c.execute("UPDATE messages SET email_state = 'data', email_claimed_at = ?, email_message_id = ? WHERE id = ?",
                   (repo.iso(NOW + timedelta(minutes=10)), "<rania-1@acme-mail.example>", ids["rania"]))
     done = backups.restore(backup, app_running=lambda: False)
-    assert {repo.get_message(ids[name]).status for name in ("lina", "omar", "rania")} == {"approved"}  # as backed up
+    assert repo.get_message(ids["lina"]).status == "sent"  # kept as sent: it went out
+    assert repo.get_message(ids["rania"]).status == "approved"  # as backed up: it may have gone out
+    assert repo.get_message(ids["omar"]).status == "draft"  # his opt-out is kept: the approval lapsed
 
     repo.update_company(company.id, {"outreach": {"email_sending": True}})
     for minutes in (30, 60, 90):
@@ -753,13 +759,12 @@ def test_restore_keeps_the_record_of_emails_sent_after_the_backup(settings, mail
     assert len(mailbox.sent) == 1
     skipped = repo.email_queue(company.id, now=NOW + timedelta(hours=2))["skipped"]
     reasons = {s["message_id"]: s["reason"] for s in skipped}
-    assert "step 1 was already emailed to lina@gulfbank.example" in reasons[ids["lina"]]
     assert "step 1 was already emailed to rania@gulfbank.example" in reasons[ids["rania"]]  # may have been sent
     assert repo.suppressed_addresses(["omar@gulfbank.example"])
     assert header_id in repo.inbound_index(now=NOW)["ours"]  # a reply to it is still read
-    with db.connect() as c:  # Sami's email, in the backup already, isn't counted twice
+    with db.connect() as c:  # Sami's email, in the backup already, and Lina's, kept as sent, aren't counted twice
         logged = [tuple(r) for r in c.execute("SELECT address, email_state FROM email_sent_log ORDER BY address")]
-    assert logged == [("lina@gulfbank.example", "sent"), ("rania@gulfbank.example", "unknown")]
+    assert logged == [("rania@gulfbank.example", "unknown")]
     assert done.kept_email_history
 
 
@@ -782,10 +787,8 @@ def test_restore_keeps_emails_sent_by_hand_from_data_older_than_the_email_tables
         c.execute("PRAGMA user_version=4")
         c.commit()
     done = backups.restore(backup, app_running=lambda: False)
-    assert repo.get_message(msg.id).status == "approved"
-    [skipped] = repo.email_queue(company_id)["skipped"]
-    assert "step 1 was already emailed to lina@gulfbank.example" in skipped["reason"]
-    assert done.kept_email_history
+    assert repo.get_message(msg.id).status == "sent"
+    assert repo.email_queue(company_id)["items"] == [] and done.kept_email_history
 
 
 @pytest.mark.parametrize("folder_name", ["Backups #2", "A%41"])
@@ -812,6 +815,336 @@ def test_restore_refused_on_the_command_line_exits_with_the_reason(settings, tmp
 
 
 # --------------------------------------------------------------------------------------
+# What a restore keeps from the data it replaces, and when it stops (second review, P2-RST-*)
+# --------------------------------------------------------------------------------------
+
+
+def test_the_copy_s_changes_are_in_its_file_before_the_swap(settings, tmp_path):
+    """P2-RST-1: the copy's changes stayed in its -wal file when SQLite didn't fold them in as it closed (a full disk:
+    it ignores the error there), and the restore deleted that -wal with the swap. It said "Restored" and left a
+    malformed file. Each step that changes the copy now folds them into the file itself."""
+    company_id = a_company()
+    repo.update_company(company_id, {"outreach": {"agent_sending": True}})
+    copy = db.backup_to(tmp_path / "copy.db")
+    db.init_db(copy, copy_first=False)
+    repo.add_suppression("ops@z.example", "manual")
+    previous = db.backup_to(tmp_path / "previous.db")
+    other = sqlite3.connect(copy)  # SQLite skips that at close while another connection reads the file
+    other.execute("SELECT COUNT(*) FROM companies").fetchall()
+    wal = copy.with_name(copy.name + "-wal")
+    try:
+        assert repo.turn_sending_off_in(copy) == ["Acme Chauffeurs"]
+        assert not wal.exists() or wal.stat().st_size == 0
+        repo.keep_email_history(copy, previous)
+        assert not wal.exists() or wal.stat().st_size == 0
+    finally:
+        other.close()
+    with closing(sqlite3.connect(copy)) as c:
+        assert c.execute("SELECT email FROM email_suppressions").fetchall() == [("ops@z.example",)]
+
+
+@pytest.mark.parametrize("problem", ["disk_full", "busy"])
+def test_a_copy_that_cant_be_saved_whole_stops_the_restore(settings, tmp_path, monkeypatch, problem):
+    """P2-RST-1: folding the copy's changes into its file can fail (a full disk) or not finish. The restore stops
+    then, before the swap, and says why."""
+    a_company()
+    backup = db.backup_to(tmp_path / "b.db")
+    repo.add_suppression("ops@z.example", "manual")
+    before = counts(settings.db_path)
+
+    class Copy(sqlite3.Connection):  # the restore's copy of the backup
+        def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+            if "wal_checkpoint" in sql:
+                if problem == "disk_full":
+                    raise sqlite3.OperationalError("database or disk is full")
+                return super().execute("SELECT 1, 0, 0")  # busy: it didn't finish
+            return super().execute(sql, *args)
+
+    connect = sqlite3.connect
+
+    def connecting(path: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+        if ".restore-" in str(path):
+            kwargs["factory"] = Copy
+        return connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connecting)
+    said = {"disk_full": "database or disk is full", "busy": "database is locked"}[problem]
+    with pytest.raises(backups.RestoreRefused, match=rf"stopped before your data was replaced \({said}\)"):
+        backups.restore(backup, app_running=lambda: False)
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    assert counts(settings.db_path) == before
+    assert not list(settings.db_path.parent.glob(f".{settings.db_path.name}.restore-*"))
+
+
+def test_a_write_to_the_data_during_the_restore_stops_it(settings, tmp_path, monkeypatch):
+    """P2-RST-1: the live data's -wal file is deleted before the swap. A program that wrote after the before-restore
+    copy (another OpenBerry) has its changes there: the restore stops rather than lose them."""
+    a_company()
+    backup = db.backup_to(tmp_path / "b.db")
+    keep = repo.keep_email_history
+    writers: list[sqlite3.Connection] = []
+
+    def and_another_program_writes(path: Path, previous: Path) -> None:
+        keep(path, previous)
+        writer = sqlite3.connect(settings.db_path)  # still open: its -wal stays
+        writers.append(writer)
+        writer.execute("INSERT INTO email_suppressions (email, reason, created_at) VALUES ('late@z.example', "
+                       "'opt_out', ?)", (repo.iso(),))
+        writer.commit()
+
+    monkeypatch.setattr(repo, "keep_email_history", and_another_program_writes)
+    try:
+        with pytest.raises(backups.RestoreRefused, match="Another program is using your data right now"):
+            backups.restore(backup, app_running=lambda: False)
+    finally:
+        for writer in writers:
+            writer.close()
+    assert repo.suppressed_addresses(["late@z.example"])
+
+
+def test_restore_keeps_linkedin_messages_sent_after_the_backup(settings):
+    """P2-RST-2: only emails were kept. A LinkedIn message the AI agent sent after the backup was made was approved
+    again in it, and the agent was offered it a second time once agent sending was back on."""
+    company = repo.create_company(CompanyIn(name="Acme"))
+    repo.update_company(company.id, {"outreach": {"agent_sending": True}})
+    ghada, _ = repo.upsert_lead(company.id, LeadIn(full_name="Ghada", linkedin_url="https://www.linkedin.com/in/ghada-x"))
+    omar, _ = repo.upsert_lead(company.id, LeadIn(full_name="Omar", linkedin_url="https://www.linkedin.com/in/omar-x"))
+    dm = repo.create_message(ghada.id, "Hi Ghada", channel="linkedin_dm", status="approved", generated_by="claude")
+    note = repo.create_message(omar.id, "Hi Omar", channel="linkedin_connect", status="approved")
+    snap = backups.snapshot(backups.DAILY)
+    assert [i["message_id"] for i in repo.send_queue(company.id)["items"]] == [dm.id, note.id]
+    repo.confirm_agent_sent(dm.id)  # the agent sent it after the backup was made
+    repo.update_message(note.id, status="sent", body="Hi Omar, good to meet you")  # edited, sent by hand, marked sent
+    done = backups.restore(snap, app_running=lambda: False)
+    kept = repo.get_message(dm.id)
+    assert (kept.status, kept.sent_via) == ("sent", "agent") and kept.sent_at is not None
+    assert (repo.get_message(note.id).status, repo.get_message(note.id).body) == ("sent", "Hi Omar, good to meet you")
+    assert {repo.get_lead(ghada.id).status, repo.get_lead(omar.id).status} == {"contacted"}
+    repo.update_company(company.id, {"outreach": {"agent_sending": True}})
+    assert repo.send_queue(company.id)["items"] == [] and done.kept_email_history
+    backups.restore(done.previous, app_running=lambda: False)  # back and forth: nothing changes twice
+    backups.restore(snap, app_running=lambda: False)
+    assert repo.get_message(dm.id).sent_at == kept.sent_at
+
+
+def test_restore_keeps_opt_outs_of_leads_without_an_email_address(settings):
+    """P2-RST-2: Ghada said "don't contact me" on LinkedIn after the backup was made. With no address for the
+    never-email list, her opt-out was only on her lead, which the restore put back as it was: her approved LinkedIn
+    message went back in the agent's queue. A company that asked by email not to be contacted came off the
+    never-contact list the same way."""
+    company = repo.create_company(CompanyIn(name="Acme"))
+    repo.update_company(company.id, {"outreach": {"agent_sending": True}})
+    ghada, _ = repo.upsert_lead(company.id, LeadIn(full_name="Ghada", linkedin_url="https://www.linkedin.com/in/ghada-x"))
+    dm = repo.create_message(ghada.id, "Hi Ghada", channel="linkedin_dm", status="approved", generated_by="claude")
+    bank, _ = repo.upsert_lead(company.id, LeadIn(lead_company="Gulf Bank", email="info@gulfbank.example"))
+    snap = backups.snapshot(backups.DAILY)
+    repo.record_opt_out(ghada.id, "LinkedIn message")
+    repo.record_opt_out(bank.id, "phone call")
+    backups.restore(snap, app_running=lambda: False)
+    lead = repo.get_lead(ghada.id)
+    assert "unsubscribed" in lead.tags and lead.status == "disqualified"
+    assert f"{repo.OPT_OUT_NOTE} (LinkedIn message)." in lead.notes
+    assert repo.get_message(dm.id).status == "draft"  # its approval lapsed, as when she opted out
+    repo.update_company(company.id, {"outreach": {"agent_sending": True}})
+    assert repo.send_queue(company.id)["items"] == []
+    assert repo.get_company(company.id).icp.exclude_companies == ["Gulf Bank"]
+    assert "unsubscribed" in repo.get_lead(bank.id).tags
+    backups.restore(snap, app_running=lambda: False)  # again: nothing is added twice
+    assert repo.get_lead(ghada.id).notes.count(repo.OPT_OUT_NOTE) == 1
+    assert repo.get_lead(ghada.id).tags.count("unsubscribed") == 1
+    assert repo.get_company(company.id).icp.exclude_companies == ["Gulf Bank"]
+
+
+def _reply(sender: str, refers: str, text: str, key: str) -> bytes:
+    return (f"From: {sender}\r\nTo: {FROM}\r\nSubject: Re: Hello\r\nMessage-ID: <{key}@mail.example>\r\n"
+            f"In-Reply-To: {refers}\r\nReferences: {refers}\r\nMIME-Version: 1.0\r\n"
+            f"Content-Type: text/plain; charset=utf-8\r\n\r\n{text}\r\n").encode()
+
+
+@pytest.mark.parametrize("archived", [True, False])
+def test_restore_keeps_replies_recorded_after_the_backup(settings, mailbox, archived):
+    """P2-RST-3: Fadi's first email went out before the backup was made, and he replied after it. Once the reply had
+    left the inbox (archived), the restored data had no trace of it, and his approved follow-up went out. Hana's
+    LinkedIn reply, pasted with log_reply, was lost the same way: her follow-up was due again."""
+    company = repo.create_company(CompanyIn(name="Acme Chauffeurs"))
+    repo.update_company(company.id, {"outreach": {"email_sending": True, "email_footer": FOOTER,
+                                                  "agent_sending": True, "followup_days": [3]}})
+    fadi, _ = repo.upsert_lead(company.id, LeadIn(full_name="Fadi", email="fadi@client.example"))
+    first = repo.create_message(fadi.id, "Hello Fadi", channel="email", subject="Hello", status="approved",
+                                generated_by="claude")
+    assert services.send_next_email(now=NOW)["status"] == "sent"
+    assert services.check_inbox(now=NOW)["status"] == "ok"  # the inbox is read from here on
+    second = repo.create_message(fadi.id, "Following up", channel="email", subject="Hello", step=2,
+                                 status="approved", generated_by="claude")
+    hana, _ = repo.upsert_lead(company.id, LeadIn(full_name="Hana", linkedin_url="https://www.linkedin.com/in/hana-x"))
+    hello = repo.create_message(hana.id, "Hi Hana", channel="linkedin_dm", status="approved", generated_by="claude")
+    with db.connect() as c:  # sent a week before
+        c.execute("UPDATE messages SET status = 'sent', sent_at = ? WHERE id = ?",
+                  (repo.iso(NOW - timedelta(days=7)), hello.id))
+    repo.update_lead(hana.id, {"status": "contacted"})
+    assert [d["lead"].id for d in repo.followups_due(company.id, now=NOW)] == [hana.id]
+    snap = backups.snapshot(backups.DAILY)
+
+    uid = mailbox.deliver(_reply("fadi@client.example", repo.get_message(first.id).email_message_id,
+                                 "Thanks, call me next week", "fadi-1"))
+    assert services.check_inbox(now=NOW + timedelta(minutes=5))["recorded"] == 1
+    repo.log_reply(hana.id, "Not now, thanks")
+    if archived:
+        del mailbox.folders["INBOX"].messages[uid]
+    done = backups.restore(snap, app_running=lambda: False)
+    assert done.kept_email_history
+    replies = repo.list_messages(company.id, direction="inbound")
+    assert sorted(r.lead_id for r in replies) == sorted([fadi.id, hana.id])
+    assert repo.get_lead(fadi.id).status == repo.get_lead(hana.id).status == "replied"
+    assert repo.get_message(second.id).status == "skipped"  # the reply stopped his sequence, as it did
+    repo.update_company(company.id, {"outreach": {"email_sending": True, "agent_sending": True}})
+    later = NOW + timedelta(days=1, minutes=30)
+    repo.save_inbox_check(FROM, True, now=later)
+    assert services.check_inbox(now=later)["status"] == "ok"  # it starts again where the backup was
+    assert services.send_next_email(now=later)["status"] != "sent" and len(mailbox.sent) == 1
+    assert repo.followups_due(company.id, now=later) == [] and repo.send_queue(company.id, now=later)["items"] == []
+    assert len(repo.list_messages(company.id, direction="inbound")) == 2  # the inbox check didn't record it again
+    backups.restore(done.previous, app_running=lambda: False)  # back and forth: no reply twice
+    backups.restore(snap, app_running=lambda: False)
+    assert len(repo.list_messages(company.id, direction="inbound")) == 2
+
+
+def test_keeping_replies_stays_quick_with_many_messages(settings, tmp_path):
+    """P2-RST-3: each reply in the replaced data was looked for among every message of the backup, one at a time (no
+    index on lead_id). With 3,000 replies and 30,000 messages that took over 10 seconds, and it grows with both."""
+    company = repo.create_company(CompanyIn(name="Acme"))
+    now = repo.iso()
+    with db.connect() as c:
+        c.executemany("INSERT INTO leads (company_id, full_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                      [(company.id, f"Lead {i}", now, now) for i in range(3000)])
+        lead_ids = [r[0] for r in c.execute("SELECT id FROM leads ORDER BY id")]
+        c.executemany("INSERT INTO messages (company_id, lead_id, channel, body, status, created_at, updated_at) "
+                      "VALUES (?, ?, 'linkedin_dm', 'Hi', 'sent', ?, ?)",
+                      [(company.id, lead_ids[i % 3000], now, now) for i in range(30000)])
+        c.executemany("INSERT INTO messages (company_id, lead_id, direction, channel, body, status, created_at, "
+                      "updated_at) VALUES (?, ?, 'inbound', 'linkedin_dm', ?, 'received', ?, ?)",
+                      [(company.id, lead_id, f"Thanks {lead_id}", now, now) for lead_id in lead_ids])
+    backup = db.backup_to(tmp_path / "b.db")
+    repo.log_reply(lead_ids[0], "Call me next week")  # after the backup was made
+    started = time.monotonic()
+    backups.restore(backup, app_running=lambda: False)
+    assert time.monotonic() - started < 5
+    with db.connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM messages WHERE direction = 'inbound'").fetchone()[0] == 3001
+
+
+@pytest.mark.parametrize("where", ["copying", "reading"])
+def test_a_disk_problem_with_the_replaced_data_stops_the_restore(settings, tmp_path, monkeypatch, where):
+    """P2-RST-4: with the disk nearly full, copying the data being replaced failed ("database or disk is full"), or
+    reading that copy did ("disk I/O error": no room for its -shm file). Both counted as a damaged file: the restore
+    went on without the opt-outs and said the data could not be read. Only a damaged file is skipped now."""
+    a_company()
+    backup = db.backup_to(tmp_path / "b.db")
+    repo.add_suppression("ops@z.example", "manual")
+    before = counts(settings.db_path)
+    if where == "copying":
+        snapshot = backups.snapshot
+
+        def no_room(kind: str, **kwargs: Any) -> Path:
+            if kind == backups.BEFORE_RESTORE:
+                raise sqlite3.OperationalError("database or disk is full")
+            return snapshot(kind, **kwargs)
+
+        monkeypatch.setattr(backups, "snapshot", no_room)
+    else:
+        def no_room(path: Path, previous: Path) -> None:
+            exc = sqlite3.OperationalError("disk I/O error")
+            exc.sqlite_errorname = "SQLITE_IOERR_SHMSIZE"
+            raise exc
+
+        monkeypatch.setattr(repo, "keep_email_history", no_room)
+    said = {"copying": "database or disk is full", "reading": "disk I/O error"}[where]
+    with pytest.raises(backups.RestoreRefused, match=rf"stopped before your data was replaced \({said}\)"):
+        backups.restore(backup, app_running=lambda: False)
+    assert counts(settings.db_path) == before and repo.suppressed_addresses(["ops@z.example"])
+    assert all(s.path.read_bytes()[:16] == b"SQLite format 3\x00" for s in snaps())  # no damaged file's raw copy
+
+
+@pytest.mark.parametrize(("path", "uri"), [
+    (PureWindowsPath(r"\\NAS\Backups\openberry-backup-2026-10-11.db"),
+     "file:////NAS/Backups/openberry-backup-2026-10-11.db?mode=ro"),
+    (PureWindowsPath("//NAS/Backups/openberry-backup-2026-10-11.db"),
+     "file:////NAS/Backups/openberry-backup-2026-10-11.db?mode=ro"),
+    (PureWindowsPath(r"\\NAS\Backups #2\A%41\Dubaï.db"), "file:////NAS/Backups%20%232/A%2541/Duba%C3%AF.db?mode=ro"),
+    (PureWindowsPath(r"Z:\Backups\openberry-backup-2026-10-11.db"),
+     "file:///Z:/Backups/openberry-backup-2026-10-11.db?mode=ro"),
+    (PureWindowsPath(r"C:\Users\Sam\Backups #2\A%41\Dubaï.db"),
+     "file:///C:/Users/Sam/Backups%20%232/A%2541/Duba%C3%AF.db?mode=ro"),
+    (PurePosixPath("/home/sam/Backups #2/A%41/Dubaï.db"), "file:///home/sam/Backups%20%232/A%2541/Duba%C3%AF.db?mode=ro"),
+])
+# Python 3.14 deprecates as_uri on a pure path. OpenBerry passes real paths (Path.as_uri): pure ones only test the
+# Windows forms on any computer.
+@pytest.mark.filterwarnings("ignore:pathlib.PurePath.as_uri:DeprecationWarning")
+def test_the_read_only_uri_of_a_backup(path, uri):
+    """P2-RST-5: a backup on a network share (\\\\NAS\\Backups, or a mapped drive Windows resolves to one) got the URI
+    file://NAS/..., and SQLite refused it: "not an OpenBerry backup (invalid uri authority: NAS)"."""
+    assert db.read_only_uri(path) == uri
+
+
+def test_a_backup_opens_read_only_through_its_uri(settings, tmp_path):
+    """P2-RST-5, on this computer's own paths: the URI opens the file itself, and only to read it."""
+    a_company()
+    backup = db.backup_to(tmp_path / "Backups #2" / "A%41" / "Dubaï" / "openberry-backup.db")
+    with closing(sqlite3.connect(db.read_only_uri(backup.absolute()), uri=True)) as c:
+        assert c.execute("SELECT name FROM companies").fetchall() == [("Acme Chauffeurs",)]
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            c.execute("DELETE FROM companies")
+    if sys.platform == "win32":  # the same file through this computer's administrative share, if it has one
+        unc = Path(rf"\\localhost\{backup.drive[0]}$" + str(backup)[2:])
+    else:  # SQLite reads the URI of a network path, file:////server/share/..., as the path //server/share/...
+        unc = Path("/" + str(backup))
+    if not unc.exists():
+        pytest.skip("no administrative share")
+    with closing(sqlite3.connect(backup)) as c:  # this checks the path: a WAL file's shared memory is another matter
+        c.execute("PRAGMA journal_mode=DELETE")
+    assert db.read_only_uri(unc.absolute()).startswith("file:////")
+    assert backups.check_backup_file(unc) == db.SCHEMA_VERSION
+
+
+def test_restore_refuses_while_openberry_serve_runs(settings, tmp_path, monkeypatch):
+    """P2-RST-6: only the desktop app was looked for. `openberry serve` sends emails too: one it sent while the
+    restore ran was written to the data being replaced, and went out again once sending was back on."""
+    import uvicorn
+
+    a_company()
+    backup = db.backup_to(tmp_path / "b.db")
+    said: list[str] = []
+
+    def serving(app: Any, **options: Any) -> None:
+        with pytest.raises(backups.RestoreRefused) as refused:
+            backups.restore(backup)
+        said.append(str(refused.value))
+
+    monkeypatch.setattr(uvicorn, "run", serving)
+    cli.main(["serve"])
+    assert said == ["OpenBerry is open. Close OpenBerry (or stop openberry serve) and quit Claude Desktop (right-click "
+                    "its icon by the clock, Quit), then try again."]
+    assert snaps() == []
+    assert not list(config.OPENBERRY_HOME.glob("serve-*.lock"))  # it stopped: its lock went with it
+    assert backups.restore(backup).previous is not None
+
+
+def test_restore_keeps_the_google_maps_monthly_count(settings):
+    """P2-RST-7: the count of this month's Google Maps searches went back to the backup's, so up to 900 more could
+    run that month, past Google's free 1,000, and be billed."""
+    repo.create_company(CompanyIn(name="Acme"))
+    for _ in range(10):
+        repo.reserve_api_call("google_places_search", 900)
+    snap = backups.snapshot(backups.DAILY)
+    for _ in range(890):
+        repo.reserve_api_call("google_places_search", 900)
+    assert not repo.reserve_api_call("google_places_search", 900).granted
+    backups.restore(snap, app_running=lambda: False)
+    assert repo.api_usage("google_places_search", 900).used == 900
+    assert not repo.reserve_api_call("google_places_search", 900).granted
+
+
+# --------------------------------------------------------------------------------------
 # The Your data page
 # --------------------------------------------------------------------------------------
 
@@ -825,7 +1158,8 @@ def test_the_your_data_page(client, settings):
     assert str(settings.db_path.parent) in text and 'href="/data/backup"' in text
     assert "No automatic backups yet." not in text or not snaps()
     assert "Restore a backup" in text and "email sending and AI agent sending are off" in text
-    assert "the never-email list and the record of sent emails are kept" in text and "Sent folder" in text
+    assert "OpenBerry keeps the never-email list and the record of sent emails, and the opt-outs, replies" in text
+    assert "check LinkedIn and your mailbox's Sent folder" in text
 
     backups.daily_snapshot()
     backups.snapshot(backups.PRE_UPGRADE, version=3)

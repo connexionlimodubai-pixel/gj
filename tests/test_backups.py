@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sqlite3
+import sys
 import threading
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -451,6 +452,12 @@ def test_restore_puts_the_backup_back_and_turns_sending_off(settings, mailbox, t
     writer.close()
     assert live.with_name(live.name + "-wal").stat().st_size > 0
 
+    if sys.platform == "win32":  # Windows can't delete or replace a file another program has open: nothing changes
+        with pytest.raises(backups.RestoreRefused, match="Another program is using your data"):
+            backups.restore(backup, app_running=lambda: False)
+        with closing(sqlite3.connect(live)) as c:
+            assert c.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 2
+        holder.close()
     cli_done = backups.restore(backup, app_running=lambda: False)
     holder.close()
     restored = repo.get_message(msg.id)

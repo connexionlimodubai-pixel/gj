@@ -797,8 +797,10 @@ def test_long_flash_messages_keep_the_session_cookie_small(client, company):
 
 
 def test_help_snippets_survive_any_database_path(client, web_settings, tmp_path):
-    # Windows paths (backslashes) and spaces must not break the copied JSON config or shell command.
-    web_settings.db_path = tmp_path / "My Data" / 'odd\\name "x".db'
+    # Windows paths (backslashes) and spaces must not break the copied JSON config or shell command. Windows paths
+    # have backslashes of their own and can't contain a double quote.
+    odd = "odd name's (x).db" if sys.platform == "win32" else 'odd\\name "x".db'
+    web_settings.db_path = tmp_path / "My Data" / odd
     page = client.get("/help").text
     config = re.search(r'<pre id="cfg-desktop">(.*?)</pre>', page, re.S).group(1)
     data = json.loads(html_lib.unescape(config))

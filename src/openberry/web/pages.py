@@ -320,7 +320,7 @@ def unstable_location(command: str) -> str:
     Translocation), and Windows runs an app opened inside a zip file from a temporary folder: both
     folders disappear, and Claude Desktop's config would point at nothing.
     """
-    if "/AppTranslocation/" in command:
+    if "/AppTranslocation/" in command.replace(os.sep, "/"):
         return MOVE_TO_APPLICATIONS
     temp = os.path.normcase(os.path.realpath(_temp_dir()))
     if os.path.normcase(os.path.realpath(command)).startswith(temp.rstrip(os.sep) + os.sep):

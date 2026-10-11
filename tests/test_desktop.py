@@ -86,7 +86,8 @@ def healthz(url: str) -> Any:
 
 
 def assert_stopped(url: str) -> None:
-    with pytest.raises(httpx.ConnectError):
+    # Nothing listens any more. Windows retries a refused connection for about two seconds: a timeout there.
+    with pytest.raises((httpx.ConnectError, httpx.ConnectTimeout)):
         httpx.get(f"{url}/healthz", timeout=2, trust_env=False)
 
 
@@ -963,9 +964,10 @@ def test_packaged_app_tells_claude_to_run_its_own_cli(client: TestClient, settin
     # No console executable next to the app: the app's own executable runs CLI commands too.
     assert pages.mcp_launch(db_path) == {"command": str(app), "args": ["mcp"], "env": {"OPENBERRY_DB": db_path},
                                          "docker": False}
-    (macos / "openberry-cli").write_text("")
+    cli = macos / ("openberry-cli.exe" if sys.platform == "win32" else "openberry-cli")
+    cli.write_text("")
     assert _desktop_config(client.get("/help").text) == {
-        "command": str(macos / "openberry-cli"), "args": ["mcp"], "env": {"OPENBERRY_DB": db_path}}
+        "command": str(cli), "args": ["mcp"], "env": {"OPENBERRY_DB": db_path}}
 
     with monkeypatch.context() as m:  # Windows: openberry-cli.exe next to OpenBerry.exe
         m.setattr(sys, "executable", str(tmp_path / "OpenBerry.exe"))

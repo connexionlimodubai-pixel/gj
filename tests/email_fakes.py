@@ -252,8 +252,26 @@ class FakeIMAP:
         return "BYE", [b""]
 
 
-def _no_network(*args: Any, **kwargs: Any) -> Any:
-    raise AssertionError(f"a test tried to open a real network connection: {args[:1]}")
+_real_connect = socket.socket.connect
+_real_create_connection = socket.create_connection
+# Windows' asyncio event loop and socket.socketpair connect to themselves over the loopback address.
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def _loopback(address: Any) -> bool:
+    return isinstance(address, tuple) and bool(address) and str(address[0]) in LOOPBACK
+
+
+def _no_network_connect(sock: socket.socket, address: Any, *args: Any, **kwargs: Any) -> Any:
+    if _loopback(address):
+        return _real_connect(sock, address, *args, **kwargs)
+    raise AssertionError(f"a test tried to open a real network connection: {address!r}")
+
+
+def _no_network_create_connection(address: Any, *args: Any, **kwargs: Any) -> Any:
+    if _loopback(address):
+        return _real_create_connection(address, *args, **kwargs)
+    raise AssertionError(f"a test tried to open a real network connection: {address!r}")
 
 
 @pytest.fixture
@@ -266,8 +284,8 @@ def offline_mail(monkeypatch: pytest.MonkeyPatch) -> MailWorld:
     monkeypatch.setattr(smtplib, "SMTP", smtp)
     monkeypatch.setattr(smtplib, "SMTP_SSL", smtp_ssl)
     monkeypatch.setattr(imaplib, "IMAP4_SSL", imap)
-    monkeypatch.setattr(socket, "create_connection", _no_network)
-    monkeypatch.setattr(socket.socket, "connect", _no_network)
+    monkeypatch.setattr(socket, "create_connection", _no_network_create_connection)
+    monkeypatch.setattr(socket.socket, "connect", _no_network_connect)
     world.smtp_class, world.smtp_ssl_class = smtp, smtp_ssl  # type: ignore[attr-defined]
     return world
 

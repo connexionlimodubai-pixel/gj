@@ -1020,7 +1020,7 @@ def get_message(message_id: int, conn: sqlite3.Connection | None = None) -> Mess
 
 
 def update_message(message_id: int, *, status: str | None = None, body: str | None = None,
-                   subject: str | None = None, version: str | None = None,
+                   subject: str | None = None, version: str | None = None, pending_only: bool = False,
                    conn: sqlite3.Connection | None = None) -> Message:
     """Edit a message. Marking it sent/replied also advances the lead's pipeline status.
 
@@ -1031,9 +1031,13 @@ def update_message(message_id: int, *, status: str | None = None, body: str | No
     auto-approve approves the draft sees the approval, so the new text is a draft again, never approved unread.
     version: the message_version of the text a page showed, when its form posts no text (the Outreach page's
     Approve). Nothing changes if the text is different now (DRAFT_CHANGED), as in bulk_update_drafts.
+    pending_only: a page's Approve, which only drafts and approved messages show. Nothing changes if the message was
+    sent, skipped or replied to since the page was opened (NOT_PENDING).
     """
     with _write_locked(conn) as c:
         msg = get_message(message_id, conn=c)
+        if pending_only and msg.status not in ("draft", "approved"):
+            raise ValueError(NOT_PENDING.format(status=msg.status))
         if version is not None and message_version(msg) != version:
             raise ValueError(DRAFT_CHANGED)
         updates: dict[str, Any] = {}
@@ -1143,6 +1147,7 @@ BULK_CHANGED = "edited since the page opened"
 BULK_NOTE_TOO_LONG = "connection note too long"
 BULK_NO_SUBJECT = "email without a subject"
 DRAFT_CHANGED = "This draft changed since you opened the page: review it, then approve it."
+NOT_PENDING = "This message was marked {status} since you opened the page, so it wasn't approved."
 
 
 def message_version(msg: Message) -> str:

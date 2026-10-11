@@ -76,7 +76,7 @@
 <section class="card sample-confirm" aria-label="Confirm">
   <form method="post" action="/c/{{ company.id }}/sample" class="btn-row">{{ m.csrf() }}
     <input type="hidden" name="plan" value="{{ plan.token }}">
-    <button class="btn btn-danger" type="submit">{{ m.icon("trash") }}{% if safe %}Delete the sample company{% elif removing %}Remove {{ removing|plural("sample lead") }}{% else %}Remove the sample marker{% endif %}</button>
+    <button class="btn btn-danger" type="submit">{{ m.icon("trash") }}{% if plan.removes == "company" %}Delete the sample company{% elif plan.removes == "leads" %}Remove {{ removing|plural("sample lead") }}{% else %}Remove the sample marker{% endif %}</button>
     <a class="btn btn-ghost" href="/c/{{ company.id }}">Cancel</a>
   </form>
   {% if safe %}<p class="small muted">A backup of your data is saved first.</p>{% endif %}

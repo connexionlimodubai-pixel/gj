@@ -40,15 +40,21 @@ REMOVED_COMMAND = "demo"
 REMOVED_COMMAND_NOTE = ("The demo was removed in OpenBerry 0.2.0. Register your company in the dashboard "
                         "(openberry serve), or ask Claude to set it up with the onboard_company prompt.")
 BANNER_TEXT = "This is the sample company from the old demo: fictional people and companies."
-COMPANY_NOTE = ("This is the sample company from the old demo: fictional people and companies, never contacted. "
-                "Don't work on it. The user can delete it with the banner on its dashboard.")
+FICTIONAL_NOTE = ("This is the sample company from the old demo: fictional people and companies, never contacted. "
+                  "Don't work on it.")
+COMPANY_NOTE = f"{FICTIONAL_NOTE} The user can delete it with the banner on its dashboard."
+# The banner's removal keeps the company (CleanupPlan.removes is "leads" or "marker").
+KEEPS_COMPANY_NOTE = (" The banner on its dashboard removes {removes} and keeps the company. The user can delete the "
+                      "company on its Company profile page (Delete company).")
 # A sample company the user made their own (CleanupPlan.repurposed): only the sample leads left in it are sample data.
 REPURPOSED_TEXT = "This company still holds {leads} from the old demo. Sample leads are never contacted."
 REPURPOSED_NOTE = " The user can remove them with the banner on its dashboard."
+SOME_UNTOUCHED_NOTE = (" The banner on its dashboard removes the {untouched}. The user can delete the others from "
+                       "their lead pages.")
+NONE_UNTOUCHED_NOTE = " The user can delete them from their lead pages."
 NO_SAMPLE_LEADS_TEXT = "No sample leads from the old demo are left in this company."
-DELETE_BUTTON = "Delete sample company"
-REMOVE_BUTTON = "Remove sample leads"
-REMOVE_MARKER_BUTTON = "Remove sample marker"
+# The banner's button, by what the removal page removes (CleanupPlan.removes).
+BANNER_BUTTONS = {"company": "Delete sample company", "leads": "Remove sample leads", "marker": "Remove sample marker"}
 CLI_HELP = "remove the sample company the old demo created (shows what goes first)"
 NOT_FOUND = "No sample company found."
 
@@ -100,6 +106,12 @@ def is_sample_company(company_id: int, conn: sqlite3.Connection | None = None) -
 
 def sample_company_ids(conn: sqlite3.Connection | None = None) -> set[int]:
     return repo.company_ids_with_scan_trigger(MARKER_TRIGGER, conn=conn)
+
+
+def fictional_company_ids() -> set[int]:
+    """The sample companies that are still fictional, not the ones the user made their own (CleanupPlan.repurposed):
+    the Help page's example prompts never name one."""
+    return {i for i in sample_company_ids() if (plan := cleanup_plan(i)) is not None and not plan.repurposed}
 
 
 def profile_edited(company: Company) -> bool:
@@ -159,9 +171,18 @@ class CleanupPlan:
 
     @property
     def repurposed(self) -> bool:
-        """The user made the company their own: they changed its profile (as skips_scheduled_scans counts it). Leads
-        added to it don't count: 0.1.x scanned the demo company, and its profile is still the fictional one."""
-        return self.profile_edited
+        """The user made the company their own: they changed who it is (a field in PROFILE_LABELS no longer holds the
+        demo's value). Pause, a save that changed none of them and the Outreach switches don't count, nor do leads
+        added to it: 0.1.x scanned the demo company, and its profile is still the fictional one."""
+        return self.profile_edited and len(self.sample_fields) < len(PROFILE_LABELS)
+
+    @property
+    def removes(self) -> str:
+        """What the removal page removes, so what the banner's button and Claude's note offer: "company" (all of it),
+        "leads" (the untouched sample leads and the marker) or "marker" (only the marker: the banner goes away)."""
+        if self.whole_company_safe:
+            return "company"
+        return "leads" if self.sample_lead_ids else "marker"
 
     @property
     def sample_leads_left(self) -> int:
@@ -201,19 +222,28 @@ def banner_text(plan: CleanupPlan) -> str:
 
 
 def banner_button(plan: CleanupPlan) -> str:
-    """The banner's button says what the removal page offers: the whole company, its sample leads, or only the
-    marker (the banner then goes away)."""
-    if plan.whole_company_safe:
-        return DELETE_BUTTON
-    return REMOVE_BUTTON if plan.sample_leads_left else REMOVE_MARKER_BUTTON
+    """The banner's button says what the removal page offers: the whole company, its untouched sample leads, or only
+    the marker (the banner then goes away)."""
+    return BANNER_BUTTONS[plan.removes]
 
 
 def company_note(plan: CleanupPlan) -> str:
-    """The note Claude gets with the company (MCP list_companies), "" for none. A company the user made their own is
-    theirs to work on: only its sample leads are left alone, and with none left there is nothing to say."""
+    """The note Claude gets with the company (MCP list_companies), "" for none. It says what the banner removes, as
+    the removal page does (CleanupPlan.removes). A company the user made their own is theirs to work on: only its
+    sample leads are left alone, and with none left there is nothing to say."""
+    untouched = len(plan.sample_lead_ids)
     if not plan.repurposed:
-        return COMPANY_NOTE
-    return banner_text(plan) + REPURPOSED_NOTE if plan.sample_leads_left else ""
+        if plan.removes == "company":
+            return COMPANY_NOTE
+        removes = f"only its {count_of(untouched, 'untouched sample lead')}" if plan.removes == "leads" else "no leads"
+        return FICTIONAL_NOTE + KEEPS_COMPANY_NOTE.format(removes=removes)
+    if not plan.sample_leads_left:
+        return ""
+    if plan.removes == "marker":  # every sample lead left changed since: the banner removes none of them
+        return banner_text(plan) + NONE_UNTOUCHED_NOTE
+    if plan.touched_demo_lead_ids:
+        return banner_text(plan) + SOME_UNTOUCHED_NOTE.format(untouched=count_of(untouched, "untouched one"))
+    return banner_text(plan) + REPURPOSED_NOTE
 
 
 def _seeded_draft(msg: Message, marker: ScanRun) -> bool:

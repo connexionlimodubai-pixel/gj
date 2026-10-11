@@ -356,8 +356,8 @@ def mcp_launch(db_path: str) -> dict[str, Any]:
 @router.get("/help")
 def help_page(request: Request) -> Response:
     settings = get_settings()
-    samples = sample_cleanup.sample_company_ids()
-    example = next((c for c in repo.list_companies() if c.id not in samples), None)  # the prompts name a real one
+    fictional = sample_cleanup.fictional_company_ids()
+    example = next((c for c in repo.list_companies() if c.id not in fictional), None)  # the prompts name a real one
     launch = mcp_launch(str(settings.db_path.resolve()))
     desktop = {"mcpServers": {"openberry": {"command": launch["command"], "args": launch["args"],
                                             **({"env": launch["env"]} if launch["env"] else {})}}}

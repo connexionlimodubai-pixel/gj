@@ -350,6 +350,39 @@ def test_another_accounts_data_folder_is_left_alone_and_a_failed_chmod_never_sto
 
 
 @posix_only
+def test_only_a_regular_env_file_and_a_data_folder_of_its_own_are_made_private(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2F-2: OPENBERRY_ENV_FILE=/dev/null (a device) or a FIFO reads as an empty file and keeps its mode, and so does
+    OPENBERRY_HOME=/tmp (a shared folder: it has the sticky bit), directly or through a link: as root, chmod would
+    lock every other account out of them. A .env file or data folder linked from elsewhere (dotfiles) is made
+    private, as saving settings in the dashboard does."""
+    fifo, shared = tmp_path / "fifo", tmp_path / "tmp"
+    os.mkfifo(fifo)
+    fifo.chmod(0o666)
+    shared.mkdir()
+    shared.chmod(0o1777)
+    (tmp_path / "fifo-link").symlink_to(fifo)
+    (tmp_path / "tmp-link").symlink_to(shared, target_is_directory=True)
+    for env_file, home in ((fifo, shared), (tmp_path / "fifo-link", tmp_path / "tmp-link")):
+        monkeypatch.setenv("OPENBERRY_ENV_FILE", str(env_file))
+        monkeypatch.setattr(config, "OPENBERRY_HOME", home)
+        config.private_files()
+        assert mode(fifo) == 0o666 and stat.S_ISFIFO(fifo.stat().st_mode) and mode(shared) == 0o1777
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    dotfiles.chmod(0o755)
+    (dotfiles / "openberry.env").write_text("GITHUB_TOKEN=x\n", encoding="utf-8")
+    (dotfiles / "openberry.env").chmod(0o644)
+    (tmp_path / "link.env").symlink_to(dotfiles / "openberry.env")
+    (tmp_path / "home").symlink_to(dotfiles, target_is_directory=True)
+    monkeypatch.setenv("OPENBERRY_ENV_FILE", str(tmp_path / "link.env"))
+    monkeypatch.setattr(config, "OPENBERRY_HOME", tmp_path / "home")
+    config.private_files()
+    assert mode(dotfiles / "openberry.env") == 0o600 and mode(dotfiles) == 0o700
+    assert (tmp_path / "link.env").is_symlink() and (tmp_path / "home").is_symlink()
+
+
+@posix_only
 def test_a_data_folder_set_to_the_home_folder_keeps_its_permissions(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     me = tmp_path / "me"

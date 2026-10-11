@@ -564,12 +564,14 @@ def _home_or_above(path: Path) -> bool:
 
 
 def _owner_only(path: Path, mode: int, folder: bool) -> None:
-    """chmod `path` to `mode` when it is a folder (or a file) this user owns. Errors are ignored: OpenBerry still
-    starts."""
+    """chmod `path` to `mode` when it is a folder (or a regular file) this user owns. A symlink is followed, as when
+    the dashboard saves the .env file. A device, FIFO or socket is left alone, and so is a shared folder such as /tmp
+    (it has the sticky bit): as root, OPENBERRY_ENV_FILE=/dev/null or OPENBERRY_HOME=/tmp would otherwise lock every
+    other account out of it. Errors are ignored: OpenBerry still starts."""
     try:
         st = path.stat()
-        if (st.st_uid == os.getuid() and stat.S_ISDIR(st.st_mode) == folder
-                and stat.S_IMODE(st.st_mode) != mode):
+        kind_ok = (stat.S_ISDIR(st.st_mode) and not st.st_mode & stat.S_ISVTX) if folder else stat.S_ISREG(st.st_mode)
+        if st.st_uid == os.getuid() and kind_ok and stat.S_IMODE(st.st_mode) != mode:
             path.chmod(mode)
     except OSError:
         pass

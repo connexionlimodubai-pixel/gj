@@ -219,7 +219,7 @@
     <section class="card" aria-labelledby="pipeline-title">
       <h2 id="pipeline-title" class="card-title">Pipeline</h2>
       <form method="post" action="{{ lead_url }}/update" class="stack" data-keep-scroll>
-        {{ m.csrf() }}
+        {{ m.csrf() }}<input type="hidden" name="shown_tags" value="{{ lead.tags|join(', ') }}">
         <div class="field"><label for="lead-status">Status</label>
           <select class="input" id="lead-status" name="status">{% for value, label in STATUS_OPTIONS %}<option value="{{ value }}"{% if lead.status == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
         <div class="field"><label for="lead-notes">Notes</label>

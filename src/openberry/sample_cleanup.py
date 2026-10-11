@@ -42,6 +42,9 @@ REMOVED_COMMAND_NOTE = ("The demo was removed in OpenBerry 0.2.0. Register your 
 BANNER_TEXT = "This is the sample company from the old demo: fictional people and companies."
 COMPANY_NOTE = ("This is the sample company from the old demo: fictional people and companies, never contacted. "
                 "Don't work on it. The user can delete it with the banner on its dashboard.")
+# A sample company the user made their own (CleanupPlan.repurposed): only the sample leads left in it are sample data.
+REPURPOSED_TEXT = "This company still holds {leads} from the old demo. Sample leads are never contacted."
+REPURPOSED_NOTE = " The user can remove them with the banner on its dashboard."
 CLI_HELP = "remove the sample company the old demo created (shows what goes first)"
 NOT_FOUND = "No sample company found."
 
@@ -149,6 +152,11 @@ class CleanupPlan:
     def whole_company_safe(self) -> bool:
         """Nothing in the company is the user's: deleting it loses nothing but the demo."""
         return not (self.profile_edited or self.touched_demo_lead_ids or self.other_lead_ids or self.sent_messages)
+
+    @property
+    def repurposed(self) -> bool:
+        """The user made the company their own: they changed its profile or added leads to it."""
+        return self.profile_edited or bool(self.other_lead_ids)
 
     @property
     def token(self) -> str:

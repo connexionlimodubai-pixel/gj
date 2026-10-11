@@ -128,13 +128,15 @@
       removed += Math.max(0, Math.min(end, top) - li.getBoundingClientRect().top);
     });
     // The card acted on keeps its place on screen (the next one takes it when it leaves), even if cards above it
-    // changed meanwhile: auto-approve approves due drafts as the page loads.
+    // changed meanwhile: auto-approve approves due drafts as the page loads. A card that was to leave but is still
+    // there (the action was refused: its draft changed) keeps its own place.
     let pin = card || null;
     while (pin && (leaving || []).includes(pin)) pin = pin.nextElementSibling;
     const state = {
       to: to, at: Date.now(), focus: focus || null, y: window.scrollY - removed,
       top: anchor ? anchor.getBoundingClientRect().top + removed : null,
       pin: pin && pin.id ? pin.id : null, pinTop: card ? card.getBoundingClientRect().top + removed : null,
+      card: card && card !== pin && card.id ? card.id : null, cardTop: card ? card.getBoundingClientRect().top : null,
     };
     try { sessionStorage.setItem(KEEP_SCROLL_KEY, JSON.stringify(state)); } catch (err) { /* storage blocked */ }
   }
@@ -150,9 +152,10 @@
     // and so does a form shown again with errors: they are listed at its top.
     if (!keepScrollApplies(state) || $(".form-alert")) return;
     const anchor = $("[data-scroll-anchor]");
-    const pin = state.pin && typeof state.pinTop === "number" ? document.getElementById(state.pin) : null;
+    const stayed = state.card && typeof state.cardTop === "number" ? document.getElementById(state.card) : null;
+    const pin = stayed || (state.pin && typeof state.pinTop === "number" ? document.getElementById(state.pin) : null);
     let y = state.y;
-    if (pin) y = pin.getBoundingClientRect().top + window.scrollY - state.pinTop;
+    if (pin) y = pin.getBoundingClientRect().top + window.scrollY - (stayed ? state.cardTop : state.pinTop);
     else if (anchor && typeof state.top === "number") {
       y = anchor.getBoundingClientRect().top + window.scrollY - state.top;
     }

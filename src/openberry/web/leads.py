@@ -18,6 +18,7 @@ from .. import leads_csv, outreach, repo
 from ..config import get_settings
 from ..models import (
     AGENT_CHANNELS, APPROVED_VIA_AUTO, LEAD_STATUSES, MESSAGE_CHANNELS, PROSPECT_TYPES, TIERS, Company, Lead, Message,
+    split_list,
 )
 from ..repo import AGENT_QUEUE_MAX
 from . import forms, mail
@@ -224,10 +225,26 @@ def lead_update(request: Request, company_id: int, lead_id: int, form: FormData 
     for name in ("notes", "tags"):
         if name in form:
             fields[name] = _form_text(form, name)
+    # The user's own form: removing the "unsubscribed" tag here is their decision (Claude and the API can't), but
+    # only from a page that showed it. A page opened before the opt-out was recorded (say, by the inbox check) keeps
+    # the tag, the lead's status and the dated note.
+    shown = repo.OPT_OUT_TAG in split_list(_form_text(form, "shown_tags"))
     try:
-        # The user's own form: removing the "unsubscribed" tag here is their decision (Claude and the API can't).
-        repo.update_lead(lead_id, fields, keep_opt_out=False)
-        flash(request, "Lead updated.")
+        with repo.write_locked() as c:
+            lead = repo.get_lead(lead_id, conn=c)
+            opted_out_since = repo.OPT_OUT_TAG in lead.tags and not shown
+            if opted_out_since:
+                fields.pop("status", None)
+                if "notes" in fields:
+                    dated = [line for line in lead.notes.splitlines()
+                             if repo.OPT_OUT_NOTE in line and line not in fields["notes"]]
+                    fields["notes"] = "\n".join([fields["notes"], *dated]).strip()
+            repo.update_lead(lead_id, fields, conn=c, keep_opt_out=not shown)
+        if opted_out_since:
+            flash(request, "Lead updated, except the status: the lead asked not to be contacted since you opened "
+                           "this page.", "warning")
+        else:
+            flash(request, "Lead updated.")
     except ValueError as exc:
         flash(request, str(exc), "error")
     return redirect(f"/c/{company_id}/leads/{lead_id}")
@@ -433,8 +450,11 @@ def message_action(request: Request, company_id: int, message_id: int,
             and not edits.get("subject", message.subject).strip()):
         flash(request, NO_SUBJECT, "error")
         return redirect(back)
+    # The Outreach page's Approve posts no text, only the version of the text it showed: an edit Claude or another
+    # tab saved since then is not approved unread. A post without one (a page from before) approves nothing.
+    version = _form_text(form, "version") if action == "approve" and not edits else None
     try:
-        updated = repo.update_message(message_id, status=MESSAGE_ACTIONS[action], **edits)
+        updated = repo.update_message(message_id, status=MESSAGE_ACTIONS[action], version=version, **edits)
     except ValueError as exc:
         flash(request, str(exc), "error")
         return redirect(back)

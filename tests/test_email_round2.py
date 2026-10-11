@@ -557,6 +557,45 @@ def test_a_colleagues_forward_is_read_and_says_who_wrote(company, box):
     assert [e["kind"] for e in repo.list_email_events(lead_id=omar)] == ["reply"]
 
 
+def test_a_colleagues_forward_goes_to_the_person_it_names(company, box):
+    """INBOX2-2, two people at the same hotel got the same email: the PA's forward about Omar quotes "To: omar...". It
+    is logged on Omar, not on Rania (emailed later), and Omar gets no follow-up."""
+    item = CORPUS_ITEMS["52_optout_pa_forward_no_references.eml"]
+    turn_on(company)
+    omar = lead(company, item["lead"], full_name="Omar")
+    sent_from_mailbox(omar, header_id=item["our_id"], when=NOW - timedelta(hours=3))
+    rania = lead(company, "rania.fom@desert-pearl-hotel.example", full_name="Rania")
+    sent_from_mailbox(rania, header_id="<rania-1@acme-mail.example>", when=NOW - timedelta(hours=1))
+    omar_follow_up, rania_follow_up = approved(omar, step=2), approved(rania, step=2)
+    services.check_inbox(now=NOW)
+    box.deliver((CORPUS / item["file"]).read_bytes())
+    assert services.check_inbox(now=NOW + timedelta(minutes=5))["recorded"] == 1
+    assert [m.direction for m in repo.list_messages(company.id, lead_id=omar)].count("inbound") == 1
+    assert [m.direction for m in repo.list_messages(company.id, lead_id=rania)].count("inbound") == 0
+    assert repo.get_message(omar_follow_up.id).status == "skipped"
+    assert repo.get_message(rania_follow_up.id).status == "approved"  # nobody asked about Rania
+
+
+def test_a_colleagues_note_naming_nobody_stops_everyone_it_may_be_about(company, box):
+    """INBOX2-2: a colleague writes about "our GM" without naming anyone, and two people there got that email: it is
+    logged on the latest and the follow-ups of both stop, so the right one can't keep getting emails."""
+    turn_on(company)
+    first = lead(company, "omar.gm@desert-pearl-hotel.example", full_name="Omar")
+    sent_from_mailbox(first, header_id="<omar-1@acme-mail.example>", when=NOW - timedelta(hours=3))
+    second = lead(company, "rania.fom@desert-pearl-hotel.example", full_name="Rania")
+    sent_from_mailbox(second, header_id="<rania-1@acme-mail.example>", when=NOW - timedelta(hours=1))
+    follow_ups = [approved(first, step=2), approved(second, step=2)]
+    services.check_inbox(now=NOW)
+    box.deliver(reply("Please don't email our GM again, he isn't interested.", sender="pa@desert-pearl-hotel.example",
+                      subject="RE: Airport transfers for your guests", refers="", name="Noura"))
+    result = services.check_inbox(now=NOW + timedelta(minutes=5))
+    assert result["recorded"] == 1
+    assert [repo.get_message(f.id).status for f in follow_ups] == ["skipped", "skipped"]
+    assert [m.direction for m in repo.list_messages(company.id, lead_id=second)].count("inbound") == 1
+    stopped = [e for e in repo.list_email_events(lead_id=first) if e["detail"].startswith("Follow-ups stopped")]
+    assert stopped and "pa@desert-pearl-hotel.example" in stopped[0]["detail"]
+
+
 def test_mail_from_a_free_mail_domain_is_no_colleague(company, box):
     """INBOX2-2: two people with Gmail addresses aren't colleagues."""
     turn_on(company)

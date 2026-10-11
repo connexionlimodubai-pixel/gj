@@ -3333,6 +3333,7 @@ class _InboundMatch:
     lead: Lead | None = None
     logged: sqlite3.Row | None = None  # an email whose message, lead or company was deleted since (email_sent_log)
     by_domain: bool = False            # only the sender's company domain matched: a colleague of the lead wrote
+    also_stop: tuple[int, ...] = ()    # by_domain and unsure which lead it is about: these leads' sequences stop too
 
 
 # Emailed in the lookback: sent (also by hand), or may have been sent.
@@ -3390,16 +3391,26 @@ def _match_inbound(c: sqlite3.Connection, inbound: mailer.Inbound, now: datetime
     if not domain:
         return _InboundMatch()
     rows = c.execute(
-        f"SELECT l.*, m.subject AS sent_subject FROM leads l JOIN messages m ON m.lead_id = l.id "
+        f"SELECT l.*, m.subject AS sent_subject, m.email_to AS sent_to FROM leads l "
+        f"JOIN messages m ON m.lead_id = l.id "
         f"WHERE m.direction = 'outbound' AND m.channel = 'email' AND {_EMAILED_SQL} "
         f"AND (lower(trim(m.email_to)) LIKE ? OR lower(trim(l.email)) LIKE ?) "
         f"ORDER BY COALESCE(m.sent_at, m.email_claimed_at) DESC LIMIT 50",
         (since, since, f"%@{domain}", f"%@{domain}")).fetchall()
     if not rows:
         return _InboundMatch()
+    # The lead the message names (a forward quotes the email we sent it), else the one whose email the subject answers.
+    # Still more than one lead: it is logged on the latest and the others' sequences stop too, so a colleague's "please
+    # remove him" can't be lost on the wrong person while he keeps getting follow-ups.
+    mentioned = set(inbound.mentioned)
+    named = [r for r in rows
+             if normalize_email(r["sent_to"] or "") in mentioned or normalize_email(r["email"] or "") in mentioned]
     answered = mailer.base_subject(inbound.subject)
-    chosen = next((r for r in rows if answered and mailer.base_subject(r["sent_subject"] or "") == answered), rows[0])
-    return _InboundMatch(lead=_lead_from_row(chosen), by_domain=True)
+    on_subject = [r for r in rows if answered and mailer.base_subject(r["sent_subject"] or "") == answered]
+    candidates = named or on_subject or rows
+    chosen = candidates[0]
+    others = tuple(dict.fromkeys(r["id"] for r in candidates if r["id"] != chosen["id"]))[:20]
+    return _InboundMatch(lead=_lead_from_row(chosen), by_domain=True, also_stop=others)
 
 
 NO_REPLY_TEXT = "(The reply had no text of its own.)"
@@ -3490,9 +3501,17 @@ def record_inbound(inbound: mailer.Inbound, key: str, now: datetime | None = Non
                                addresses=[inbound.from_email, msg.email_to if msg is not None else ""],
                                automatic=True, conn=c)
         _email_event(c, lead.company_id, lead.id, message_id, kind, detail, inbound_key=key, now=now)
+        for other_id in found.also_stop:  # a colleague wrote and it may be about one of these: no more follow-ups
+            other = c.execute("SELECT company_id FROM leads WHERE id = ?", (other_id,)).fetchone()
+            if other is not None:
+                _stop_sequence(c, other_id)
+                _email_event(c, other["company_id"], other_id, None, "reply",
+                             f"Follow-ups stopped: {normalize_email(inbound.from_email)} wrote about one of the people "
+                             f"you emailed at their company, see {lead.display_name}", now=now)
         if kind in ("bounce", "policy_reject"):
             _email_guard(c, lead.company_id, kind, now)
-        return {"status": "recorded", "kind": kind, "lead_id": lead.id, "message_id": message_id}
+        return {"status": "recorded", "kind": kind, "lead_id": lead.id, "message_id": message_id,
+                "also_stopped": list(found.also_stop)}
 
 
 def _record_about_deleted(c: sqlite3.Connection, inbound: mailer.Inbound, logged: sqlite3.Row, key: str,

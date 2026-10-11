@@ -1180,6 +1180,7 @@ class Inbound:
     original_ids: tuple[str, ...] = ()   # a bounce: the Message-IDs of the email that bounced
     opt_out: str = ""                    # the words that made it an opt-out (as written)
     opt_out_hint: str = ""               # a reply: words that look like an opt-out, for the user to decide
+    mentioned: tuple[str, ...] = ()      # addresses anywhere in it, quoted part and To/Cc included (whom a forward is about)
 
 
 def _header(msg: Message, name: str, whole: bool = False) -> str:
@@ -1371,7 +1372,11 @@ def classify_inbound(raw: bytes, ignore: Iterable[str] = ()) -> Inbound:
         return Inbound(kind, **base, failed_recipients=recipients, status=status, diagnostic=diagnostic,
                        original_ids=_original_ids(msg, own_id))
 
-    text = strip_quoted(_body_text(msg))[:INBOUND_TEXT_MAX]
+    body = _body_text(msg)
+    text = strip_quoted(body)[:INBOUND_TEXT_MAX]
+    # Whom it may be about: a colleague's forward quotes the email we sent ("To: omar@hotel.ae").
+    mentioned = find_addresses(f"{body} {_header(msg, 'To', True)} {_header(msg, 'Cc', True)}", limit=50)
+    base = {**base, "mentioned": tuple(a for a in mentioned if a != from_email)}
     if m := _UNSUBSCRIBE_SUBJECT.match(subject):  # the List-Unsubscribe email
         return Inbound(OPT_OUT, **base, text=text, token=m.group(1).lower(), opt_out="unsubscribe")
     # A newsletter from the lead's own address (a hotel's Mailchimp campaign from info@) answers none of our emails:

@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import sys
 import threading
+import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -1008,6 +1009,30 @@ def test_restore_keeps_replies_recorded_after_the_backup(settings, mailbox, arch
     assert len(repo.list_messages(company.id, direction="inbound")) == 2
 
 
+def test_keeping_replies_stays_quick_with_many_messages(settings, tmp_path):
+    """P2-RST-3: each reply in the replaced data was looked for among every message of the backup, one at a time (no
+    index on lead_id). With 3,000 replies and 30,000 messages that took over 10 seconds, and it grows with both."""
+    company = repo.create_company(CompanyIn(name="Acme"))
+    now = repo.iso()
+    with db.connect() as c:
+        c.executemany("INSERT INTO leads (company_id, full_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                      [(company.id, f"Lead {i}", now, now) for i in range(3000)])
+        lead_ids = [r[0] for r in c.execute("SELECT id FROM leads ORDER BY id")]
+        c.executemany("INSERT INTO messages (company_id, lead_id, channel, body, status, created_at, updated_at) "
+                      "VALUES (?, ?, 'linkedin_dm', 'Hi', 'sent', ?, ?)",
+                      [(company.id, lead_ids[i % 3000], now, now) for i in range(30000)])
+        c.executemany("INSERT INTO messages (company_id, lead_id, direction, channel, body, status, created_at, "
+                      "updated_at) VALUES (?, ?, 'inbound', 'linkedin_dm', ?, 'received', ?, ?)",
+                      [(company.id, lead_id, f"Thanks {lead_id}", now, now) for lead_id in lead_ids])
+    backup = db.backup_to(tmp_path / "b.db")
+    repo.log_reply(lead_ids[0], "Call me next week")  # after the backup was made
+    started = time.monotonic()
+    backups.restore(backup, app_running=lambda: False)
+    assert time.monotonic() - started < 5
+    with db.connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM messages WHERE direction = 'inbound'").fetchone()[0] == 3001
+
+
 @pytest.mark.parametrize("where", ["copying", "reading"])
 def test_a_disk_problem_with_the_replaced_data_stops_the_restore(settings, tmp_path, monkeypatch, where):
     """P2-RST-4: with the disk nearly full, copying the data being replaced failed ("database or disk is full"), or
@@ -1052,6 +1077,9 @@ def test_a_disk_problem_with_the_replaced_data_stops_the_restore(settings, tmp_p
      "file:///C:/Users/Sam/Backups%20%232/A%2541/Duba%C3%AF.db?mode=ro"),
     (PurePosixPath("/home/sam/Backups #2/A%41/Dubaï.db"), "file:///home/sam/Backups%20%232/A%2541/Duba%C3%AF.db?mode=ro"),
 ])
+# Python 3.14 deprecates as_uri on a pure path. OpenBerry passes real paths (Path.as_uri): pure ones only test the
+# Windows forms on any computer.
+@pytest.mark.filterwarnings("ignore:pathlib.PurePath.as_uri:DeprecationWarning")
 def test_the_read_only_uri_of_a_backup(path, uri):
     """P2-RST-5: a backup on a network share (\\\\NAS\\Backups, or a mapped drive Windows resolves to one) got the URI
     file://NAS/..., and SQLite refused it: "not an OpenBerry backup (invalid uri authority: NAS)"."""

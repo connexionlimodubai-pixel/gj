@@ -3850,11 +3850,11 @@ def keep_email_history(path: Path, previous: Path) -> None:
             (stamp,))
         # Replies to its leads that it doesn't have: new rows, as every check that a lead replied reads them. The same
         # words at the same time are the same reply, already here. The reply stopped the lead's sequence, and moved it
-        # to replied unless it was a colleague's (the lead stayed where it was there).
+        # to replied unless it was a colleague's (the lead stayed where it was there). NOT IN, not a NOT EXISTS for
+        # each reply: SQLite reads the replies here once, as messages has no index on lead_id.
         replies = ("FROM prev.messages m JOIN main.leads l ON l.id = m.lead_id JOIN prev.leads p ON p.id = l.id "
-                   "AND p.created_at = l.created_at WHERE m.direction = 'inbound' AND NOT EXISTS (SELECT 1 FROM "
-                   "main.messages r WHERE r.lead_id = m.lead_id AND r.direction = 'inbound' "
-                   "AND r.created_at = m.created_at AND r.body = m.body)")
+                   "AND p.created_at = l.created_at WHERE m.direction = 'inbound' AND (m.lead_id, m.created_at, "
+                   "m.body) NOT IN (SELECT lead_id, created_at, body FROM main.messages WHERE direction = 'inbound')")
         replied = c.execute(f"SELECT DISTINCT l.id, p.status {replies}").fetchall()
         c.execute(
             "INSERT INTO main.messages (company_id, lead_id, direction, channel, step, subject, body, status, "

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, Response
 
 from .. import repo, website
-from ..models import AUTO_APPROVE_SETTINGS, EMAIL_SETTINGS, CompanyIn, LeadIn, OutreachConfig
+from ..models import AUTO_APPROVE_SETTINGS, EMAIL_SETTINGS, Company, CompanyIn, LeadIn, OutreachConfig
 from ..outreach import email_setting_refusals
 from . import scans
 from .auth import is_anonymous, require_api_auth
@@ -115,11 +115,14 @@ def api_get_company(company_id: int) -> dict[str, Any]:
 @router.patch("/companies/{company_id}")
 def api_patch_company(company_id: int, patch: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Deep-merge a partial profile, e.g. {"icp": {"locations": ["UAE"]}} or {"status": "paused"}."""
-    current = repo.get_company(company_id).outreach
-    _check_agent_settings(patch.get("outreach"), current)
-    _check_auto_approve_settings(patch.get("outreach"), current)
-    _check_email_settings(patch.get("outreach"), current)
-    return _dump(repo.update_company(company_id, patch))
+    def may_change(stored: Company) -> None:
+        _check_agent_settings(patch.get("outreach"), stored.outreach)
+        _check_auto_approve_settings(patch.get("outreach"), stored.outreach)
+        _check_email_settings(patch.get("outreach"), stored.outreach)
+
+    may_change(repo.get_company(company_id))
+    # Checked again under the write lock, against the profile as stored then: a Turn off clicked in between stays.
+    return _dump(repo.update_company(company_id, patch, guard=may_change))
 
 
 @router.get("/companies/{company_id}/email-status")

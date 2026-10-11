@@ -387,7 +387,7 @@ def test_minutes_between_two_emails_and_one_in_flight(company, box):
     first, second = approved(lead(company)), approved(lead(company))
     assert send()["message_id"] == first.id
     assert send(NOW + timedelta(minutes=4, seconds=59))["status"] == "idle"
-    state = repo.email_sending_status(company.id, now=NOW + timedelta(minutes=1))
+    state = repo.email_sending_status(company.id, now=NOW + timedelta(minutes=4))
     assert state["next_send_at"] == repo.iso(NOW + timedelta(minutes=5))
     set_row(first.id, email_state="claimed")  # another email in flight (e.g. a second dashboard process)
     assert repo.claim_next_email("x", FROM, now=NOW + timedelta(minutes=6)) is None
@@ -716,7 +716,8 @@ def test_an_opt_out_suppresses_disqualifies_and_tags(company, box, name):
     services.check_inbox(now=NOW + timedelta(minutes=5))
     found = repo.get_lead(lina)
     assert found.status == "disqualified" and "unsubscribed" in found.tags
-    assert "Asked not to be contacted (email reply)" in found.notes
+    assert ("Asked not to be contacted (the Unsubscribe button)" if name == "unsubscribe_list.eml"
+            else "Asked not to be contacted (email reply)") in found.notes
     assert repo.suppressed_addresses(["lina@gulfbank.example"])["lina@gulfbank.example"]["reason"] == "opt_out"
     assert [e["kind"] for e in repo.list_email_events(lead_id=lina)] == ["opt_out"]
     # For every company, even if the lead is deleted and found again.
@@ -941,7 +942,8 @@ def test_a_version_4_database_gets_the_email_columns_and_tables(settings):
         assert {"email_suppressions", "email_events", "email_mailbox"} <= tables
         indexes = {r[1] for r in c.execute("PRAGMA index_list(messages)")}
         assert {"ix_messages_email_mid", "ix_messages_email_state"} <= indexes
-        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 5
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 6
+        assert "email_sent_log" in tables and {"email_from", "opt_out_hint"} <= columns
     old = repo.list_messages(1)[0]
     assert (old.email_state, old.email_message_id, old.approved_via, old.status) == ("", None, "auto", "approved")
     assert repo.get_company(1).outreach.email_sending is False  # an old profile: off

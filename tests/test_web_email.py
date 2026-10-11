@@ -73,6 +73,13 @@ def follow(client: TestClient, resp) -> str:
     return client.get(resp.headers["location"]).text
 
 
+def refused(resp) -> str:
+    """A Mailbox save that was refused: the page comes back as typed (no redirect, which would bring back the saved
+    settings and lose what was typed)."""
+    assert resp.status_code == 422, resp.status_code
+    return resp.text
+
+
 def env_file() -> Path:
     return Path(os.environ["OPENBERRY_ENV_FILE"])
 
@@ -171,9 +178,11 @@ def test_the_saved_password_never_goes_to_a_new_server(client, offline_mail, cha
     follow(client, save_mailbox(client, provider="other", smtp_host=SMTP_HOST, imap_host=IMAP_HOST))
     offline_mail.log.clear()
     offline_mail.imap_logins.clear()
-    page = follow(client, save_mailbox(client, password="", **changes))
+    page = refused(save_mailbox(client, password="", **changes))
     assert "Type the password again: the server or username changed." in flashes(page)
     assert "Nothing was saved." in flashes(page)
+    typed = next(v for k, v in changes.items() if k != "provider" and v not in (SMTP_HOST, IMAP_HOST))
+    assert f'value="{typed}"' in page  # R2UI-10: what was typed is still in the form, the password isn't
     settings = config.get_settings()
     assert (settings.smtp_host, settings.imap_host, settings.smtp_username) == (SMTP_HOST, IMAP_HOST, FROM)
     assert offline_mail.log == [] and offline_mail.imap_logins == []  # no connection to anyone
@@ -182,17 +191,18 @@ def test_the_saved_password_never_goes_to_a_new_server(client, offline_mail, cha
     # A separate reading password is kept only for its own reading server and username.
     follow(client, save_mailbox(client, password=PASSWORD, provider="other", smtp_host=SMTP_HOST, imap_host=IMAP_HOST,
                                 imap_username="reader@acme-mail.example", imap_password="Reading-Pass-1"))
-    page = follow(client, save_mailbox(client, password=PASSWORD, provider="other", smtp_host=SMTP_HOST,
-                                       imap_host="imap.attacker.example", imap_username="reader@acme-mail.example"))
+    page = refused(save_mailbox(client, password=PASSWORD, provider="other", smtp_host=SMTP_HOST,
+                                imap_host="imap.attacker.example", imap_username="reader@acme-mail.example"))
     assert "Type the reading password again" in flashes(page) and settings.imap_host == IMAP_HOST
+    assert PASSWORD not in page and "Reading-Pass-1" not in page
 
 
 def test_a_password_set_outside_openberry_needs_the_servers_changed_there_too(client, monkeypatch):
     follow(client, save_mailbox(client, provider="other", smtp_host=SMTP_HOST, imap_host=IMAP_HOST))
     monkeypatch.delitem(config._FROM_FILE, "OPENBERRY_SMTP_PASSWORD", raising=False)
     monkeypatch.setenv("OPENBERRY_SMTP_PASSWORD", "env-pass")  # the server's environment (Docker)
-    page = follow(client, save_mailbox(client, password="", provider="other", smtp_host=SMTP_HOST,
-                                       imap_host="mail.attacker.example"))
+    page = refused(save_mailbox(client, password="", provider="other", smtp_host=SMTP_HOST,
+                                imap_host="mail.attacker.example"))
     assert "The password is set outside OpenBerry (OPENBERRY_SMTP_PASSWORD)" in flashes(page)
     assert config.get_settings().imap_host == IMAP_HOST
     # Disconnect removes what OpenBerry saved, and says what it couldn't remove.
@@ -215,8 +225,9 @@ def test_a_password_set_outside_openberry_needs_the_servers_changed_there_too(cl
     ({"imap_username": "reader@acme-mail.example", "imap_password": "a b"}, "reading password can't contain"),
 ])
 def test_bad_mailbox_settings_save_nothing(client, changes, problem):
-    page = follow(client, save_mailbox(client, **changes))
+    page = refused(save_mailbox(client, **changes))
     assert problem in flashes(page) and "Nothing was saved." in flashes(page)
+    assert "Abc" not in page and "two\nlines" not in page  # passwords are never put back in the page
     assert not env_file().exists() and config.get_settings().smtp_host == ""
 
 
@@ -391,7 +402,9 @@ def test_the_card_lists_the_queue_what_is_held_back_and_what_needs_attention(cli
     assert f"#msg-{queued.id}" in email_card and "Airport transfers · step 1" in email_card
     assert "Send now" in email_card
     assert "it is a no-reply or system address" in email_card and f"#msg-{held.id}" in email_card
-    assert "May have been sent. Check your mailbox" in html_lib.unescape(email_card)
+    # R2UI-3: OpenBerry saves the Sent copies itself (Zoho's preset), so the Sent folder can't tell.
+    assert "OpenBerry saves your Sent copies itself and couldn't for this one" in html_lib.unescape(email_card)
+    assert "Check your mailbox's Sent folder" not in html_lib.unescape(email_card)
     assert 'value="mark_sent"' in email_card and 'value="send_again"' in email_card
     assert "Omar <b>Haddad</b>" not in email_card  # lead data is escaped
     page = client.get(f"/c/{company.id}/outreach?tab=approved").text
@@ -399,6 +412,9 @@ def test_the_card_lists_the_queue_what_is_held_back_and_what_needs_attention(cli
     assert "Queued for your mailbox" in item and "Added when sent" in item and "Bay Square" in item
     item = re.search(rf'<li class="card queue-item" id="q-{unknown.id}".*?</li>', page, re.S).group(0)
     assert "May have been sent" in item and "Added when sent" not in item
+    config.get_settings().imap_save_sent = False  # Gmail keeps its own Sent copies: there it can be checked
+    email_card = html_lib.unescape(card(client.get(f"/c/{company.id}/outreach").text))
+    assert "Check your mailbox's Sent folder, then choose Mark sent or Send again" in email_card
 
 
 def test_the_may_have_been_sent_actions(client, company):
@@ -439,10 +455,29 @@ def test_send_now_wakes_the_loop_or_sends_one_with_the_scheduler_off(client, com
     assert "Nothing was sent" in flashes(page) and len(offline_mail.sent) == 1
     import asyncio
 
+    # R2UI-7: with the loop running, Send now says when the next email can go instead of "Sending now" during the
+    # minutes between two emails (the card doesn't offer it then)...
+    repo.create_message(lead_with_email(company, "omar@client.example", "Omar"), "Hi", channel="email",
+                        subject="Cars", status="approved")
     client.app.state.email_wake = asyncio.Event()
     page = follow(client, post(client, f"/c/{company.id}/outreach/email/send-now", {},
                                page=f"/c/{company.id}/outreach"))
+    send_now = f'action="/c/{company.id}/outreach/email/send-now"'
+    assert "Nothing can be sent before" in flashes(page) and not client.app.state.email_wake.is_set()
+    assert send_now not in card(client.get(f"/c/{company.id}/outreach").text)
+    with db.connect() as c:  # ...and wakes the loop once it may send
+        c.execute("UPDATE messages SET email_claimed_at = ?", (repo.iso(repo.utcnow() - timedelta(minutes=10)),))
+    assert send_now in card(client.get(f"/c/{company.id}/outreach").text)
+    page = follow(client, post(client, f"/c/{company.id}/outreach/email/send-now", {},
+                               page=f"/c/{company.id}/outreach"))
     assert "Sending now" in flashes(page) and client.app.state.email_wake.is_set()
+    # Outside the sending hours, the same.
+    client.app.state.email_wake = asyncio.Event()
+    repo.update_company(company.id, {"outreach": {"email_days": [(repo.local_time(repo.utcnow()).weekday() + 1) % 7]}})
+    assert send_now not in card(client.get(f"/c/{company.id}/outreach").text)
+    page = follow(client, post(client, f"/c/{company.id}/outreach/email/send-now", {},
+                               page=f"/c/{company.id}/outreach"))
+    assert "outside your sending hours" in flashes(page) and not client.app.state.email_wake.is_set()
 
 
 def test_approving_an_email_says_what_happens_and_needs_a_subject(client, company):
@@ -578,6 +613,213 @@ def test_the_confirmations_say_what_approving_and_turning_on_do(client, company)
     assert "data-email-sending" not in client.get(f"/c/{company.id}/outreach?tab=drafts").text
     ready(company)
     assert "data-email-sending" in client.get(f"/c/{company.id}/outreach?tab=drafts").text
+
+
+# --------------------------------------------------------------------------------------
+# Round 2 of the review: what the pages say and offer (ids in the docstrings)
+# --------------------------------------------------------------------------------------
+
+OUR_ID = "<first-email@acme-mail.example>"
+
+
+def emailed(company, email_address: str = "lina@gulfbank.example", name: str = "Lina Noor") -> tuple[int, Any]:
+    """A lead OpenBerry emailed from the mailbox (Message-ID OUR_ID), and an inbox check since."""
+    lead = lead_with_email(company, email_address, name)
+    msg = repo.create_message(lead, "Hi, we drive executives to and from DXB.", channel="email",
+                              subject="Airport transfers", status="approved")
+    with db.connect() as c:
+        c.execute("UPDATE messages SET status = 'sent', sent_at = ?, sent_via = 'smtp', email_state = 'sent', "
+                  "email_message_id = ?, email_to = ? WHERE id = ?", (repo.iso(), OUR_ID, email_address, msg.id))
+    assert services.check_inbox()["status"] == "ok"
+    return lead, msg
+
+
+def a_reply(world, text: str, sender: str = "lina@gulfbank.example", msg_id: str = "r1") -> None:
+    world.deliver((f"From: Lina Noor <{sender}>\r\nTo: {FROM}\r\nSubject: Re: Airport transfers\r\n"
+                   f"Message-ID: <{msg_id}@gulfbank.example>\r\nIn-Reply-To: {OUR_ID}\r\nReferences: {OUR_ID}\r\n"
+                   f"MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{text}\r\n").encode())
+    assert services.check_inbox()["status"] == "ok"
+
+
+def test_a_reply_that_looks_like_an_opt_out_asks_you_on_every_page(client, company, offline_mail):
+    """The opt-out decision: a reply that only looks like an opt-out is flagged on the lead page, the Outreach card and
+    the dashboard, each with Never email again and Not an opt-out. Not an opt-out clears the flag and nothing else."""
+    ready(company)
+    lina, _ = emailed(company)
+    a_reply(offline_mail, "Who gave you my email? Please remove me from your list, and send the rates to our office.")
+    hint = repo.opt_out_hints(company.id)[0]
+    base = f"/c/{company.id}"
+    pages = {"lead": client.get(f"{base}/leads/{lina}").text, "card": card(client.get(f"{base}/outreach").text),
+             "dashboard": client.get(base).text}
+    for where, page in pages.items():
+        text = html_lib.unescape(page)
+        assert "Looks like an opt-out" in text and "remove me from your list" in text, where
+        assert f'action="{base}/messages/{hint.id}/opt-out"' in page, where
+        assert 'value="confirm"' in page and "Never email again" in text and "Not an opt-out" in text, where
+    assert "may ask not to be emailed again" in pages["dashboard"]
+    resp = post(client, f"{base}/messages/{hint.id}/opt-out", {"action": "dismiss", "next": f"{base}/leads/{lina}"},
+                page=f"{base}/leads/{lina}")
+    page = follow(client, resp)
+    assert "it isn't an opt-out" in flashes(page) and "Looks like an opt-out" not in page
+    assert repo.get_lead(lina).status == "replied" and not repo.suppressed_addresses(["lina@gulfbank.example"])
+    assert "may ask not to be emailed again" not in client.get(base).text
+
+
+def test_never_email_again_on_a_flagged_reply_is_the_full_opt_out(client, company, offline_mail):
+    """The opt-out decision: the user's Never email again puts the address on the never-email list and tags the lead
+    unsubscribed, like an unambiguous opt-out read by itself."""
+    ready(company)
+    lina, _ = emailed(company)
+    a_reply(offline_mail, "Stop. We already booked with another company.")
+    hint = repo.opt_out_hints(company.id)[0]
+    resp = post(client, f"/c/{company.id}/messages/{hint.id}/opt-out", {"action": "confirm"},
+                page=f"/c/{company.id}")
+    assert resp.headers["location"] == f"/c/{company.id}/leads/{lina}#msg-{hint.id}"
+    assert "won't be emailed again: lina@gulfbank.example is on your never-email list" in flashes(follow(client, resp))
+    lead = repo.get_lead(lina)
+    assert lead.status == "disqualified" and "unsubscribed" in lead.tags
+    assert repo.suppressed_addresses(["lina@gulfbank.example"])["lina@gulfbank.example"]["reason"] == "opt_out"
+    resp = post(client, f"/c/{company.id}/messages/{hint.id}/opt-out", {"action": "forget"}, page=f"/c/{company.id}")
+    assert "Unknown action" in flashes(follow(client, resp))
+
+
+def test_a_colleagues_reply_says_who_wrote_it(client, company, offline_mail):
+    """INBOX2-2: a reply from another person at the lead's company is shown as theirs on the lead page."""
+    ready(company)
+    lina, _ = emailed(company)
+    offline_mail.deliver((f"From: Huda (PA) <huda@gulfbank.example>\r\nTo: {FROM}\r\n"
+                          "Subject: Re: Airport transfers\r\nMessage-ID: <pa1@gulfbank.example>\r\n"
+                          "Content-Type: text/plain; charset=utf-8\r\n\r\nLina is travelling, send me the rates.\r\n")
+                         .encode())
+    assert services.check_inbox()["recorded"] == 1
+    page = html_lib.unescape(client.get(f"/c/{company.id}/leads/{lina}").text)
+    assert "huda@gulfbank.example</bdi> wrote about Lina Noor" in page and "send me the rates" in page
+
+
+def test_fix_the_address_opens_the_profile_form_and_says_the_email_changed(client, company):
+    """R2UI-4: Fix the address lands on the profile form (the id is on its <details>, which app.js opens), and saving
+    a new address says the email changed (not the LinkedIn profile) and lets the email be approved again."""
+    ready(company)
+    omar = lead_with_email(company, "omar@oldcreek.example", "Omar Haddad")
+    msg = repo.create_message(omar, "Hi Omar", channel="email", subject="Cars", status="approved")
+    with db.connect() as c:
+        c.execute("UPDATE messages SET email_state = 'failed', email_to = 'omar@oldcreek.example', send_error = ? "
+                  "WHERE id = ?", ("The address doesn't exist (the server said: 550 5.1.1 User unknown).", msg.id))
+    repo.add_suppression("omar@oldcreek.example", "bounce", "5.1.1 User unknown")
+    assert f'/leads/{omar}#edit-profile"' in card(client.get(f"/c/{company.id}/outreach").text)
+    page = client.get(f"/c/{company.id}/leads/{omar}").text
+    assert re.search(r'<details class="profile-edit" id="edit-profile">', page)
+    resp = post(client, f"/c/{company.id}/leads/{omar}/profile",
+                {"full_name": "Omar Haddad", "lead_company": "Gulf Bank", "email": "reservations@oldcreek.example"},
+                page=f"/c/{company.id}/leads/{omar}")
+    flashed = flashes(follow(client, resp))
+    assert "The email address changed, so approved emails to this lead are drafts again" in flashed
+    assert "LinkedIn" not in flashed
+    stored = repo.get_message(msg.id)
+    assert (stored.status, stored.email_state, stored.send_error) == ("draft", "", "")
+    resp = post(client, f"/c/{company.id}/messages/{msg.id}", {"action": "approve"}, page=f"/c/{company.id}/outreach")
+    follow(client, resp)
+    assert msg.id in [i["message_id"] for i in repo.email_queue(company.id)["items"]]
+
+
+def test_removing_an_opt_out_says_the_lead_stays_unsubscribed(client, company):
+    """R2UI-5: removing an address from the never-email list doesn't promise emails the unsubscribed tag still
+    stops."""
+    lina = lead_with_email(company)
+    repo.record_opt_out(lina, "email reply", "Opt-out: stop")
+    entry = next(iter(repo.suppressed_addresses(["lina@gulfbank.example"]).values()))
+    resp = post(client, "/mailbox", {"action": "unsuppress", "suppression_id": str(entry["id"])})
+    flashed = flashes(follow(client, resp))
+    assert "Removed from the never-email list" in flashed and "stays that way" in flashed
+    assert "may email that address again" not in flashed and "unsubscribed" in repo.get_lead(lina).tags
+
+
+def test_emails_queued_for_the_mailbox_dont_ask_you_to_send_them(client, company):
+    """R2UI-6: with email sending on, an approved email's Mark sent is a secondary button that asks first, and the
+    lead page says OpenBerry emails approved emails for you. LinkedIn messages keep the main Mark sent."""
+    ready(company)
+    lina = lead_with_email(company)
+    email = repo.create_message(lina, "Hello", channel="email", subject="Cars", status="approved")
+    note = repo.create_message(lina, "Hi Lina", channel="linkedin_dm", status="approved")
+    page = client.get(f"/c/{company.id}/outreach?tab=approved").text
+    item = re.search(rf'id="q-{email.id}".*?</li>', page, re.S).group(0)
+    assert re.search(r'class="btn btn-sm btn-ghost"[^>]*value="sent"[^>]*data-confirm', item)
+    other = re.search(rf'id="q-{note.id}".*?</li>', page, re.S).group(0)
+    assert re.search(r'class="btn btn-sm btn-primary"[^>]*value="sent"', other)
+    lead_page = html_lib.unescape(client.get(f"/c/{company.id}/leads/{lina}").text)
+    assert "OpenBerry emails approved emails from your mailbox for you" in lead_page
+    assert "don't send those yourself" in lead_page
+    assert re.search(rf'id="msg-{email.id}-form".*?class="btn btn-sm btn-ghost"[^>]*value="sent"', lead_page, re.S)
+    repo.update_company(company.id, {"outreach": {"email_sending": False}})
+    lead_page = html_lib.unescape(client.get(f"/c/{company.id}/leads/{lina}").text)
+    assert "Approve, copy, send it yourself, then mark it sent" in lead_page
+
+
+def test_an_email_that_may_have_been_sent_is_read_only_on_the_lead_page(client, company):
+    """R2-13, R2UI-11: a "may have been sent" email offers Mark sent / Send again / Skip, never the edit form; Send
+    again on one that is a draft now says to approve it again instead of "sent again"."""
+    ready(company)
+    lina = lead_with_email(company)
+    msg = repo.create_message(lina, "Hello", channel="email", subject="Cars", status="approved")
+    with db.connect() as c:
+        c.execute("UPDATE messages SET email_state = 'unknown', email_claimed_at = ? WHERE id = ?",
+                  (repo.iso(), msg.id))
+    page = client.get(f"/c/{company.id}/leads/{lina}").text
+    assert f'id="msg-{msg.id}-form"' not in page and 'value="send_again"' in page and 'value="mark_sent"' in page
+    approved_tab = client.get(f"/c/{company.id}/outreach?tab=approved").text
+    item = re.search(rf'id="q-{msg.id}".*?</li>', approved_tab, re.S).group(0)
+    assert "Edit</a>" not in re.sub(r"<svg.*?</svg>", "", item, flags=re.S)  # nothing to edit there either
+    with db.connect() as c:
+        c.execute("UPDATE messages SET status = 'draft' WHERE id = ?", (msg.id,))
+    resp = post(client, f"/c/{company.id}/messages/{msg.id}/email", {"action": "send_again"},
+                page=f"/c/{company.id}/outreach")
+    flashed = flashes(follow(client, resp))
+    assert "It is a draft now: approve it again" in flashed and "sent again" not in flashed
+
+
+def test_replies_and_details_are_shown_in_the_writers_direction(client, company, offline_mail):
+    """R2UI-9: an Arabic reply is shown right to left (dir="auto") on the lead and Outreach pages, and the never-email
+    list shows the words as the person wrote them."""
+    ready(company)
+    lina, _ = emailed(company)
+    a_reply(offline_mail, "أرجو عدم مراسلتي مرة أخرى.")
+    reply = next(m for m in repo.list_messages(company.id, lead_id=lina) if m.direction == "inbound")
+    page = client.get(f"/c/{company.id}/leads/{lina}").text
+    assert re.search(r'<div class="bubble-body" dir="auto">أرجو عدم مراسلتي', page)
+    assert re.search(rf'id="q-{reply.id}-body" dir="auto"', client.get(f"/c/{company.id}/outreach?tab=replies").text)
+    never = html_lib.unescape(client.get("/mailbox").text)
+    assert "<bdi>Opt-out: أرجو عدم مراسلتي" in never
+
+
+def test_the_card_names_the_clock_of_the_sending_hours(client, company, monkeypatch):
+    """F6: the sending hours follow the server's clock: the card names its zone (UTC in a default Docker install)."""
+    monkeypatch.setattr(repo, "EMAIL_LOCAL_TZ", timezone(timedelta(hours=4)))
+    ready(company)
+    text = html_lib.unescape(card(client.get(f"/c/{company.id}/outreach").text))
+    assert "on the clock of the computer OpenBerry runs on (UTC+04:00)" in text
+
+
+def test_a_lead_or_company_whose_email_is_being_sent_cant_be_deleted(client, company):
+    """F2: deleting the lead, or its company, while its email is in DATA is refused: the email would go out and never
+    be recorded, so the address could get it again."""
+    ready(company)
+    lina = lead_with_email(company)
+    msg = repo.create_message(lina, "Hello", channel="email", subject="Hi", status="approved")
+    with db.connect() as c:
+        c.execute("UPDATE messages SET email_state = 'data' WHERE id = ?", (msg.id,))
+    base = f"/c/{company.id}"
+    resp = post(client, f"{base}/leads/{lina}/delete", {}, page=f"{base}/leads/{lina}")
+    assert resp.headers["location"] == f"{base}/leads/{lina}"
+    assert "being sent right now" in flashes(follow(client, resp)) and repo.get_lead(lina)
+    resp = post(client, f"{base}/delete", {}, page=f"{base}/settings")
+    assert "being sent right now" in flashes(follow(client, resp)) and repo.get_company(company.id)
+
+
+def test_the_events_and_the_disclosure_fit_the_card(client):
+    """R2UI-8: long bounce details wrap inside the lead page's Outreach card, and the chevron turns when it opens."""
+    css = client.get("/static/app.css").text
+    assert re.search(r"\.email-events \.sub[^{]*\{[^}]*white-space:\s*normal", css)
+    assert re.search(r"\.email-events\[open\] > summary \.icon\s*\{[^}]*rotate\(90deg\)", css)
 
 
 # --------------------------------------------------------------------------------------

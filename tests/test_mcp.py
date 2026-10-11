@@ -212,8 +212,10 @@ async def test_update_company_accepts_its_own_profile_output(company):
 async def test_webhooks_set_by_claude_must_be_slack_or_discord(company):
     """Alerts carry lead data: injected text must not be able to point them at another server."""
     async with mcp_client() as c:
+        # A webhook's path on another host: only the host check refuses these (WP5.4 pins it).
         for url in ("https://evil.example/collect", "https://hooks.slack.com.evil.example/services/x",
-                    "https://10.0.0.5/hook"):
+                    "https://10.0.0.5/hook", "https://evil.example/services/T0/B0/x",
+                    "https://evil.example/api/webhooks/1/abc"):
             text = await error_text(c, "update_company", company_id=company.id,
                                     changes={"notify": {"slack_webhook_url": url}})
             assert "must be an https://hooks.slack.com/" in text and "dashboard" in text

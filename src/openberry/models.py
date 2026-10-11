@@ -73,6 +73,7 @@ AGENT_CHANNELS = ("linkedin_connect", "linkedin_dm")
 SENT_VIA = ("", "agent", "claude", "smtp")
 SENT_VIA_SMTP = "smtp"
 AGENT_PAUSE_REASON_MAX = 500
+FOLLOWUP_DAYS_RANGE = (1, 90)  # days to wait before a follow-up (outreach.followup_days)
 # OutreachConfig fields of auto-approve: changed on the dashboard's Outreach page only (repo.update_company keeps them
 # on a profile save; Claude and the JSON API may only turn it off or make the window longer).
 AUTO_APPROVE_SETTINGS = ("auto_approve", "auto_approve_hours", "auto_approve_since")
@@ -297,7 +298,8 @@ class OutreachConfig(_Model):
     signature: str = ""
     max_followups: int = Field(default=2, ge=0, le=6)
     followup_days: Annotated[list[int], BeforeValidator(lambda v: [int(x) for x in split_list(v)] if isinstance(v, str) else v)] = Field(
-        default_factory=lambda: [3, 7], description="Days to wait after each sent message before the next follow-up is due")
+        default_factory=lambda: [3, 7], description="Days to wait after each sent message before the next follow-up "
+                                                    f"is due ({FOLLOWUP_DAYS_RANGE[0]} to {FOLLOWUP_DAYS_RANGE[1]})")
     mode: Literal["review", "auto_draft"] = Field(
         default="review", description="review: you draft on demand. auto_draft: a draft is created for every new hot "
                                       "lead, however it turned hot (scan, Claude, import or edit). Drafts are never "
@@ -369,6 +371,14 @@ class OutreachConfig(_Model):
     @classmethod
     def _short_reason(cls, v: str) -> str:
         return v[:AGENT_PAUSE_REASON_MAX]
+
+    @field_validator("followup_days")
+    @classmethod
+    def _real_waits(cls, v: list[int]) -> list[int]:
+        # A follow-up goes out only once its wait has passed: never 0 or negative days (a profile saved by an older
+        # version keeps loading, with its waits brought into range).
+        low, high = FOLLOWUP_DAYS_RANGE
+        return [max(low, min(high, int(days))) for days in v]
 
     @field_validator("email_footer", mode="before")
     @classmethod
@@ -575,6 +585,9 @@ class Message(_Model):
     email_claimed_at: datetime | None = None
     email_attempts: int = 0
     send_error: str = Field(default="", description="Why sending it failed, in plain words")
+    email_from: str = Field(default="", description="A reply read in the inbox: the address that wrote it")
+    opt_out_hint: str = Field(default="", description="A reply read in the inbox: words that look like an opt-out, "
+                                                      "waiting for the user to say whether it is one")
 
 
 class ScanRun(_Model):

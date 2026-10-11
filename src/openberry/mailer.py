@@ -35,6 +35,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from email.headerregistry import Address
+from functools import lru_cache
 from email.message import EmailMessage, Message
 from email.utils import format_datetime, parseaddr
 from html.parser import HTMLParser
@@ -80,6 +81,21 @@ def no_reply_address(address: str) -> bool:
     return bool(NO_REPLY.match((address or "").strip().partition("@")[0]))
 
 
+# Mail services anyone can sign up to: a sender there is no colleague of a lead with the same domain.
+FREE_MAIL_DOMAINS = frozenset((
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.uk", "ymail.com", "hotmail.com", "outlook.com", "live.com",
+    "msn.com", "icloud.com", "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "gmx.net",
+    "mail.com", "zoho.com", "zohomail.com", "yandex.com", "yandex.ru", "mail.ru", "emirates.net.ae", "eim.ae",
+    "du.ae", "qq.com", "163.com", "rediffmail.com",
+))
+
+
+def company_domain(address: str) -> str:
+    """The address's domain when it is a company's own (not a free mail service), else ""."""
+    domain = domain_of(address)
+    return "" if not domain or domain in FREE_MAIL_DOMAINS else domain
+
+
 def domain_of(address: str) -> str:
     return (address or "").strip().rpartition("@")[2].lower()
 
@@ -122,9 +138,19 @@ class Mailbox:
         return self.from_email.strip().lower()
 
     @property
+    def key(self) -> str:
+        """The account it signs in with: what the mailbox's state is kept under (Settings.mailbox_key)."""
+        return self.username.strip().lower()
+
+    @property
     def reader(self) -> tuple[str, str]:
         """The IMAP username and password: the SMTP ones unless the user gave others."""
         return (self.imap_username or self.username, self.imap_password or self.password)
+
+    @property
+    def reader_key(self) -> str:
+        """The mailbox that is read (its IMAP server and username): where the inbox check stopped is kept under it."""
+        return f"{self.imap_host.strip().lower()}|{self.reader[0].strip().lower()}"
 
 
 @dataclass(frozen=True)
@@ -255,8 +281,10 @@ _BLOCKED_WORDS = re.compile(r"\b(?:spam|blocked|blacklist(?:ed)?|block ?list(?:e
                             r"disabled)\b", re.I)
 _NO_SUCH_USER = re.compile(r"user unknown|unknown user|does not exist|doesn't exist|no such (?:user|mailbox|recipient)|"
                            r"mailbox (?:not found|unavailable)|invalid (?:recipient|mailbox|address)|"
-                           r"recipient (?:not found|unknown)|address (?:not found|unknown)|not a valid|"
-                           r"(?:mailbox|account|user|recipient) (?:is )?(?:disabled|inactive|deactivated)", re.I)
+                           r"(?:recipient|user|account) (?:not found|unknown)|address (?:not found|unknown)|not a valid|"
+                           r"(?:mailbox|account|user|recipient) (?:is |has been )?(?:disabled|inactive|deactivated)|"
+                           r"unrouteable address|no mailbox here|(?:doesn't|does not) have an? [\w.-]+ account|"
+                           r"account (?:has )?expired", re.I)
 # A bounce report blaming the sender rather than the address (a policy rejection, 5.7.x as a rule).
 _POLICY_WORDS = re.compile(r"\b(?:spam|blocked|blacklist(?:ed)?|block ?list(?:ed)?|deny ?list(?:ed)?|reputation|"
                            r"policy|abuse)\b", re.I)
@@ -279,6 +307,11 @@ def _reply(exc: Exception) -> tuple[int, str]:
 
 
 RETRY_TEXT = "Couldn't reach your mail server ({detail}). OpenBerry tries again in a few minutes."
+FROM_REFUSED_TEXT = ("Your mailbox won't send from {from_email} ({said}). Use the mailbox's own address, or an alias "
+                     "of it, as the From address.")
+# The server refusing the From address at MAIL FROM: a setting to fix, not the provider blocking the mailbox.
+_SENDER_REFUSED = re.compile(r"sender address rejected|not owned by|not allowed to (?:send|relay)|"
+                             r"relay(?:ing)? (?:denied|disallowed|not permitted)", re.I)
 UNKNOWN_TEXT = ("The connection broke while your mail server was receiving this email ({detail}). It may have gone "
                 "out: check your mailbox's Sent folder, then choose Mark sent or Send again.")
 
@@ -308,8 +341,9 @@ def classify(exc: BaseException, phase: str, host: str = "", from_email: str = "
                              "two-step sign-in.", code, enhanced_status(words))
     if isinstance(exc, NoEncryption):
         return Outcome(CONFIG, str(exc))
-    if isinstance(exc, socket.gaierror):
-        return Outcome(CONFIG, f"Can't find the server {host}. Check the name and your internet connection.")
+    if isinstance(exc, socket.gaierror):  # no internet (a Wi-Fi drop) as often as a typo: tried again, not paused
+        return Outcome(RETRY, f"Can't find the server {host}. Check the name and your internet connection. "
+                              "OpenBerry tries again in a few minutes.")
     if isinstance(exc, smtplib.SMTPNotSupportedError) or (
             isinstance(exc, smtplib.SMTPException) and "authentication method" in detail.lower()):
         return Outcome(CONFIG, f"Your mail server doesn't accept OpenBerry's sign-in ({detail}).")
@@ -323,12 +357,13 @@ def classify(exc: BaseException, phase: str, host: str = "", from_email: str = "
             _hard_bounce_status(status) or bool(_NO_SUCH_USER.search(words))))
         if no_such_user:
             return Outcome(BOUNCE, f"The address doesn't exist (the server said: {said}).", code, status)
+        if phase == "mail" and _SENDER_REFUSED.search(words):  # Postfix's "553 5.7.1 ... not owned by user"
+            return Outcome(CONFIG, FROM_REFUSED_TEXT.format(from_email=from_email, said=said), code, status)
         if status.startswith("5.7.") or (not status.startswith("5.2.") and _BLOCKED_WORDS.search(words)):
             return Outcome(PROVIDER_BLOCK, f"Your mail provider refused to send it: {said}. Check your mailbox in "
                                            "the provider's webmail before you resume.", code, status)
         if phase == "mail":
-            return Outcome(CONFIG, f"Your mailbox won't send from {from_email} ({said}). Use the mailbox's own "
-                                   "address, or an alias of it, as the From address.", code, status)
+            return Outcome(CONFIG, FROM_REFUSED_TEXT.format(from_email=from_email, said=said), code, status)
         if phase in ("connect", "starttls", "login"):
             return Outcome(CONFIG, f"Your mail server refused the connection ({said}). Check the server name, the "
                                    "port and your mailbox's settings.", code, status)
@@ -428,7 +463,11 @@ def send(job: EmailJob, mailbox: Mailbox, on_data: Callable[[], bool], now: date
                 conn.rset()
             return Outcome(ABORTED, "It was taken out of the queue just before sending.")
         phase = "data"
-        conn.data(data)  # raises SMTPDataError unless the server answers 250
+        # smtplib raises only when the server refuses to start DATA (no 354). Its final answer, once it has the whole
+        # email, is returned: anything but 250 there means it refused the email (a spam filter, a policy, a limit).
+        code, resp = conn.data(data)
+        if code != 250:
+            raise smtplib.SMTPDataError(code, resp)
         return Outcome(SENT, "", 250, data=data)
     except Exception as exc:
         return classify(exc, phase, mailbox.smtp_host, job.from_email)
@@ -493,6 +532,12 @@ def _imap_error(exc: BaseException, host: str) -> MailError:
     if isinstance(exc, ValueError):  # a port other than 993 (check_port)
         return MailError(CONFIG, f"Your mailbox settings can't be used for reading mail: {text}.")
     if isinstance(exc, imaplib.IMAP4.error):
+        # RFC 5530: [UNAVAILABLE] is temporary (Dovecot's "Temporary authentication failure"): tried again later, never
+        # a pause that waits for the user.
+        if (re.search(r"\[UNAVAILABLE\]|temporar|try again", text, re.I)
+                and not re.search(r"AUTHENTICATIONFAILED|AUTHORIZATIONFAILED", text, re.I)):
+            return MailError(RETRY, f"Your mail server couldn't sign you in just now ({text}). OpenBerry tries again "
+                                    "in a few minutes.")
         if re.search(r"AUTHENTICATIONFAILED|AUTHORIZATIONFAILED|LOGIN|credential|password|authenticat", text, re.I):
             return MailError(AUTH, f"Your mailbox refused the username or password for reading mail ({text}). "
                                    "Check them, and that IMAP access is turned on in your mail settings (Zoho Mail: "
@@ -575,15 +620,17 @@ class Inbox:
         self._call(self.conn.select, imap_quote(folder), True)
 
     def fetch_new(self, folder: str, state: dict[str, Any] | None, relevant: Callable[[Message], bool],
-                  since: date | None = None, limit: int = INBOX_FETCH_MAX) -> tuple[list[tuple[str, bytes]],
-                                                                                    dict[str, Any]]:
+                  since: date | None = None, limit: int = INBOX_FETCH_MAX,
+                  first_since: date | None = None) -> tuple[list[tuple[str, bytes]], dict[str, Any], bool]:
         """The messages that arrived in `folder` since the last check and that `relevant(headers)` wants, as
-        (key, the first INBOUND_BYTES_MAX bytes), and the folder's new state {"uidvalidity", "last_uid"}.
+        (key, the first INBOUND_BYTES_MAX bytes), the folder's new state {"uidvalidity", "last_uid"}, and whether
+        more new messages wait (more than `limit` arrived: call it again with the new state).
 
         The first check of a folder reads nothing: it notes where the folder is, so the mailbox's history is never
-        imported. When the folder's UIDVALIDITY changed (the server renumbered it), messages since `since` are read
-        again; the caller handles each key once. Headers come first (BODY.PEEK[HEADER]); only the relevant messages
-        are read in full, with BODY.PEEK, so nothing is marked as read.
+        imported; with `first_since` (OpenBerry read this mailbox with other details until then) it reads the mail
+        since that day instead. When the folder's UIDVALIDITY changed (the server renumbered it), messages since
+        `since` are read again; the caller handles each key once. Headers come first (BODY.PEEK[HEADER]); only the
+        relevant messages are read in full, with BODY.PEEK, so nothing is marked as read.
         """
         assert self.conn is not None
         status = b" ".join(x for x in self._call(self.conn.status, imap_quote(folder), "(UIDVALIDITY UIDNEXT)")
@@ -591,12 +638,14 @@ class Inbox:
         validity = int(m.group(1)) if (m := re.search(r"UIDVALIDITY (\d+)", status)) else 0
         uidnext = int(m.group(1)) if (m := re.search(r"UIDNEXT (\d+)", status)) else 0
         previous = state or {}
+        if (not previous or "last_uid" not in previous) and first_since is None:
+            return [], {"uidvalidity": validity, "last_uid": max(0, uidnext - 1)}, False
         if not previous or "last_uid" not in previous:
-            return [], {"uidvalidity": validity, "last_uid": max(0, uidnext - 1)}
+            previous, since = {"uidvalidity": -1, "last_uid": 0}, first_since  # read like a renumbered folder
         last = int(previous.get("last_uid") or 0)
         renumbered = int(previous.get("uidvalidity") or 0) != validity
         if not renumbered and uidnext and uidnext - 1 <= last:
-            return [], {"uidvalidity": validity, "last_uid": last}
+            return [], {"uidvalidity": validity, "last_uid": last}, False
         self.examine(folder)
         if renumbered:
             found = self._uids(self._call(self.conn.uid, "SEARCH", "SINCE", imap_date(since or date.today())))
@@ -604,7 +653,8 @@ class Inbox:
         else:
             found = [u for u in self._uids(self._call(self.conn.uid, "SEARCH", f"UID {last + 1}:*")) if u > last]
         uids = sorted(set(found))[:limit]
-        new_last = max([last, *uids]) if len(set(found)) > limit else max([last, *uids, uidnext - 1])
+        more = len(set(found)) > limit
+        new_last = max([last, *uids]) if more else max([last, *uids, uidnext - 1])
         wanted: list[int] = []
         for start in range(0, len(uids), FETCH_BATCH):
             batch = uids[start:start + FETCH_BATCH]
@@ -619,7 +669,7 @@ class Inbox:
         for start in range(0, len(wanted), FETCH_BATCH):
             for uid, raw in self._fetch(wanted[start:start + FETCH_BATCH], f"BODY.PEEK[]<0.{INBOUND_BYTES_MAX}>"):
                 out.append((f"uid:{folder}:{validity}:{uid}", raw))
-        return out, {"uidvalidity": validity, "last_uid": new_last}
+        return out, {"uidvalidity": validity, "last_uid": new_last}, more
 
     @staticmethod
     def _uids(data: list[Any]) -> list[int]:
@@ -690,79 +740,341 @@ _BOUNCE_SUBJECT = re.compile(r"undeliver|delivery status notification|delivery (
                              r"returned mail|delivery failure|failure notice|non[- ]?delivery|could not be delivered|"
                              r"not delivered", re.I)
 _AUTO_SUBJECT = re.compile(r"^\s*(?:automatic reply|auto(?:matic)?[- ]?reply|auto:|autoreply|out of (?:the )?office|"
-                           r"ooo\b|abwesenheitsnotiz|r[ée]ponse automatique|respuesta autom[áa]tica|رد تلقائي)", re.I)
+                           r"ooo\b|abwesenheitsnotiz|r[ée]ponse automatique|respuesta autom[áa]tica|رد تلقائي|"
+                           r"خارج المكتب|في إجازة|في اجازة)", re.I)
 _UNSUBSCRIBE_SUBJECT = re.compile(r"^\s*unsubscribe\s+([0-9a-f]{32})\b", re.I)
 _PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd|aw|wg|sv|tr|رد|إعادة توجيه)\s*:\s*)+", re.I)
 
 
+def base_subject(subject: str) -> str:
+    """A subject without its Re:/Fw: prefixes, folded: a reply or forward and the email it answers compare equal."""
+    return " ".join(_PREFIX.sub("", subject or "").split()).casefold()
+
+
+@lru_cache(maxsize=8192)
+def _fold_char(ch: str) -> str:
+    ch = {"’": "'", "‘": "'", "“": '"', "”": '"', "ـ": ""}.get(ch, ch)
+    return "".join(c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c)).casefold()
+
+
 def fold(text: str) -> str:
     """Case, accents and Arabic hamza or vowel marks folded away, curly quotes made straight, for phrase matching."""
-    text = unicodedata.normalize("NFKD", (text or "").replace("’", "'").replace("ـ", ""))
-    return "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
+    return "".join(_fold_char(ch) for ch in text or "")
 
 
-# Asking not to be emailed again, in English and Arabic (folded: إلغاء -> الغاء, أزلني -> ازلني). Narrow on purpose:
-# a match stops every email to the address, for every company, and a chauffeur company's clients write "one stop",
-# "remove me from tomorrow's pickup list", "opt out of the meet and greet" or "don't send the driver before 6". A
-# phrase right after a negation ("please don't unsubscribe me") doesn't count.
-_NEGATED = r"(?<!not )(?<!n't )(?<!dont )(?<!never )"
-_LIST = r"(?:your |the |this |all |any )?(?:mailing |e-?mail |contact |marketing )?(?:list|lists|database)"
-OPT_OUT_PATTERNS = tuple(re.compile(rf"{_NEGATED}(?<!\w)(?:{fold(p)})(?!\w)") for p in (
-    r"unsubscribe", r"opt (?:me|us) out", r"i (?:want|would like|wish) to opt[- ]?out",
-    rf"remove (?:me|us|my (?:e-?mail|address|details)) from {_LIST}", r"remove my (?:e-?mail )?address",
-    rf"take (?:me|us|my (?:e-?mail|address)) off {_LIST}",
-    r"(?:do not|don't|dont|never) (?:contact|e-?mail|message) (?:me|us)", r"no more e-?mails?",
-    r"stop (?:e-?mailing|contacting|messaging|writing to)(?: (?:me|us))?",
-    r"stop sending (?:me|us|these|this|e-?mails?)",
-    r"(?:do not|don't|dont) send (?:me|us) (?:any )?(?:more|further)(?: e-?mails?| messages?)?",
-    r"إلغاء الاشتراك", r"إلغاء اشتراكي", r"لا تراسلني", r"لا تراسلوني", r"عدم مراسلتي",
-    r"أزلني من (?:قائمتكم|قائمتك|القائمة البريدية|قائمة المراسلات|قائمة البريد|مراسلاتكم)",
-    r"لا ترسل(?:وا)? (?:لي|لنا) (?:أي |المزيد من )?(?:رسائل|ايميلات|إيميلات|رسائل بريد)",
-    r"لا تتواصل(?:وا)? (?:معي|معنا)", r"توقف(?:وا)? عن (?:مراسلتي|مراسلتنا|إرسال)",
-))
-# A sentence (or line, or the sender's own subject) that is only "stop", "unsubscribe", "remove me"...
-_ALONE = re.compile(
-    fold(r"(?:(?:no,? ?)?(?:thanks|thank you)[ ,]*|not interested[ ,]*|no[ ,]+)?(?:please |pls |kindly |الرجاء |رجاء |"
-         r"من فضلك )?")
-    + "(?P<word>" + fold(r"stop|unsubscribe|remove me|remove us|opt me out|opt out|opt-out|توقف|توقفوا|أوقف|أوقفوا|كفى|"
-                         r"كفاية|أزلني|إزالتي|إلغاء الاشتراك") + ")"
-    + fold(r"(?:[ ,]*(?:please|pls|now|thanks|thank you|الرجاء|رجاء|من فضلك|شكرا))?"))
+def _fold_map(text: str) -> tuple[str, list[int]]:
+    """fold(text), and where in `text` each of its characters comes from: a match is shown as it was written."""
+    parts: list[str] = []
+    where: list[int] = []
+    for i, ch in enumerate(text):
+        folded = _fold_char(ch)
+        parts.append(folded)
+        where += [i] * len(folded)
+    return "".join(parts), where
 
 
-def opt_out_words(text: str, subject: str = "", ignore: Iterable[str] = ()) -> str:
-    """The opt-out words in a reply ("" if none): one of OPT_OUT_PATTERNS anywhere in its new text, or a sentence
-    that is only "stop", "unsubscribe", "remove me"... Lines of `ignore` (our own footers, should a mail app have
-    left our email in the reply unmarked) don't count.
+# --------------------------------------------------------------------------------------
+# Opt-outs. Any reply already stops the lead's sequence (repo.record_inbound logs it), so only a reply that says
+# nothing but "unsubscribe", "stop", "remove me", "don't email me again", "please take me off your list" (or the
+# Arabic for them) acts by itself: SURE, the address goes on the never-email list, for every company. A chauffeur
+# company's clients write "stop at the mall", "remove me from tomorrow's pickup list" or "please don't send the car
+# before 9" in the middle of a booking: a reply that only looks like an opt-out (MAYBE) stays a reply, flagged for the
+# user to decide. Patterns are matched on folded text (fold: إلغاء -> الغاء, أزلني -> ازلني).
+# --------------------------------------------------------------------------------------
 
-    The subject counts only when the sender wrote it ("Unsubscribe", "Remove me"): a "Re: ..." subject is the
-    subject of our own email, which says nothing about what they want."""
-    drop = {" ".join(line.split()).casefold() for block in ignore for line in (block or "").splitlines()
-            if line.strip()}
-    folded = fold("\n".join(line for line in (text or "").split("\n") if " ".join(line.split()).casefold() not in drop))
-    if subject and not _PREFIX.match(subject):
-        folded = f"{fold(subject)}\n{folded}"
-    for pattern in OPT_OUT_PATTERNS:
-        if m := pattern.search(folded):
-            return m.group(0)
-    for sentence in re.split(r"[.!?؟\n]+", folded):
-        if m := _ALONE.fullmatch(" ".join(sentence.split()).strip(" ,،;:-–—*\"'()")):
-            return m.group("word")
+SURE, MAYBE = "sure", "maybe"
+OPT_OUT_TEXT_MAX = 200  # the most a sure opt-out says (its opt-out words, without greetings and sign-offs)
+
+# Right after a negation ("please don't unsubscribe me", "I don't want to unsubscribe") a phrase doesn't count.
+_NEGATED = r"(?<!not )(?<!n't )(?<!dont )(?<!never )(?<!t want to )(?<!t wish to )(?<!t like to )"
+# The end of a clause: "remove me." "stop sending, please" "take me off now".
+_END = r"(?= *(?:[.!?,;:)\n]|$| please| pls| now| thanks?| thank you| asap| again| immediately))"
+# Words of a trip, not a mailing list: "remove me from tomorrow's pickup list", "take us off the waiting list".
+_TRIP = (r"(?:pick-?ups?|guests?|waiting|bookings?|reservations?|transfers?|trips?|airport|drivers?|passengers?|"
+         r"manifest|schedule|roster|flights?|cars?|vehicles?|quotes?|pending|rides?|tomorrow'?s?|today'?s?|"
+         r"tonight'?s?|meet and greet)")
+_WORDS = r"(?:[^\s.,;!?]+ ){0,3}?"
+_LISTED = (r"(?!" + _WORDS + _TRIP + r"\b)" + _WORDS
+           + r"(?:list|lists|database|records|mailings|e-?mails|contacts|newsletters?|crm|system)\b"
+           + r"(?! (?:of|for) (?:[^\s.,;!?]+ ){0,2}?" + _TRIP + ")")
+_WHO = r"(?:me|us|him|her|them)"
+_MINE = (r"(?:my (?:e-?mail(?: address)?|address|details|data|contact(?: details)?|name)|"
+         r"our (?:e-?mail(?: address)?|address|details|names?)|this (?:e-?mail )?address|"
+         r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})")
+# "don't contact me on my mobile", "do not contact me before 9am", "don't email me the invoices", "please don't email
+# me here, send it to...": a channel, a time or another object follows, so it is about the booking, not the emails.
+_ELSEWHERE = (r"(?! (?:on|via|by|through|before|after|until|till|at|during|the|my|our|his|her|their|your|here|"
+              r"directly|about|regarding|with|if|when|for|from|in person|privately|instead)\b)")
+_OBJECT = r" (?:me|us|him|her|them|this (?:e-?mail )?address)"
+_AR_ELSEWHERE = r"(?! (?:على|عبر|قبل|بعد|في|من خلال|بالهاتف|بالواتساب|هاتفيا|هنا))"
+
+# What looks like an opt-out, anywhere in the new text (MAYBE). The footer's own instructions ('reply "unsubscribe"',
+# "click unsubscribe", "the unsubscribe link") and leaving a service ("unsubscribe from the monthly package") don't.
+_LOOKS_LIKE = (
+    r"(?<!reply \")(?<!reply ')(?<!word \")(?<!with \")(?<!click )(?<!click on )(?<!press )(?<!the )(?<!an )"
+    r"(?<!here to )(?<!link to )(?<!below to )"
+    r"unsubscribe(?! (?:link|button|page|option))(?! from (?:our|my) )"
+    r"(?! from (?:the|this|that) (?!(?:mailing |e-?mail )?(?:list|e-?mails?|newsletters?|mailings?)\b))",
+    r"unsub",
+    r"opt " + _WHO + r" out",
+    r"(?<!\" to )(?<!' to )opt[- ]?out" + _END,
+    r"opt[- ]?out of (?:these|this|your|all|any|future|further|the|such) (?:mailing |e-?mail |marketing )?"
+    r"(?:e-?mails?|messages?|mailings?|list|lists|communications?|newsletters?)",
+    r"(?:remove|delete|erase) (?:" + _WHO + "|" + _MINE + r") from " + _LISTED,
+    r"(?:be|get|been) removed from " + _LISTED,
+    r"remove from (?:your |the |this |all )?(?:mailing |e-?mail |contact )?(?:list|lists|database)",
+    r"remove (?:me|us)" + _END,
+    r"remove my (?:e-?mail )?address" + _END,
+    r"take (?:" + _WHO + "|" + _MINE + r") off(?:" + _END + r"| (?:your|the|this|all|any) " + _LISTED + ")",
+    r"(?:do not|don't|dont|never) (?:contact|e-?mail|message|write to|send e-?mails? to|send messages? to)"
+    r"(?: (?:" + _WHO + r"|this (?:e-?mail )?address|my (?:e-?mail(?: address)?|address)))" + _ELSEWHERE,
+    r"(?:do not|don't|dont|never) (?:contact|e-?mail|message|write(?: to)?)(?: (?:me|us|this (?:e-?mail )?address))?"
+    r" (?:again|any ?more|ever again)",
+    r"(?:do not|don't|dont) contact(?= *(?:[.!?\n]|$))",
+    r"stop (?:e-?mailing|contacting|messaging|writing to|spamming|mailing)(?:" + _OBJECT + _ELSEWHERE
+    + r"|(?! (?:me|us|him|her|them|this|the|our|my|his|her|their|your|on|via|at|before|after)\b))",
+    r"stop sending(?: " + _WHO + r")?(?: (?:any )?(?:more )?(?:e-?mails?|messages?|mailings?|newsletters?|marketing|"
+    r"offers?|promotions?)\b| (?:these|this|them|those|it)(?= *(?:[.!?,;:)\n]|$| please| now| e-?mails?| messages?| thanks?))|" + _END + ")",
+    r"no more e-?mails?(?! (?:needed|required|necessary|for now|until|till)\b)",
+    r"(?:do not|don't|dont) send (?:me |us )?(?:any )?(?:more|further) (?:e-?mails?|messages?|mailings?|newsletters?|"
+    r"marketing)",
+    r"(?:do not|don't|dont) send (?:me|us) (?:any )?(?:e-?mails?|messages?|mailings?)(?: any ?more| again| in (?:the )?"
+    r"future)",
+    r"(?:i|we) (?:do not|don't|dont|no longer|do no longer) (?:wish|want|like) to (?:receive|get|hear from you|be "
+    r"contacted|be e-?mailed)",
+    r"(?:i|we)(?:'d| would) (?:like|want|prefer) (?:not to|to not) (?:receive|get|be contacted|be e-?mailed)",
+    r"(?:cease|stop|end) all (?:communications?|contact|e-?mails?|correspondence)",
+    r"refrain from (?:contacting|e-?mailing|messaging|writing to)",
+    r"delete (?:my|our|this) (?:e-?mail(?: address)?|details|data|contact(?: details)?|address|information)",
+    r"(?:i|we) never (?:subscribed|signed up|opted in|asked (?:for|to receive) (?:this|these|your))",
+    # Arabic
+    r"(?:إلغاء|الغاء) الاشتراك(?! (?:الشهري|السنوي|الأسبوعي|اليومي|للسيارات|في الباقة|في خدمة|في الخدمة))",
+    r"(?:ألغوا|ألغي|إلغاء|ألغ) (?:اشتراكي|اشتراكنا)",
+    r"لا (?:تراسلني|تراسلوني|تراسلونا|تراسلنا|تراسلوننا)",
+    r"عدم (?:مراسلتي|مراسلتنا)",
+    r"عدم (?:التواصل|الاتصال) (?:معي|معنا|بي|بنا)" + _AR_ELSEWHERE,
+    r"(?:أزلني|إزالتي|أزيلوني|احذفوني|احذفني|أزيلونا|احذفونا|امسحوني)"
+    r"(?! من قائمة (?:الركاب|الضيوف|الانتظار|الحجوزات|الحجز|المسافرين|الاستقبال|التوصيل))",
+    r"(?:إزالة|حذف|شطب|مسح) (?:بريدي|ايميلي|إيميلي|عنواني|بياناتي|اسمي)(?: الإلكتروني| الالكتروني)?",
+    r"لا ترسل(?:وا|ون|ي)? (?:لي|لنا|إلي|إلينا) (?:أي |المزيد من )?(?:رسائل|ايميلات|إيميلات|بريد|ايميل|إيميل|شيئا|شيء)"
+    r"(?! (?:نصية|sms|على الواتساب|واتساب|عبر الواتساب))",
+    r"لا ترسل(?:وا|ون)? (?:أي |المزيد من )?(?:رسائل|ايميلات|إيميلات|بريد)(?: أخرى)? (?:مرة أخرى|بعد الآن|ثانية|مجددا)",
+    r"لا (?:نرغب|أرغب|نريد|أريد) (?:في )?(?:استلام|تلقي|استقبال) (?:أي )?(?:رسائل|ايميلات|إيميلات|بريد|مراسلات|عروض)",
+    r"لا تتواصل(?:وا|ون)? (?:معي|معنا)" + _AR_ELSEWHERE,
+    r"توقف(?:وا)? عن (?:مراسلتي|مراسلتنا|إرسال (?:الرسائل|رسائل|الايميلات|ايميلات|الإيميلات|إيميلات|البريد))",
+    r"(?:عدم|بدون) إرسال (?:أي )?(?:رسائل|ايميلات|إيميلات|بريد)",
+    r"(?:أرجو|الرجاء|يرجى|نرجو|رجاء) عدم (?:الإرسال|المراسلة|مراسلتنا|مراسلتي|التواصل|الاتصال)" + _AR_ELSEWHERE,
+)
+OPT_OUT_PATTERNS = tuple(re.compile(_NEGATED + r"(?<!\w)(?:" + fold(p) + r")(?!\w)") for p in _LOOKS_LIKE)
+
+# Polite words around an opt-out ("Please", "kindly", "could you", "thanks", "now").
+_LEAD_IN = fold(r"(?:(?:i|we)(?:'d| would)? (?:like|want|wish|need) (?:you )?to |(?:can|could|would|will) you (?:please "
+                r"|kindly )?|(?:just |and )?)(?:please |pls |plz |kindly |just )?(?:الرجاء |رجاء |يرجى |أرجو |نرجو "
+                r"|من فضلك |لو سمحت )?")
+_LEAD_OUT = fold(r"(?: *(?:please|pls|plz|now|thanks|thank you|thx|asap|immediately|right away|right now|الرجاء|رجاء|"
+                 r"من فضلك|لو سمحت|شكرا|فورا))*")
+# What a sure opt-out says, as a whole sentence (with the polite words around it).
+_SURE_SAYS = (
+    r"unsubscribe(?: me| us)?(?: from (?:this|your|the|all|any|these) (?:mailing |e-?mail |marketing )?(?:list|lists|"
+    r"e-?mails|mailings))?",
+    r"unsub",
+    r"stop(?: it| that| this| now)?",
+    r"stop (?:e-?mailing|contacting|messaging|writing to|spamming|mailing)(?: (?:me|us|this (?:e-?mail )?address))?",
+    r"stop sending(?: (?:me|us))?(?: (?:any )?(?:more )?(?:e-?mails?|messages?|mailings?)| (?:these|this|them|those)"
+    r"(?: e-?mails?| messages?)?)?(?: to (?:me|us|this (?:e-?mail )?address))?",
+    r"remove(?: (?:me|us|this|" + _MINE + r"))?(?: from (?:this|your|the|all|any|these|future|further)(?: (?:mailing "
+    r"|e-?mail |contact |distribution |marketing )?(?:list|lists|database|records|e-?mails|mailings|communications?))?)?",
+    r"(?:be )?removed from (?:this|your|the|all|any) (?:mailing |e-?mail |contact |distribution |marketing )?"
+    r"(?:list|lists|database|records)",
+    r"remove from (?:your |the |this |all )?(?:mailing |e-?mail )?list",
+    r"take (?:me|us|" + _MINE + r") off(?: (?:this|your|the|all|any) (?:mailing |e-?mail |contact |distribution "
+    r"|marketing )?(?:list|lists|database|records|e-?mails))?",
+    r"opt(?: me| us)?[- ]?out(?: of (?:this|these|your|all|any|future|further|the) (?:mailing |e-?mail |marketing )?"
+    r"(?:list|lists|e-?mails?|messages?|mailings?|communications?))?",
+    r"(?:do not|don't|dont|never) (?:contact|e-?mail|message|write to|send e-?mails? to)(?: (?:me|us|this (?:e-?mail )?"
+    r"address|my (?:e-?mail(?: address)?|address)))?(?: (?:again|any ?more|ever again|in (?:the )?future))?",
+    r"(?:do not|don't|dont) send (?:me |us )?(?:any )?(?:more |further )?(?:e-?mails?|messages?|mailings?)"
+    r"(?: (?:any ?more|again|in (?:the )?future))?",
+    r"no more e-?mails?(?: (?:from you|to (?:me|us|this (?:e-?mail )?address)))?",
+    r"(?:i|we) (?:do not|don't|dont|no longer) (?:wish|want) to (?:receive|get) (?:any )?(?:more |further )?"
+    r"(?:e-?mails?|messages?|communications?|correspondence|mailings?)(?: from (?:you|your company|you guys))?",
+    r"(?:cease|stop) all (?:communications?|contact|e-?mails?|correspondence)",
+    r"refrain from (?:contacting|e-?mailing|messaging) (?:me|us)",
+    r"delete (?:my|our) (?:e-?mail(?: address)?|details|data|address|contact details)(?: from your (?:list|database"
+    r"|records|system))?",
+    # Arabic
+    r"(?:إلغاء الاشتراك|(?:ألغوا|ألغي|إلغاء) (?:اشتراكي|اشتراكنا))",
+    r"(?:توقف|توقفوا|أوقف|أوقفوا|كفى|كفاية)",
+    r"(?:أزلني|إزالتي|أزيلوني|احذفوني|احذفني)(?: من (?:قائمتكم|قائمتك|القائمة|القائمة البريدية|قائمة المراسلات|"
+    r"قائمة البريد|مراسلاتكم|قائمة مراسلاتكم))?",
+    r"(?:إزالة|حذف) (?:بريدي|ايميلي|إيميلي|عنواني)(?: الإلكتروني| الالكتروني)?(?: من (?:قائمتكم|قائمتك|القائمة|قوائمكم)"
+    r"(?: البريدية)?)?",
+    r"لا (?:تراسلني|تراسلوني|تراسلونا|تراسلنا)(?: (?:مرة أخرى|مرة ثانية|بعد الآن|ثانية|أبدا))?",
+    r"عدم (?:مراسلتي|مراسلتنا|الإرسال|التواصل معي|التواصل معنا|الاتصال بي|الاتصال بنا)"
+    r"(?: (?:مرة أخرى|مرة ثانية|بعد الآن|ثانية))?",
+    r"عدم إرسال (?:أي )?(?:رسائل|ايميلات|إيميلات)(?: أخرى)?(?: (?:مرة أخرى|بعد الآن))?",
+    r"لا ترسل(?:وا|ون|ي)? (?:لي |لنا |إلي |إلينا )?(?:أي |المزيد من )?(?:رسائل|ايميلات|إيميلات|بريد|شيئا|شيء)"
+    r"(?: أخرى)?(?: (?:مرة أخرى|مرة ثانية|بعد الآن|بعد اليوم|مجددا|مستقبلا))?",
+    r"لا (?:نرغب|أرغب) في (?:استلام|تلقي) (?:أي )?(?:رسائل|ايميلات|إيميلات|بريد|مراسلات)(?: منكم| منك)?"
+    r"(?: (?:مستقبلا|بعد الآن|مرة أخرى))?",
+    r"لا تتواصل(?:وا)? (?:معي|معنا)(?: (?:مرة أخرى|بعد الآن))?",
+    r"توقف(?:وا)? عن (?:مراسلتي|مراسلتنا|إرسال (?:الرسائل|رسائل|الايميلات|ايميلات|البريد))",
+)
+_SAYS = "(?:" + "|".join(fold(p) for p in _SURE_SAYS) + ")"
+# One opt-out, or two joined: "please unsubscribe me and stop emailing", "الرجاء إلغاء الاشتراك وعدم مراسلتي".
+_SURE = re.compile(_LEAD_IN + _SAYS + "(?:(?: and (?:please )?| و ?)" + _SAYS + ")*" + _LEAD_OUT)
+# Sentences that say nothing either way: greetings, thanks, "not interested", sign-offs, a phone's footer.
+_FILLER = re.compile(fold("|".join((
+    r"(?:hi|hello|hey|dear|good (?:morning|afternoon|evening|day)|greetings|مرحبا|أهلا|السلام عليكم|عزيزي|عزيزتي|"
+    r"الأستاذ|السيد|السيدة)(?: [^\s]+){0,3}",
+    r"(?:many |a lot of )?(?:thanks|thank you|thx|ty|cheers)(?: (?:very much|so much|a lot|in advance|again))?"
+    r"(?: for (?:your|the) (?:e-?mail|message|offer|note|time))?",
+    r"no|nope|sorry|no thanks|no thank you|(?:we are |we're |i am |i'm )?not interested(?: at all)?|not for us",
+    r"(?:i|we) never (?:subscribed|signed up|opted in|asked for (?:this|these|it|your e-?mails))(?: to (?:this|these|"
+    r"your (?:list|e-?mails)))?|this is spam|spam|who gave you (?:my|our) (?:e-?mail(?: address)?|address|details)",
+    r"(?:best |kind |warm |many )?regards|best|sincerely|br|thanks (?:and|&) regards|yours(?: truly| sincerely)?",
+    r"sent from my [^\s]+(?: [^\s]+){0,2}|get outlook for (?:ios|android)|sent from (?:outlook|yahoo mail|mail for "
+    r"windows|gmail)(?: for [^\s]+)?",
+    r"شكرا|شكرا جزيلا|شكرا لك|شكرا لكم|مع الشكر|مع التحية|تحياتي|مع خالص التحية|وشكرا|لا شكرا|غير مهتم|غير مهتمين|"
+    r"لسنا مهتمين|لست مهتما|لا نحتاج|لا",
+))))
+_SIGN_OFF = re.compile(fold(r"(?:(?:best |kind |warm |many )?regards|best|sincerely|cheers|thanks|thank you|br|"
+                            r"thanks (?:and|&) regards|مع التحية|تحياتي|مع خالص التحية|مع الشكر|شكرا|وشكرا)"))
+_PHONE = re.compile(r"(?:(?:tel|mob|mobile|phone|cell|m|t|whatsapp)\.?:? *)?\+?[\d ()./-]{7,}")
+# A sentence that is only "stop", "unsubscribe", "remove"... (MAYBE when there is more around it).
+_ALONE = re.compile(_LEAD_IN + "(?P<word>" + fold(r"stop|stop it|unsubscribe|unsub|remove|remove me|remove us|opt me out|"
+                                                  r"opt out|opt-out|توقف|توقفوا|أوقف|أوقفوا|كفى|كفاية|أزلني|إزالتي|"
+                                                  r"إلغاء الاشتراك") + ")" + _LEAD_OUT)
+_ABBREVIATION = re.compile(r"\b(mr|mrs|ms|dr|st|eng)\.", re.I)
+_SPLIT = re.compile(r"[.!?؟;](?=\s|$)|[,،\n]")
+_PART_STRIP = " \t,،;:-–—*\"'()[]<>…!?.؟"
+
+
+def _without_footers(text: str, footers: Iterable[str]) -> str:
+    """The text without our footers, should a mail app have left our email in the reply unmarked. A footer is removed
+    only as a whole (all its lines in a row), so a footer that ends in a line "Unsubscribe" never swallows a reply that
+    says just that; and never when nothing would be left."""
+    lines = (text or "").split("\n")
+    norm = [" ".join(line.split()).casefold() for line in lines]
+    keep = [True] * len(lines)
+    for footer in footers:
+        want = [" ".join(line.split()).casefold() for line in (footer or "").splitlines() if line.strip()]
+        filled = [i for i, n in enumerate(norm) if n and keep[i]]
+        for start in range(len(filled) - len(want) + 1) if want else ():
+            run = filled[start:start + len(want)]
+            if [norm[i] for i in run] == want:
+                for i in run:
+                    keep[i] = False
+                break
+    rest = "\n".join(line for line, k in zip(lines, keep, strict=True) if k)
+    return rest if rest.strip() else text
+
+
+def _parts(text: str) -> list[str]:
+    """Sentences and clauses (split at full stops, commas and line ends), trimmed."""
+    text = _ABBREVIATION.sub(r"\1", text)
+    return [p for p in (" ".join(x.split()).strip(_PART_STRIP) for x in _SPLIT.split(text)) if p]
+
+
+def _says_nothing(folded: str, names: set[str]) -> bool:
+    return bool(_FILLER.fullmatch(folded) or _PHONE.fullmatch(folded)
+                or (names and set(re.findall(r"[^\W\d_]+", folded)) <= names))
+
+
+def _sure_words(body: str, extra: list[str], names: set[str]) -> str:
+    """The opt-out words when the reply says nothing else (greetings, thanks, sign-offs and the sender's name aside),
+    else "". `extra`: what the sender put in the subject."""
+    said: list[str] = []
+    other = 0
+    content = False
+    for line in body.split("\n"):
+        folded_line = fold(" ".join(line.split()).strip(_PART_STRIP))
+        if content and _SIGN_OFF.fullmatch(folded_line):
+            break  # "Regards," after the message: a signature follows
+        for part in _parts(line):
+            folded = fold(part)
+            if _says_nothing(folded, names):
+                continue
+            content = True
+            if _SURE.fullmatch(folded):
+                said.append(part)
+            else:
+                other += 1
+    for part in extra:
+        folded = fold(part)
+        if _SURE.fullmatch(folded):
+            said.append(part)
+        elif not _says_nothing(folded, names):
+            other += 1
+    if said and not other and len(said) <= 4 and sum(len(p) for p in said) <= OPT_OUT_TEXT_MAX:
+        return said[0]
     return ""
 
 
+def _looks_like(text: str) -> str:
+    """The words that look like an opt-out, as written ("" if none)."""
+    folded, where = _fold_map(text)
+    for pattern in OPT_OUT_PATTERNS:
+        if m := pattern.search(folded):
+            return text[where[m.start()]:where[m.end() - 1] + 1] if m.end() > m.start() else ""
+    for part in _parts(text):
+        if _ALONE.fullmatch(fold(part)):
+            return part
+    return ""
+
+
+def read_opt_out(text: str, subject: str = "", ignore: Iterable[str] = (), names: Iterable[str] = ()) -> tuple[str,
+                                                                                                                str]:
+    """Whether a reply's new text asks not to be emailed again: (SURE, words) when it says nothing else, (MAYBE,
+    words) when it only looks like it, ("", "") when not. Words are given as they were written.
+
+    `ignore`: our own footers (removed only as a whole). `names`: the sender's name ("Regards, Noura" says nothing).
+    The subject counts when the sender wrote it ("Unsubscribe", "Remove me"); a "Re: ..." subject is our own email's,
+    except what was typed after it ("Re: Airport transfers - UNSUBSCRIBE")."""
+    body = _without_footers((text or "").replace("\r\n", "\n"), ignore)
+    lines = body.split("\n")
+    if (cut := next((i for i, line in enumerate(lines) if line.rstrip() in ("--", "-- ")), None)) is not None:
+        body = "\n".join(lines[:cut])  # the signature after "-- " says nothing about what they want
+    names_folded = {w for n in names for w in re.findall(r"[^\W\d_]+", fold(n))}
+    subject = " ".join((subject or "").split())
+    own = bool(subject) and not _PREFIX.match(subject)
+    pieces = re.split(r"\s+[-–—|]+\s+", _PREFIX.sub("", subject)) if subject and not own else []
+    typed = pieces[-1] if len(pieces) > 1 else ""  # typed after our subject
+    extra = [subject] if own else ([typed] if typed and _SURE.fullmatch(fold(typed.strip(_PART_STRIP))) else [])
+    if words := _sure_words(body, [p.strip(_PART_STRIP) for p in extra], names_folded):
+        return SURE, words.strip(_PART_STRIP)
+    for candidate in ([subject] if own else []) + [body] + ([typed] if typed else []):
+        if words := _looks_like(candidate):
+            return MAYBE, words.strip(_PART_STRIP)
+    return "", ""
+
+
+def opt_out_words(text: str, subject: str = "", ignore: Iterable[str] = ()) -> str:
+    """The words in a reply that ask not to be emailed again, or look like it ("" if none): read_opt_out's words."""
+    return read_opt_out(text, subject, ignore)[1]
+
+
+_ON_WROTE = re.compile(r"^on\b.{0,300}\bwrote:\s*$", re.I)
 _QUOTE_START = (
     re.compile(r"^-{2,}\s*(?:original message|forwarded message|الرسالة الأصلية)\s*-{2,}", re.I),
-    re.compile(r"^_{10,}\s*$"),
-    re.compile(r"^on\b.{0,300}\bwrote:\s*$", re.I),
+    # Outlook's separator is 32 underscores; a booking form's "____" line between its fields is not one.
+    re.compile(r"^_{30,}\s*$"),
+    _ON_WROTE,
     re.compile(r"^le\b.{0,300}\ba [ée]crit\s*:\s*$", re.I),
     re.compile(r"^am\b.{0,300}\bschrieb\b.{0,200}:\s*$", re.I),
-    # Arabic: "في ...، كتب سام <sam@...>:". The whole word only: "المكتب:" (the office) is not it.
-    re.compile(r"^.{0,300}(?<!\w)كتب(?!\w).{0,300}:\s*$"),
+    # Zoho Mail: "---- On Mon, 12 Oct 2026 10:02:11 +0400 Sam Rahman <sam@...> wrote ---", often over an unmarked quote.
+    re.compile(r"^-{2,}\s*on\b.{0,300}\bwrote\s*:?\s*-*\s*$", re.I),
+    # Arabic: "في ...، كتب سام <sam@...>:", always with a date or an address. The whole word only: "المكتب:" (the
+    # office) is not it, nor a trip request's "نحتاج نقل كتب ومعدات معرض الكتاب:" (books).
+    re.compile(r"^(?=.*[\d@]).{0,300}(?<!\w)كتب(?!\w).{0,300}:\s*$"),
 )
 STRIP_INPUT_MAX = 50_000  # the start of a long message is enough to find what is new
-_HEADER_BLOCK = re.compile(r"^(?:from|de|von|من)\s*:", re.I)
-_HEADER_NEXT = re.compile(r"^(?:sent|date|envoy[ée]|gesendet|to|subject|بتاريخ|التاريخ|إلى|الموضوع)\s*:", re.I)
-_HEADER_SUBJECT = re.compile(r"^(?:subject|objet|betreff|الموضوع)\s*:", re.I)
+# Outlook's quoted header block, in the languages its users write in: From/Sent/To/Subject.
+_HEADER_BLOCK = re.compile(r"^(?:from|de|von|da|من|от)\s*:", re.I)
+_HEADER_NEXT = re.compile(r"^(?:sent|date|envoy[ée]|gesendet|to|subject|enviado(?: el)?|para|asunto|inviato|a|oggetto|"
+                          r"отправлено|кому|тема|بتاريخ|التاريخ|إلى|الموضوع)\s*:", re.I)
+_HEADER_SUBJECT = re.compile(r"^(?:subject|objet|betreff|asunto|oggetto|тема|الموضوع)\s*:", re.I)
+_BIDI = "‎‏‪‫‬‭‮⁦⁧⁨⁩"  # direction marks Gmail adds to Arabic
 
 
 def strip_quoted(text: str) -> str:
@@ -774,10 +1086,10 @@ def strip_quoted(text: str) -> str:
     lines = (text or "")[:STRIP_INPUT_MAX].replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out: list[str] = []
     for i, line in enumerate(lines):
-        stripped = line.strip()
-        joined = f"{stripped} {lines[i + 1].strip()}" if i + 1 < len(lines) else stripped
+        stripped = line.strip().strip(_BIDI).strip()
+        joined = f"{stripped} {lines[i + 1].strip().strip(_BIDI).strip()}" if i + 1 < len(lines) else stripped
         if len(stripped) <= 600 and any(p.match(stripped) for p in _QUOTE_START) or (
-                stripped.lower().startswith("on ") and _QUOTE_START[2].match(joined)):
+                stripped.lower().startswith("on ") and _ON_WROTE.match(joined)):
             break
         if (_HEADER_BLOCK.match(stripped) and any(_HEADER_NEXT.match(n.strip()) for n in lines[i + 1:i + 4])
                 and ("@" in stripped or any(_HEADER_SUBJECT.match(n.strip()) for n in lines[i + 1:i + 6]))):
@@ -827,6 +1139,8 @@ class _TextFromHtml(HTMLParser):
             return
         if tag in self.BLOCK:
             self.parts.append("\n")
+        elif tag in ("td", "th"):  # table cells side by side: "Flight BA 107", not "FlightBA 107"
+            self.parts.append(" ")
 
     def handle_endtag(self, tag: str) -> None:
         if self.skip_depth:
@@ -864,7 +1178,8 @@ class Inbound:
     status: str = ""                     # a bounce's status, e.g. 5.1.1
     diagnostic: str = ""
     original_ids: tuple[str, ...] = ()   # a bounce: the Message-IDs of the email that bounced
-    opt_out: str = ""                    # the words that made it an opt-out
+    opt_out: str = ""                    # the words that made it an opt-out (as written)
+    opt_out_hint: str = ""               # a reply: words that look like an opt-out, for the user to decide
 
 
 def _header(msg: Message, name: str, whole: bool = False) -> str:
@@ -993,10 +1308,23 @@ def _bounce_kind(status: str, words: str) -> str:
 
 
 def _auto_reply(msg: Message, subject: str) -> bool:
+    """An automatic answer (RFC 3834, or an out-of-office subject). "Precedence: list" isn't one: a person answering
+    from a Google Workspace collaborative inbox sends it (classify_inbound counts it only for mail that refers to
+    none of our emails)."""
     auto = _header(msg, "Auto-Submitted").lower()
     precedence = _header(msg, "Precedence").lower()
     return ((bool(auto) and auto != "no") or bool(_header(msg, "X-Autoreply")) or bool(_header(msg, "X-Autorespond"))
-            or precedence in ("auto_reply", "bulk", "junk", "list") or bool(_AUTO_SUBJECT.match(subject)))
+            or precedence in ("auto_reply", "bulk", "junk") or bool(_AUTO_SUBJECT.match(subject)))
+
+
+def _block_status(block: dict[str, str]) -> str:
+    """A DSN block's status. A non-specific one (x.0.0: Exim and many relays always write "Status: 5.0.0") gives way
+    to the diagnostic's own code ("550 5.1.1 RESOLVER.ADR.RecipNotFound")."""
+    status = block.get("status", "")
+    told = enhanced_status(block.get("diagnostic", ""))
+    if not status or (status.endswith(".0.0") and told and told[0] == status[0]):
+        return told or status
+    return status
 
 
 def classify_inbound(raw: bytes, ignore: Iterable[str] = ()) -> Inbound:
@@ -1023,13 +1351,12 @@ def classify_inbound(raw: bytes, ignore: Iterable[str] = ()) -> Inbound:
             chosen = [b for b in blocks if b.get("action", "").lower() in ("failed", "delayed", "")]
             if not chosen:  # delivered, relayed or expanded: nothing failed
                 return Inbound(AUTO_REPLY, **base)
-            kinds = [(_bounce_kind(b.get("status", "") or enhanced_status(b.get("diagnostic", "")),
-                                   b.get("diagnostic", "")) if b.get("action", "").lower() != "delayed"
+            kinds = [(_bounce_kind(_block_status(b), b.get("diagnostic", "")) if b.get("action", "").lower() != "delayed"
                       else SOFT_BOUNCE, b) for b in chosen]
             order = (BOUNCE, POLICY_REJECT, SOFT_BOUNCE)
             kind, block = min(kinds, key=lambda kb: order.index(kb[0]))
             recipients = tuple(dict.fromkeys(b["recipient"] for b in chosen if b.get("recipient")))
-            status = block.get("status", "") or enhanced_status(block.get("diagnostic", ""))
+            status = _block_status(block)
             diagnostic = server_text(block.get("diagnostic", ""))
         else:  # a bounce that doesn't follow RFC 3464: its words and the addresses in it
             text = _all_text(msg)
@@ -1048,14 +1375,17 @@ def classify_inbound(raw: bytes, ignore: Iterable[str] = ()) -> Inbound:
     if m := _UNSUBSCRIBE_SUBJECT.match(subject):  # the List-Unsubscribe email
         return Inbound(OPT_OUT, **base, text=text, token=m.group(1).lower(), opt_out="unsubscribe")
     # A newsletter from the lead's own address (a hotel's Mailchimp campaign from info@) answers none of our emails:
-    # noted, never read for opt-out words. A reply sent through a mailing list still refers to our email.
-    bulk = not references and bool(_header(msg, "List-Id") or _header(msg, "List-Unsubscribe"))
+    # noted, never read for opt-out words. A reply sent through a mailing list (a Google Group, a collaborative inbox)
+    # still refers to our email: it is read.
+    bulk = not references and bool(_header(msg, "List-Id") or _header(msg, "List-Unsubscribe")
+                                   or _header(msg, "Precedence").lower() == "list")
     if _auto_reply(msg, subject) or bulk:
         return Inbound(AUTO_REPLY, **base, text=text)
-    words = opt_out_words(text, subject, ignore)
-    if words:
+    sender_name = parseaddr(_header(msg, "From"))[0]
+    level, words = read_opt_out(text, subject, ignore, names=[sender_name] if sender_name else [])
+    if level == SURE:
         return Inbound(OPT_OUT, **base, text=text, opt_out=words)
-    return Inbound(REPLY, **base, text=text)
+    return Inbound(REPLY, **base, text=text, opt_out_hint=words)
 
 
 def content_key(raw: bytes) -> str:
@@ -1080,6 +1410,7 @@ def header_facts(headers: Message) -> dict[str, Any]:
     refers = f"{_header(headers, 'In-Reply-To', True)} {_header(headers, 'References', True)}"
     return {
         "from_email": from_email,
+        "from_domain": domain_of(from_email),
         "references": set(_MESSAGE_IDS.findall(refers)),
         "bounce": "multipart/report" in content_type or bool(_SYSTEM_SENDER.match(from_email.partition("@")[0])),
         "unsubscribe": bool(_UNSUBSCRIBE_SUBJECT.match(subject)),

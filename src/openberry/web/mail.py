@@ -25,7 +25,7 @@ from . import forms
 from .auth import checked_form, require_login
 from .ratelimit import limits
 from .session import flash, safe_next
-from .ui import local_dt, render, to_datetime
+from .ui import clock_zone, local_dt, render, to_datetime
 
 router = APIRouter(dependencies=[Depends(require_login)], include_in_schema=False)
 
@@ -106,22 +106,33 @@ def _plain_http_elsewhere(request: Request) -> bool:
     return request.url.scheme == "http" and (request.url.hostname or "") not in LOCAL_HOSTS
 
 
-def mailbox_context(request: Request) -> dict[str, Any]:
+def mailbox_context(request: Request, typed: FormData | None = None) -> dict[str, Any]:
+    """The Mailbox page. `typed`: a form that couldn't be saved, shown again as it was typed (never its passwords)."""
     config.refresh_saved_settings()
     settings = config.get_settings()
     states = {field: envfile.setting_state(name) for field, name in FIELDS.items()}
     provider = settings.mail_provider if settings.mail_provider in PROVIDERS else ("other" if settings.smtp_host
                                                                                   else "zoho")
     address = settings.mailbox_address()
+    values: dict[str, Any] = {
+        "smtp_host": settings.smtp_host, "smtp_port": settings.smtp_port, "username": settings.smtp_username,
+        "from_email": settings.smtp_from_email or settings.smtp_username, "from_name": settings.smtp_from_name,
+        "imap_host": settings.imap_host, "imap_username": settings.imap_username, "save_sent": settings.imap_save_sent}
+    region = zoho_region(settings.smtp_host)
+    if typed is not None:
+        provider = _text(typed, "provider") if _text(typed, "provider") in PROVIDERS else provider
+        region = _text(typed, "region") if _text(typed, "region") in dict(ZOHO_REGIONS) else region
+        for name in ("smtp_host", "username", "from_email", "from_name", "imap_host", "imap_username"):
+            values[name] = _text(typed, name)
+        values["smtp_port"] = int(_text(typed, "smtp_port")) if _text(typed, "smtp_port") in ("465", "587") \
+            else values["smtp_port"]
+        values["save_sent"] = forms.checked(typed, "save_sent")
     return {
         "active": "mailbox", "title": "Mailbox", "env_path": str(config.settings_file()),
-        "providers": PROVIDERS, "zoho_regions": ZOHO_REGIONS, "region": zoho_region(settings.smtp_host),
+        "providers": PROVIDERS, "zoho_regions": ZOHO_REGIONS, "region": region,
         "provider": provider, "states": states,
         "locked": {field: state.source in ("environment", "file") for field, state in states.items()},
-        "values": {"smtp_host": settings.smtp_host, "smtp_port": settings.smtp_port,
-                   "username": settings.smtp_username, "from_email": settings.smtp_from_email or settings.smtp_username,
-                   "from_name": settings.smtp_from_name, "imap_host": settings.imap_host,
-                   "imap_username": settings.imap_username, "save_sent": settings.imap_save_sent},
+        "values": values, "typed": typed is not None,
         "password_saved": bool(settings.smtp_password), "imap_password_saved": bool(settings.imap_password),
         "connected": bool(address), "address": address,
         "mailbox": repo.mailbox_state(address) if address else None,
@@ -267,8 +278,11 @@ async def mailbox_save(request: Request, form: FormData = Depends(checked_form))
         if problems:
             for problem in problems:
                 flash(request, problem, "error")
-            flash(request, "Nothing was saved.", "error")
-            return _back()
+            flash(request, "Nothing was saved. What you typed is still in the form (type the password again).",
+                  "error")
+            # Shown again as typed: a redirect would bring back the saved servers, and saving again would keep them.
+            return await run_in_threadpool(lambda: render(request, "mailbox.html", mailbox_context(request, form),
+                                                          status_code=422))
         if not await run_in_threadpool(_save, request, changes):
             return _back()
         # New settings: a refused login is tried again at once. A provider's block (24 hours, to protect the
@@ -311,7 +325,8 @@ async def mailbox_save(request: Request, form: FormData = Depends(checked_form))
         raw = _text(form, "suppression_id")
         if raw.isdecimal():
             await run_in_threadpool(repo.remove_suppression, int(raw))
-            flash(request, "Removed. OpenBerry may email that address again.", "info")
+            flash(request, "Removed from the never-email list. A lead tagged unsubscribed stays that way: remove the "
+                           "tag on the lead's page if this person asked to hear from you again.", "info")
     else:
         flash(request, "Nothing was changed.", "info")
     return _back()
@@ -391,7 +406,8 @@ def email_status(company: Company, messages: list[Message] | None = None) -> dic
         if msg.email_state in repo.EMAIL_IN_FLIGHT:
             info[msg.id] = {"state": "sending"}
         elif msg.email_state in ("unknown", "failed", "bounced"):
-            info[msg.id] = {"state": msg.email_state, "reason": msg.send_error, "dead": msg.id in dead_address}
+            info[msg.id] = {"state": msg.email_state, "reason": msg.send_error, "dead": msg.id in dead_address,
+                            "saves_sent": settings.imap_save_sent}
         elif msg.status != "approved" or not queue["enabled"]:
             continue
         elif msg.id in eligible:
@@ -406,6 +422,7 @@ def email_status(company: Company, messages: list[Message] | None = None) -> dic
         preview = next((m for m in repo.list_messages(company.id, direction="outbound", limit=50)
                         if m.channel == "email" and m.status in ("approved", "draft")), None)
     inbox_problem = state == "inbox_unchecked" and bool(queue["mailbox"]["inbox_error"])
+    next_send_at = to_datetime(queue["next_send_at"])
     return {
         **queue, "items": queue["items"][:EMAIL_QUEUE_SHOWN], "skipped": skipped, "state": state,
         "label": "Inbox problem" if inbox_problem else EMAIL_STATE_LABELS.get(state, state),
@@ -414,14 +431,16 @@ def email_status(company: Company, messages: list[Message] | None = None) -> dic
         "queued_ids": eligible if reason in DELAYED else set(),
         "from_email": settings.smtp_from_email or settings.smtp_username, "from_name": settings.smtp_from_name,
         "provider": settings.mail_provider, "hostinger": settings.mail_provider == "hostinger",
-        "next_send_at": to_datetime(queue["next_send_at"]), "limit_frees_at": to_datetime(queue["limit_frees_at"]),
+        # OpenBerry saves the Sent copies itself (not Gmail): one that may have been sent has no copy to look for.
+        "saves_sent": settings.imap_save_sent,
+        "zone": clock_zone(),
+        "next_send_at": next_send_at, "limit_frees_at": to_datetime(queue["limit_frees_at"]),
         # The email loop runs every minute: an email that may go now goes within a minute.
-        "next_soon": bool(queue["next_send_at"]) and to_datetime(queue["next_send_at"]) <= repo.utcnow() + timedelta(
-            minutes=1),
+        "next_soon": next_send_at is not None and next_send_at <= repo.utcnow() + timedelta(minutes=1),
         "paused_until": to_datetime(queue["paused_until"]),
         "mailbox_paused_until": to_datetime(queue["mailbox"]["paused_until"]),
         "inbox_checked_at": to_datetime(queue["mailbox"]["inbox_checked_at"]),
-        "attention": attention["messages"], "events": attention["events"],
+        "attention": attention["messages"], "events": attention["events"], "hints": attention["hints"],
         "footer_text": company.outreach.email_footer or default_footer(company),
         # Added under every email OpenBerry sends: shown under each email draft while email sending is on.
         "footer_added": company.outreach.email_footer if queue["enabled"] else "",
@@ -449,7 +468,8 @@ def sending_hours_text(days: list[int], start: int, end: int) -> str:
 def email_lead_ids(email: dict[str, Any]) -> list[int]:
     """The leads the Email sending card names (its skipped list, the emails needing attention, bounces, opt-outs)."""
     return [*(s["lead_id"] for s in email["skipped"][:EMAIL_SKIPPED_SHOWN]),
-            *(m.lead_id for m in email["attention"]), *(e["lead_id"] for e in email["events"] if e["lead_id"])]
+            *(m.lead_id for m in email["attention"]), *(e["lead_id"] for e in email["events"] if e["lead_id"]),
+            *(m.lead_id for m in email["hints"])]
 
 
 def _whole(raw: Any, low: int, high: int) -> int | None:
@@ -563,6 +583,17 @@ async def email_send_now(request: Request, company_id: int, form: FormData = Dep
     back = f"/c/{company_id}/outreach#email"
     wake = getattr(request.app.state, "email_wake", None)
     if wake is not None:
+        status = await run_in_threadpool(repo.email_sending_status, company_id)
+        next_at = to_datetime(status.get("next_send_at"))
+        if status["blocked_reason"] not in DELAYED:
+            why = for_you(repo.email_blocked_message(status, you=True))
+            flash(request, f"Nothing can be sent now: {why[:1].lower()}{why[1:]}.", "info")
+            return RedirectResponse(back, status_code=303)
+        if next_at is not None and next_at > repo.utcnow() + timedelta(minutes=1):
+            flash(request, f"Nothing can be sent before {local_dt(next_at)}: "
+                           + ("outside your sending hours." if status["blocked_reason"] == "outside_hours" else
+                              f"emails go out at least {company.outreach.email_gap_minutes} minutes apart."), "info")
+            return RedirectResponse(back, status_code=303)
         wake.set()
         flash(request, f"Sending now, if nothing blocks it. The rest go out one at a time, at least "
                        f"{company.outreach.email_gap_minutes} minutes apart, while OpenBerry is open.", "info")
@@ -603,17 +634,51 @@ def email_message_action(request: Request, company_id: int, message_id: int,
         flash(request, "Unknown action.", "error")
         return RedirectResponse(back, status_code=303)
     try:
-        repo.resolve_email(message_id, action)
+        updated = repo.resolve_email(message_id, action)
     except ValueError as exc:
         flash(request, str(exc), "error")
         return RedirectResponse(back, status_code=303)
-    # Say what really happens to it now: back in the queue, or held back (a bounced address, a reply...).
+    # Say what really happens to it now: back in the queue, held back (a bounced address, a reply...), or nothing
+    # until it is approved again (a draft or skipped email isn't queued).
     held = next((s["reason"] for s in repo.email_queue(company_id, limit=0)["skipped"]
                  if s["message_id"] == message_id), "") if action != "mark_sent" else ""
-    if held:
+    if action != "mark_sent" and updated.status != "approved":
+        flash(request, f"It is {'a draft' if updated.status == 'draft' else 'skipped'} now: approve it again to send "
+                       "it from your mailbox.", "warning")
+    elif held:
         flash(request, f"It isn't emailed now: {for_you(held)}.", "warning")
     else:
         flash(request, EMAIL_ACTIONS[action])
+    return RedirectResponse(back, status_code=303)
+
+
+OPT_OUT_ACTIONS = ("confirm", "dismiss")
+
+
+@router.post("/c/{company_id}/messages/{message_id}/opt-out")
+def opt_out_hint_action(request: Request, company_id: int, message_id: int,
+                        form: FormData = Depends(checked_form)) -> Response:
+    """A reply that looks like an opt-out: Never email again (confirm: the full opt-out) or Not an opt-out (dismiss)."""
+    message = repo.get_message(message_id)
+    if message.company_id != company_id:
+        raise repo.NotFound(f"message {message_id} not found")
+    back = safe_next(form.get("next"), f"/c/{company_id}/leads/{message.lead_id}#msg-{message_id}")
+    action = _text(form, "action")
+    if action not in OPT_OUT_ACTIONS:
+        flash(request, "Unknown action.", "error")
+        return RedirectResponse(back, status_code=303)
+    try:
+        if action == "confirm":
+            lead = repo.confirm_opt_out_hint(message_id)
+            flash(request, f"{lead.display_name} won't be emailed again: "
+                           f"{lead.email or 'their address'} is on your never-email list, for every company, and the lead "
+                           "is disqualified.", "info")
+        else:
+            repo.clear_opt_out_hint(message_id)
+            flash(request, "Noted: it isn't an opt-out. The reply still stopped this lead's emails: answer it "
+                           "yourself.", "info")
+    except ValueError as exc:
+        flash(request, str(exc), "error")
     return RedirectResponse(back, status_code=303)
 
 

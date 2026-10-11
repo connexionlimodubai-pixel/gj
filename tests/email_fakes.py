@@ -60,6 +60,7 @@ class MailWorld:
 
     log: list[tuple[Any, ...]] = field(default_factory=list)
     sent: list[dict[str, Any]] = field(default_factory=list)       # emails the SMTP server accepted
+    refused: list[dict[str, Any]] = field(default_factory=list)    # emails it received and refused after DATA
     fail: dict[str, Any] = field(default_factory=dict)             # SMTP step -> exception to raise or (code, text)
     starttls: bool = True                                          # port 587 offers STARTTLS
     folders: dict[str, Folder] = field(default_factory=lambda: {"INBOX": Folder(), "Junk": Folder(flags="\\Junk"),
@@ -139,10 +140,18 @@ class _FakeSMTPBase:
         return 250, b"ok"
 
     def data(self, msg: bytes) -> tuple[int, bytes]:
+        # As smtplib does: it raises only when the server refuses to start DATA (no 354, "data_start"). The final
+        # answer, once the server has the whole email, is returned, whatever it is (a 554 spam refusal too).
         self._note("data")
+        start = self.world.fail.get("data_start")
+        if isinstance(start, BaseException):
+            raise start
+        if start is not None:
+            raise smtplib.SMTPDataError(*start)
         outcome = self._step("data")
         if outcome is not None:
-            raise smtplib.SMTPDataError(*outcome)
+            self.world.refused.append({"to": self.rcpt_to, "data": msg, "answer": outcome})
+            return outcome
         self.world.sent.append({"to": self.rcpt_to, "data": msg})
         return 250, b"2.0.0 queued"
 

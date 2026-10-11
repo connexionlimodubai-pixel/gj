@@ -13,6 +13,8 @@ from .services import alert_active_companies, auto_approve_active_companies, sca
 
 log = logging.getLogger(__name__)
 
+MIN_TICK_SECONDS = 30  # OPENBERRY_SCHEDULER_TICK_SECONDS below this is raised to it
+
 
 async def scheduler_loop(stop: asyncio.Event | None = None) -> None:
     """Every tick, scan companies whose last scan is older than their scan_interval_hours.
@@ -21,7 +23,7 @@ async def scheduler_loop(stop: asyncio.Event | None = None) -> None:
     approve the drafts whose review window has passed in companies that turned auto-approve on.
     """
     stop = stop or asyncio.Event()
-    tick = max(30, get_settings().scheduler_tick_seconds)
+    tick = max(MIN_TICK_SECONDS, get_settings().scheduler_tick_seconds)
     log.info("scheduler started (tick %ss)", tick)
     while not stop.is_set():
         try:

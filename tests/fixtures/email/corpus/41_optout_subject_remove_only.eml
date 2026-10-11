@@ -1,0 +1,12 @@
+From: <info@creekside-hotel.example>
+To: Sam Rahman <sam@acme-mail.example>
+Subject: REMOVE
+Date: Mon, 12 Oct 2026 14:31:09 +0400
+Message-ID: <optout_subject_remove_only@creekside-hotel.example>
+MIME-Version: 1.0
+In-Reply-To: <99aa86b9017ea1a84b55046e59fa3d81@acme-mail.example>
+References: <99aa86b9017ea1a84b55046e59fa3d81@acme-mail.example>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+

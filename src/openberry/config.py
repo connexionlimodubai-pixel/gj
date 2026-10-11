@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,9 @@ def read_dotenv(path: Path) -> dict[str, str]:
 # Variables a .env file put into os.environ, and that file (resolved). Anything else in os.environ came from the
 # real environment, which always wins.
 _FROM_FILE: dict[str, Path] = {}
+# The computer's time zone (TZ=Asia/Dubai): in a .env file it sets the clock of the email sending hours, which in
+# Docker or on a server is UTC otherwise.
+TIME_ZONE_VAR = "TZ"
 
 
 def _resolved(path: Path) -> Path:
@@ -67,6 +71,8 @@ def _load_dotenv(path: Path) -> None:
         if current is None or (key in DASHBOARD_SETTINGS and not current.strip() and value.strip()):
             os.environ[key] = value
             _FROM_FILE[key] = _resolved(path)
+            if key == TIME_ZONE_VAR and hasattr(time, "tzset"):
+                time.tzset()  # the email sending hours follow this clock (POSIX; Windows has its own setting)
 
 
 # Fixed per-user home so the dashboard and Claude Desktop (which starts `openberry mcp` from an
@@ -241,6 +247,12 @@ class Settings:
         if not (self.smtp_host and self.smtp_username and self.smtp_password and self.imap_host):
             return ""
         return (self.smtp_from_email or self.smtp_username).strip().lower()
+
+    def mailbox_key(self) -> str:
+        """The account the user signs in with (the SMTP username, lower case), or "" while no mailbox is connected.
+        The mailbox's state (pauses, failures, where the inbox check stopped) is kept under it, not under the From
+        address, so changing the From address (an alias) never loses unread replies or lifts a provider's block."""
+        return self.smtp_username.strip().lower() if self.mailbox_address() else ""
 
 
 _settings: Settings | None = None

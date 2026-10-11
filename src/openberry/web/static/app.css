@@ -685,6 +685,16 @@ a.lead-name:hover { color: var(--accent-text); }
 .email-footer-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; color: var(--text-2); }
 .email-events { margin-top: var(--s3); }
 .email-events .list { margin-top: var(--s2); }
+/* What came back can be long (a bounce's server words): it wraps inside the Outreach card. */
+.email-events .sub, .email-events .lead-name { white-space: normal; overflow-wrap: anywhere; }
+.email-events > summary .icon { transition: transform .15s; }
+.email-events[open] > summary .icon { transform: rotate(90deg); }
+/* A reply that looks like an opt-out: the user decides (Never email again, Not an opt-out). */
+.email-line-hint { padding: var(--s2) var(--s3); border-radius: var(--radius-sm); background: var(--warning-bg); color: var(--text); }
+.email-line-hint > .icon { color: var(--warning); }
+.bubble-in .email-line-hint { margin-top: var(--s3); }
+.hint-card { margin-top: var(--s4); }
+.hint-card .list-item { align-items: start; }
 .agent-line-held { background: var(--warning-bg); }
 .agent-line-held > .icon { color: var(--warning); }
 .keys-card + .keys-card { margin-top: var(--s4); }

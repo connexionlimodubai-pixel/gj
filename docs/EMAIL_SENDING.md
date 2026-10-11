@@ -48,15 +48,16 @@ These rules are checked by OpenBerry itself every time, whatever the dashboard, 
 | Rule | What it means |
 |---|---|
 | Off by default | Email sending is off for every company. Only the Outreach page turns it on. Claude and the JSON API may only turn it off, lower the daily limit, space emails further apart, narrow the sending hours or stop auto-approved emails being sent. |
-| Mailbox connected and inbox checked | Nothing is sent unless your mailbox is connected and its inbox was read successfully in the last 30 minutes, so a reply or opt-out is seen first. |
+| Mailbox connected and inbox checked | Nothing is sent unless your mailbox is connected and its inbox was read successfully, to the last new message, in the last 30 minutes, so a reply or opt-out is seen first. A check time in the future (the computer's clock was set back) doesn't count: the inbox is checked again at once. |
 | Approved emails only, exactly as approved | The subject and text as you approved them, plus your footer. Plain text only. If the text changes, it is a draft again. While an email is being sent, it can't be edited or deleted. After it is sent, its text can't change. |
 | Auto-approved emails only with their own switch | Drafts approved by [auto-approve](AI_AGENT_SENDING.md#auto-approve-optional) are emailed only if you also tick **Also send emails that auto-approve approved** (off by default). |
 | A real recipient | A valid address, never a no-reply or system address, never your own mailbox (use **Send test email**), never an address on your never-email list (opted out, bounced, or marked by you), never an address whose domain is on your never-contact list. If a lead's address changes, its approved emails go back to draft, also one being sent at that moment. |
 | The right people | Never leads who replied, booked a meeting, were won, lost or disqualified, opted out (tagged `unsubscribed`, whatever address they get later), or are on your never-contact list. Never for a paused company. A change you make while an email is being sent (the lead marked Lost, the never-contact list, a switch) stops it before your mail server receives it. |
-| One address, one recipient | An address found through several leads (two hotel branches with one reservations@, a person and their company's info@, even in two companies) is one recipient: it gets one email at a time, never the same step twice, and a reply through one lead stops the emails of all of them. |
+| One address, one recipient | An address found through several leads (two hotel branches with one reservations@, a person and their company's info@, even in two companies) is one recipient: it gets one email at a time, never the same step twice, and a reply through one lead stops the emails of all of them, also once that lead has another address or was deleted. |
 | One at a time, in order | One email per person at a time, never the same step twice, never a follow-up before the earlier step was sent or skipped, and a follow-up only once its wait has passed (counting messages sent on any channel, and emails that may have been sent). |
-| Limits and pace | At most your daily limit in any 24 hours (default **30**, at most **100**), at least **5 minutes** between two emails (you can choose more), only in your sending hours (default **Monday to Friday, 09:00 to 18:00**, on your computer's clock), and at most 100 emails a day from the mailbox for all companies together. |
-| Never twice | Each email is claimed, then marked "being sent" just before your mail server receives it, then recorded as sent. If the connection breaks while the server is receiving it, OpenBerry can't know whether it went out: it shows **May have been sent** and never sends it again by itself. |
+| Limits and pace | At most your daily limit in any 24 hours (default **30**, at most **100**), at least **5 minutes** between two emails (you can choose more), only in your sending hours (default **Monday to Friday, 09:00 to 18:00**, on the clock of the computer OpenBerry runs on: the card names its time zone), and at most 100 emails a day from the mailbox for all companies together. |
+| Never twice | Each email is claimed, then marked "being sent" just before your mail server receives it, then recorded as sent once the server accepted it (an email the server refuses after receiving it is not counted as sent). If the connection breaks while the server is receiving it, OpenBerry can't know whether it went out: it shows **May have been sent** and never sends it again by itself. |
+| Deleting never erases what was sent | Deleting a lead, an email or a whole company keeps a record of every email sent or possibly sent (the address, the step, when, and whether they replied). It still counts for never twice, one email at a time, the daily limits and replies, in every company. A lead, an email or a company can't be deleted while one of its emails is being sent. |
 | Stops by itself | On a reply, an opt-out, a bounce, a refused login, a security problem, the provider refusing to send, or repeated failures. |
 | No tracking | No open pixels, no link changes, no HTML. |
 
@@ -116,9 +117,9 @@ Microsoft 365 and Outlook.com need a sign-in method OpenBerry doesn't have, so t
 |---|---|
 | Your mailbox refused the username or password | Use the full email address as the username, and the mailbox's password or an app password. Sending and the automatic inbox checks stay paused until you save the settings again, or click **Try again** or **Check inbox**: a mail provider can lock an account that keeps trying a wrong password. |
 | The server's security certificate isn't valid | The server name is wrong (for example `mail.yourdomain.com` instead of `smtppro.zoho.com`). |
-| Can't find the server | A typo in the server name, or no internet connection. |
+| Can't find the server | A typo in the server name. If it worked before, the internet connection dropped for a moment: OpenBerry tries again by itself after 5, 15, then 60 minutes. |
 | This server doesn't offer encryption on port 587 | Use port 465. OpenBerry never sends your password unencrypted. |
-| Your mailbox won't send from this address | Use the mailbox's own address, or an alias of it, as the From address. |
+| Your mailbox won't send from this address | Use the mailbox's own address, or an alias of it, as the From address. Sending waits until you save the settings again; the inbox checks go on, so replies and opt-outs are still read. Changing the From address keeps where the inbox check stopped and any pause from your provider. |
 | OpenBerry couldn't read your inbox | Check IMAP access in your mail settings. Nothing is sent until the inbox can be read. |
 
 ## 3. A separate mailbox, SPF, DKIM, DMARC and small numbers
@@ -152,7 +153,9 @@ change without notice.
 
 On the company's **Outreach** page, open **Email sending (your mailbox)**:
 
-1. Set the **daily limit**, the **minutes between emails** and the **sending hours** (your computer's clock).
+1. Set the **daily limit**, the **minutes between emails** and the **sending hours**. They follow the clock of the
+   computer OpenBerry runs on, and the card names its time zone. On a server or in Docker (UTC unless you change it),
+   set `TZ=Asia/Dubai` (your zone) in OpenBerry's `.env` file and restart it.
 2. Write your **footer**: who you are, your business address, and how to opt out with the word "unsubscribe". It is
    added under every email when it is sent, and shown under every email draft. The example footer has a
    `[your business address]` to fill in: OpenBerry refuses a footer with a placeholder left in it.
@@ -162,22 +165,37 @@ On the company's **Outreach** page, open **Email sending (your mailbox)**:
 Then approve email drafts as usual. Each email shows what will happen: **Queued for your mailbox**, **Sending…**,
 **Sent from your mailbox**, **May have been sent**, **Not sent**, **Bounced**, or why it waits ("another email to this
 lead goes first", "the next message to this lead is not due before …"). **Send now** sends the next one at once (still
-keeping every rule). Close OpenBerry and sending waits; a laptop that sleeps doesn't send.
+keeping every rule); it is offered only when an email can go out now, not outside your sending hours or during the
+wait between two emails. Close OpenBerry and sending waits; a laptop that sleeps doesn't send. Closing it while an
+email is being sent waits for your mail server's answer first.
 
 ## 5. Replies, opt-outs and bounces
 
 OpenBerry reads your inbox and junk folder every 5 minutes while it is open. It never marks mail as read, moves or
 deletes anything. It reads only new mail (never your history), and only messages about your leads: everything else
-is ignored and not stored.
+is ignored and not stored. After a long time closed, it may need a few checks to read everything that arrived;
+nothing is sent until it has. New reading details (another IMAP server for the same mailbox) start from the last
+check, not from now.
+
+Mail about a lead is found by the email it answers (In-Reply-To, References), the lead's address, or, when someone
+else at the lead's company writes without answering an email (an assistant: "Lina is travelling, please remove her
+from your list"), the company's own domain, never a free-mail one like gmail.com. The lead's page then says who wrote.
+A reply to an email that **may have been sent** settles it: it was sent.
 
 - **A reply** is logged on the lead's page. The lead moves to Replied, and their drafts and approved messages are
   skipped (emails and LinkedIn).
-- **An opt-out** ("unsubscribe", "STOP" on its own, "remove me from your list", "don't email me", "إلغاء
-  الاشتراك"...), or the email a mail app's Unsubscribe button sends: the address goes on your **never-email list**, for
-  every company, and the lead is tagged `unsubscribed` (never emailed again, whatever address it gets) and
-  disqualified. A lead in a meeting or won keeps its status, and the company's never-contact list is left to you: words
-  in an email can be misread ("one stop", "remove me from tomorrow's pickup list" are not opt-outs, and OpenBerry
-  doesn't read them as such). This happens at the next inbox check, within minutes.
+- **An opt-out** that can't mean anything else, a short reply that just says "unsubscribe", "STOP", "remove me",
+  "please take me off your list", "don't email me again" (or "إلغاء الاشتراك", "لا ترسل لي"...), or the email a mail
+  app's Unsubscribe button sends: the address goes on your **never-email list**, for every company, and the lead is
+  tagged `unsubscribed` (never emailed again, whatever address it gets; Claude and the JSON API can't remove that tag,
+  only you can, on the lead's form) and disqualified. A lead in a meeting or won keeps its status, and the company's
+  never-contact list is left to you. This happens at the next inbox check, within minutes.
+- **A reply that only looks like an opt-out** ("Who gave you my email? Remove me from your list and send the rates to
+  my office", "Stop, we booked with another company"): words in an email can be misread, so OpenBerry stores it as a
+  reply (the lead's emails stop) and flags it **Looks like an opt-out** on the lead's page, the Outreach page and the
+  dashboard. You decide: **Never email again** does the full opt-out above; **Not an opt-out** clears the flag. Claude
+  sees the flag too (`get_lead`, `get_email_status`). Booking replies ("stop at the mall", "remove me from tomorrow's
+  pickup list", "please don't send the car before 9") are plain replies, never opt-outs.
 - **Newsletters** from a lead's address (a hotel's campaign from its info@) are noted, never read as a reply or an
   opt-out. Your own emails coming back to your mailbox are ignored.
 - **A hard bounce** (the address doesn't exist): the address goes on the never-email list, and the lead is tagged
@@ -187,7 +205,7 @@ is ignored and not stored.
 You can also click **Unsubscribed (never email again)** on a lead's page (a company lead then also goes on the
 company's never-contact list), or ask Claude to log a reply with `opt_out=true`. The never-email list is on the **Mailbox** page. It stays when a lead is deleted, so a business found
 again on Google Maps stays off it. Remove a bounced address once it is fixed; remove an opt-out only if the person
-asked to hear from you again.
+asked to hear from you again (their lead stays tagged `unsubscribed` until you remove the tag on its page).
 
 ## 6. Auto-approve and fully automatic sending
 
@@ -201,14 +219,17 @@ Turn it on only if you trust every draft.
 
 | What happened | What OpenBerry does |
 |---|---|
-| Login refused (sending or reading), a certificate problem, an unknown server, a From address not allowed | Pauses the mailbox (sending, and the automatic inbox checks after a refused login) until you save its settings or click **Try again** on the Mailbox page. The email waits. |
+| Login refused (sending or reading) | Pauses sending and the automatic inbox checks until you save the mailbox's settings or click **Try again** or **Check inbox** on the Mailbox page: a provider can lock an account that keeps trying a wrong password. The email waits. |
+| A certificate problem, a server without encryption, a From address not allowed | Pauses sending until you save the settings or click **Try again**. The inbox checks go on, so replies and opt-outs are still read. The email waits. |
+| A temporary sign-in problem on the inbox ("[UNAVAILABLE] Temporary authentication failure") | Nothing is paused: the inbox is read again at the next check, and nothing is sent until it is. |
 | A reply couldn't be saved (OpenBerry's database was busy) | The inbox check counts as failed, so nothing is sent, and the message is read again at the next check. |
-| The provider refuses to send (spam, a limit, a suspended mailbox) | The email isn't sent. The mailbox pauses for 24 hours, also when you save its settings. Check your mailbox in the provider's webmail before you click **Try again**. |
-| The server can't be reached | Tries again after 5, 15, then 60 minutes. |
+| The provider refuses to send (spam, a limit, a suspended mailbox), also after it received the email | The email isn't sent and isn't counted as sent. The mailbox pauses for 24 hours, also when you save its settings or change the From address. Check your mailbox in the provider's webmail before you click **Try again**. |
+| The server can't be reached, or its name can't be found for a moment (Wi-Fi dropped) | Tries again after 5, 15, then 60 minutes. |
 | The address doesn't exist (also Microsoft 365's "Recipient address rejected", a domain that doesn't exist, or a group that takes no outside mail) | The email isn't sent and the address goes on the never-email list. Fix the address on the lead's page, or skip the email. |
-| The connection broke while the server was receiving the email | **May have been sent.** Check your mailbox's Sent folder, then choose **Mark sent** or **Send again** (it may then arrive twice). A reply or bounce that refers to it settles it by itself. |
+| The connection broke while the server was receiving the email | **May have been sent.** Check your mailbox's Sent folder, then choose **Mark sent** or **Send again** (it may then arrive twice). With **Save a copy** on (every preset but Gmail), OpenBerry puts the copy in Sent itself and couldn't for this email, so the Sent folder can't tell: choose **Mark sent** if unsure. A reply or bounce settles it by itself. The email can't be edited meanwhile. |
 | OpenBerry closed while sending | The same: before the server received anything, the email is simply tried again; during, it may have been sent. |
 | A sent email couldn't be saved in OpenBerry's database | OpenBerry stops sending until you restart it, so nothing can go out twice. |
+| The computer's clock went back (dual-boot, a wrong time zone fixed) | A last inbox check or scan stamped in the future counts as old: the inbox is checked at once. The minutes between two emails count from the last email as recorded, so after a big jump back the next email may wait until the clock catches up. |
 | 3 hard bounces, or 2 spam rejections, in 24 hours for a company | Email sending pauses for that company for 24 hours. Only you can resume it early, on the Outreach page. |
 
 ## 8. What OpenBerry deliberately doesn't do

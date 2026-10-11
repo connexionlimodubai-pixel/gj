@@ -201,7 +201,8 @@ def lead_update(request: Request, company_id: int, lead_id: int, form: FormData 
         if name in form:
             fields[name] = _form_text(form, name)
     try:
-        repo.update_lead(lead_id, fields)
+        # The user's own form: removing the "unsubscribed" tag here is their decision (Claude and the API can't).
+        repo.update_lead(lead_id, fields, keep_opt_out=False)
         flash(request, "Lead updated.")
     except ValueError as exc:
         flash(request, str(exc), "error")
@@ -215,13 +216,18 @@ def lead_profile(request: Request, company_id: int, lead_id: int, form: FormData
     if not fields.get("full_name", lead.full_name) and not fields.get("lead_company", lead.lead_company):
         flash(request, "A lead needs a name or a company.", "error")
     else:
-        approved = len(repo.list_messages(company_id, status="approved", lead_id=lead_id))
-        repo.update_lead(lead_id, fields)
-        if len(repo.list_messages(company_id, status="approved", lead_id=lead_id)) < approved:
-            flash(request, "Profile saved and lead rescored. The LinkedIn profile changed, so approved LinkedIn "
-                           "messages to this lead are drafts again: approve them for the new profile.", "info")
-        else:
-            flash(request, "Profile saved and lead rescored.")
+        before = repo.list_messages(company_id, status="approved", lead_id=lead_id)
+        updated = repo.update_lead(lead_id, fields)
+        still = {m.id for m in repo.list_messages(company_id, status="approved", lead_id=lead_id)}
+        lapsed = {m.channel == "email" for m in before if m.id not in still}
+        changed = []
+        if True in lapsed:
+            changed.append("The email address changed, so approved emails to this lead are drafts again: approve them "
+                           f"for {updated.email or 'the new address'}.")
+        if False in lapsed:
+            changed.append("The LinkedIn profile changed, so approved LinkedIn messages to this lead are drafts again: "
+                           "approve them for the new profile.")
+        flash(request, " ".join(["Profile saved and lead rescored.", *changed]), "info" if changed else "success")
     return redirect(f"/c/{company_id}/leads/{lead_id}")
 
 
@@ -241,7 +247,11 @@ def lead_add_signal(request: Request, company_id: int, lead_id: int,
 @router.post("/c/{company_id}/leads/{lead_id}/delete")
 def lead_delete(request: Request, company_id: int, lead_id: int, form: FormData = Depends(checked_form)) -> Response:
     _, lead = _company_lead(company_id, lead_id)
-    repo.delete_lead(lead_id)
+    try:
+        repo.delete_lead(lead_id)
+    except ValueError as exc:  # an email to this lead is being sent right now
+        flash(request, str(exc), "error")
+        return redirect(f"/c/{company_id}/leads/{lead_id}")
     flash(request, f"Deleted {lead.display_name}.", "info")
     return redirect(f"/c/{company_id}/leads")
 

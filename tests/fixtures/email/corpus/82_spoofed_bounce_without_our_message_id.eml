@@ -1,0 +1,11 @@
+From: postmaster@random-host.example
+To: Sam Rahman <sam@acme-mail.example>
+Subject: Undeliverable message
+Date: Mon, 12 Oct 2026 14:31:09 +0400
+Message-ID: <sp-1@random-host.example>
+MIME-Version: 1.0
+Received: from random-host.example (unknown [203.0.113.9])
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Delivery failed for gm@spoofed-target-hotel.example: 550 5.1.1 user unknown

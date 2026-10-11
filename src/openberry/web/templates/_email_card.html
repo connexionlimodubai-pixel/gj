@@ -22,7 +22,7 @@
         {% else %}No mailbox is connected yet. <a href="/mailbox">Connect your mailbox{{ m.icon("chevron-right", 12) }}</a>
         {% endif %}
       </p>
-      <p class="small muted">Sending hours: {{ email.hours_text }}, on this computer's clock. Emails go out only while OpenBerry is open{% if not scheduler_enabled %}, and with the scheduler off only when you click Send now{% endif %}.</p>
+      <p class="small muted">Sending hours: {{ email.hours_text }}, on the clock of the computer OpenBerry runs on ({{ email.zone }}). Emails go out only while OpenBerry is open{% if not scheduler_enabled %}, and with the scheduler off only when you click Send now{% endif %}.</p>
     </div>
   </header>
 
@@ -43,8 +43,9 @@
   <div class="agent-pause" role="alert">
     {{ m.icon("alert", 18) }}
     <div class="min0 grow">
-      <p><strong>Your mailbox is paused{% if email.mailbox_paused_until %} until {{ email.mailbox_paused_until|local_dt }}{% else %} until you fix its settings{% endif %}:</strong></p>
+      <p><strong>Your mailbox is paused{% if email.mailbox.auth_failed %} until you fix its settings{% elif email.mailbox_paused_until %} until {{ email.mailbox_paused_until|local_dt }}{% endif %}:</strong></p>
       <p class="agent-reason">{{ email.mailbox.pause_reason or "No details given." }}</p>
+      {% if email.mailbox.auth_failed and email.mailbox_paused_until %}<p><strong>Also until {{ email.mailbox_paused_until|local_dt }}:</strong></p><p class="agent-reason">{{ email.mailbox.wait_reason or "No details given." }}</p>{% endif %}
     </div>
     <a class="btn btn-sm" href="/mailbox#status">Mailbox settings</a>
   </div>
@@ -67,7 +68,7 @@
           </div>
         </div>
         <fieldset class="field email-hours">
-          <legend>Sending hours <span class="muted">(this computer's clock)</span></legend>
+          <legend>Sending hours <span class="muted">(the clock of the computer OpenBerry runs on: {{ email.zone }})</span></legend>
           <div class="chips day-chips">
             {% for day in WEEKDAYS %}<label class="chip"><input type="checkbox" name="email_days" value="{{ loop.index0 }}"{% if loop.index0 in email.sending_days %} checked{% endif %}><span class="chip-box" aria-hidden="true">{{ m.icon("check", 12) }}</span><span>{{ day }}</span></label>{% endfor %}
           </div>
@@ -143,7 +144,7 @@
         {% endfor %}
       </ul>
       {% if email.eligible_total > email["items"]|length %}<p class="small muted">+{{ email.eligible_total - email["items"]|length }} more, oldest first.</p>{% endif %}
-      {% if email.state in ("on", "outside_hours") %}
+      {% if email.state == "on" and email.next_soon %}
       <form method="post" action="/c/{{ company.id }}/outreach/email/send-now">{{ m.csrf() }}<button class="btn btn-sm" type="submit">{{ m.icon("send", 14) }}Send now</button></form>
       {% endif %}
       {% else %}
@@ -165,22 +166,31 @@
       </details>
       {% endif %}
 
-      {% if email.attention or email.events %}
+      {% if email.attention or email.events or email.hints %}
       <h3 class="label-sm">Needs your attention</h3>
       <ul class="list email-attention">
+        {% for msg in email.hints %}
+        {% set lead = email_leads.get(msg.lead_id) %}
+        <li class="list-item">
+          <div class="min0 grow">
+            <a class="lead-name" href="/c/{{ company.id }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}Lead {{ msg.lead_id }}{% endif %}</a>
+            {{ m.opt_out_hint(msg, "/c/" ~ company.id ~ "/outreach#email", msg.email_from if lead and msg.email_from and msg.email_from != lead.email|lower else "") }}
+          </div>
+        </li>
+        {% endfor %}
         {% for msg in email.attention %}
         {% set lead = email_leads.get(msg.lead_id) %}
         <li class="list-item">
           <div class="min0 grow">
             <a class="lead-name" href="/c/{{ company.id }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}Lead {{ msg.lead_id }}{% endif %}</a>
-            <span class="sub break">{% if msg.email_state == "unknown" %}May have been sent. Check your mailbox's Sent folder, then choose.{% else %}Not sent: {{ msg.send_error }}{% endif %}</span>
+            <span class="sub break">{% if msg.email_state == "unknown" %}{{ m.maybe_sent_text(email.saves_sent) }}{% else %}Not sent: {{ msg.send_error }}{% endif %}</span>
             {{ m.email_actions(msg, "/c/" ~ company.id ~ "/outreach#email", msg.id in email.dead_address) }}
           </div>
         </li>
         {% endfor %}
         {% for e in email.events %}
         {% set lead = email_leads.get(e.lead_id) %}
-        <li class="list-item"><div class="min0 grow"><a class="lead-name" href="/c/{{ company.id }}/leads/{{ e.lead_id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}A lead{% endif %}</a><span class="sub break">{{ "Bounced" if e.kind == "bounce" else "Opted out" }} {{ m.when(e.created_at) }}{% if e.detail %}: {{ e.detail }}{% endif %}</span></div></li>
+        <li class="list-item"><div class="min0 grow">{% if e.lead_id %}<a class="lead-name" href="/c/{{ company.id }}/leads/{{ e.lead_id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}A lead{% endif %}</a>{% else %}<span class="lead-name">A lead deleted since</span>{% endif %}<span class="sub break">{{ "Bounced" if e.kind == "bounce" else "Opted out" }} {{ m.when(e.created_at) }}{% if e.detail %}: <bdi>{{ e.detail }}</bdi>{% endif %}</span></div></li>
         {% endfor %}
       </ul>
       {% endif %}

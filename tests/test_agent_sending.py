@@ -416,7 +416,7 @@ def test_an_existing_database_gets_the_sent_via_column(settings):
     with db.connect() as c:
         assert "sent_via" in {r[1] for r in c.execute("PRAGMA table_info(messages)")}
         assert "ix_messages_company_sent" in {r[1] for r in c.execute("PRAGMA index_list(messages)")}
-        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 5
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 6
     company = repo.get_company(1)
     assert company.outreach.agent_sending is False  # old profiles have no agent settings: off
     enable(company)

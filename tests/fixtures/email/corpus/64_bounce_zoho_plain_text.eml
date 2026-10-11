@@ -1,0 +1,25 @@
+From: Mail Delivery Subsystem <mailer-daemon@zoho.com>
+To: Sam Rahman <sam@acme-mail.example>
+Subject: Delivery Status Notification (Failure)
+Date: Mon, 12 Oct 2026 14:31:09 +0400
+Message-ID: <zb-2@mx.zoho.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+This is an automatically generated Delivery Status Notification.
+
+Delivery to the following recipients failed permanently:
+
+     booking@qasr-al-sarab-tours.example
+
+Technical details of permanent failure:
+Remote server replied: 550 5.1.1 Invalid recipient <booking@qasr-al-sarab-tours.example>
+
+----- Original message -----
+
+From: Sam Rahman <sam@acme-mail.example>
+To: booking@qasr-al-sarab-tours.example
+Subject: Airport transfers for your guests
+Message-ID: <7e333fc7a2362275f152d9681e53fdc3@acme-mail.example>
+

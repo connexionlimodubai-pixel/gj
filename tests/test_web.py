@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html as html_lib
 import json
+import logging
 import re
 from pathlib import Path
 import sys
@@ -925,6 +926,28 @@ def test_lifespan_runs_hooks_scheduler_and_mcp_mount(web_settings, monkeypatch):
         wait_until(lambda: "scheduler" in events)
         assert events[0] == "enter"
     assert events == ["enter", "scheduler", "scheduler-stopped", "exit"]
+
+
+def test_a_background_loop_that_ends_is_logged(web_settings, monkeypatch, caplog):
+    """WP5.5: a loop ended by a bug (each loop catches its ticks' errors) is logged, not lost: scans or emails
+    stop until a restart. Loops stopped by the app closing say nothing."""
+    from openberry import scheduler
+
+    async def broken_loop(stop):
+        raise RuntimeError("a bug outside the tick")
+
+    async def email_loop(stop, wake=None):
+        await stop.wait()
+
+    monkeypatch.setattr(scheduler, "scheduler_loop", broken_loop)
+    monkeypatch.setattr(scheduler, "email_loop", email_loop)
+    web_settings.scheduler_enabled = True
+    with caplog.at_level(logging.ERROR, logger="openberry.web.app"):
+        with TestClient(create_app(web_settings)) as c:
+            assert c.get("/healthz").status_code == 200
+            wait_until(lambda: "loop stopped unexpectedly" in caplog.text)
+    assert "the openberry-scheduler loop stopped unexpectedly (RuntimeError: a bug outside the tick)" in caplog.text
+    assert "openberry-email" not in caplog.text
 
 
 def test_app_starts_without_mcp_module(web_settings, monkeypatch):

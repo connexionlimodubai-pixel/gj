@@ -8,6 +8,7 @@ import logging
 import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
+from functools import partial
 from typing import Any
 from urllib.parse import quote
 
@@ -91,6 +92,16 @@ def _request_validation_error(request: Request, exc: RequestValidationError) -> 
     return _error_page(request, 404, "There's no page at this address.")
 
 
+def _loop_ended(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
+    """A background loop (scans and alerts, or email) ended while the app runs: say so in the log. Each loop catches
+    its ticks' errors itself, so this means a bug, and scans or emails stop until a restart."""
+    if stop.is_set() or task.cancelled():
+        return
+    exc = task.exception()
+    log.error("the %s loop stopped unexpectedly%s: restart OpenBerry", task.get_name(),
+              f" ({type(exc).__name__}: {exc})" if exc else "", exc_info=exc)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
@@ -109,15 +120,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # `openberry mcp`. The dashboard's Send now sets email_wake.
             app.state.email_wake = asyncio.Event()
             email_task = asyncio.create_task(email_loop(stop, app.state.email_wake), name="openberry-email")
+            for task in (scheduler_task, email_task):
+                task.add_done_callback(partial(_loop_ended, stop))
         try:
             yield
         finally:
             stop.set()
+            # A loop that ended with an error was logged by _loop_ended: closing goes on.
             if scheduler_task is not None:
-                with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                with contextlib.suppress(Exception, asyncio.CancelledError):
                     await asyncio.wait_for(scheduler_task, SCHEDULER_STOP_TIMEOUT)
             if email_task is not None:  # an email being sent finishes first (its thread can't be stopped anyway)
-                with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                with contextlib.suppress(Exception, asyncio.CancelledError):
                     await asyncio.wait_for(email_task, EMAIL_STOP_TIMEOUT)
             app.state.email_wake = None
             await scans.cancel_all()

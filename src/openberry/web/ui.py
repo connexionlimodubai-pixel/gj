@@ -127,6 +127,18 @@ def local_dt(dt: datetime | None) -> str:
     return f"{local:%a} {local.day} {local:%b, %H:%M}"
 
 
+def clock_zone(dt: datetime | None = None) -> str:
+    """The time zone of the sending hours, as an offset ("UTC+04:00", "UTC"): in Docker or on a server it is the
+    server's clock (set TZ to change it), which the person at the browser can't see otherwise."""
+    local = repo.local_time(as_utc(dt) or repo.utcnow())
+    offset = local.utcoffset()
+    if not offset:
+        return "UTC"
+    minutes = int(offset.total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    return f"UTC{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+
+
 def to_datetime(value: Any) -> datetime | None:
     """An ISO 8601 string (as repo returns them) or a datetime, as an aware datetime; None for anything else."""
     if isinstance(value, str) and value:
@@ -229,7 +241,7 @@ EMAIL_EVENT_LABELS = {
     "reply": "Replied", "auto_reply": "Automatic reply (out of office)", "bounce": "Bounced: the address doesn't work",
     "soft_bounce": "Delivery delayed", "policy_reject": "Refused by their mail server",
     "opt_out": "Asked not to be emailed", "send_failed": "Sending failed", "unknown": "May have been sent",
-    "resolved": "Resolved",
+    "resolved": "Resolved", "opt_out_hint": "Looks like an opt-out",
 }
 
 

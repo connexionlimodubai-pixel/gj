@@ -1,0 +1,39 @@
+From: Mail Delivery System <Mailer-Daemon@hostinger.com>
+To: Sam Rahman <sam@acme-mail.example>
+Subject: Mail delivery failed: returning message to sender
+Date: Mon, 12 Oct 2026 14:31:09 +0400
+Message-ID: <E1tXyZ-0004Ab-2C@mx1.hostinger.com>
+MIME-Version: 1.0
+In-Reply-To: <6bb1b33be0813978261e00e02ffabf2e@acme-mail.example>
+References: <6bb1b33be0813978261e00e02ffabf2e@acme-mail.example>
+Auto-Submitted: auto-replied
+X-Failed-Recipients: events@marinagrand-hotel.example
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+This message was created automatically by mail delivery software.
+
+A message that you sent could not be delivered to one or more of its
+recipients. This is a permanent error. The following address(es) failed:
+
+  events@marinagrand-hotel.example
+    host marinagrandhotel-ae.mail.protection.outlook.com [52.101.73.2]
+    SMTP error from remote mail server after RCPT TO:<events@marinagrand-hotel.example>:
+    550 5.4.1 Recipient address rejected: Access denied. AS(201806281) [DB5PEPF00014B8F.eurprd02.prod.outlook.com 2026-10-12T06:03:12.123Z 08DCEA1234]
+
+------ This is a copy of the message, including all the headers. ------
+
+From: Sam Rahman <sam@acme-mail.example>
+To: events@marinagrand-hotel.example
+Subject: Airport transfers for your guests
+Message-ID: <6bb1b33be0813978261e00e02ffabf2e@acme-mail.example>
+
+Hi Omar,
+
+We drive guests of Dubai hotels to DXB and DWC in S-Class and V-Class, with meet and greet at arrivals.
+Would a corporate rate sheet help?
+
+Sam
+
+Acme Chauffeurs · Office 1204, Bay Square 7, Business Bay, Dubai
+Not interested? Reply "unsubscribe" and we won't email you again.

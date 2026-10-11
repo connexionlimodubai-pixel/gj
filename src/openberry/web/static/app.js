@@ -86,7 +86,7 @@
     if (!details || details.tagName !== "DETAILS") return false;
     details.open = true;
     details.scrollIntoView({ behavior: "smooth", block: "start" });
-    const field = $("input, select, textarea", details);
+    const field = $("input:not([type=hidden]), select, textarea", details);  // the CSRF field can't take the focus
     if (field) field.focus({ preventScroll: true });
     return true;
   }
@@ -276,10 +276,14 @@
         if (openDetails(link.getAttribute("data-open-details"))) e.preventDefault();
       });
     });
-    if (location.hash.length > 1) {
+    const openFromHash = () => {
+      if (location.hash.length < 2) return;
       // A malformed hash ("#%E0%A4") makes decodeURIComponent throw, which would abort init().
       try { openDetails(decodeURIComponent(location.hash.slice(1))); } catch (_) { /* not a details id */ }
-    }
+    };
+    openFromHash();
+    // A link to #edit-profile on the same page (Fix the address on the lead page) doesn't reload it.
+    window.addEventListener("hashchange", openFromHash);
   }
 
   /* ---------------------------------------------------------------- copy to clipboard */
@@ -360,6 +364,11 @@
         el.hidden = !el.getAttribute("data-provider-only").split(" ").includes(key);
       });
       const preset = presets[key];
+      if (fill && key === "other") {
+        // Another provider: the previous preset's servers would be wrong, so the fields start empty.
+        if (smtp && !smtp.readOnly) smtp.value = "";
+        if (imap && !imap.readOnly) imap.value = "";
+      }
       if (!fill || !preset || !preset.smtp) return;
       const ending = region && !region.closest("[hidden]") ? region.value : "com";
       if (smtp && !smtp.readOnly) smtp.value = preset.smtp.replace("{region}", ending);

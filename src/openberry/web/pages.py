@@ -479,6 +479,7 @@ def dashboard(request: Request, company_id: int) -> Response:
     top_leads, _ = repo.list_leads(company_id, kind="person", sort="score", limit=8)
     recent, _ = repo.list_signals(company_id, limit=10, exclude_types=PROSPECT_TYPES)  # intent, not prospects
     runs = repo.list_scan_runs(company_id, limit=6)
+    email = mail.email_status(company)
     return render(request, "dashboard.html", {
         "company": company, "active": "dashboard", "title": company.name,
         "stats": stats, "kpis": kpi_tiles(company_id, stats),
@@ -486,7 +487,8 @@ def dashboard(request: Request, company_id: int) -> Response:
         "top_leads": top_leads, "recent": recent, "signal_leads": leads_by_id(s.lead_id for s in recent),
         "followups": repo.followups_due(company_id)[:6], "sources": sources_panel(company),
         "runs": [run_summary(r) for r in runs], "scan": scans.status(company_id),
-        "prompts": claude_prompts(company_id), "agent": agent_status(company), "email": mail.email_status(company),
+        "prompts": claude_prompts(company_id), "agent": agent_status(company), "email": email,
+        "hint_leads": leads_by_id(m.lead_id for m in email["hints"]),
     })
 
 
@@ -730,7 +732,11 @@ def settings_status(request: Request, company_id: int, form: FormData = Depends(
 @router.post("/c/{company_id}/delete")
 def company_delete(request: Request, company_id: int, form: FormData = Depends(checked_form)) -> Response:
     company = repo.get_company(company_id)
-    repo.delete_company(company_id)
+    try:
+        repo.delete_company(company_id)
+    except ValueError as exc:  # one of its emails is being sent right now
+        flash(request, str(exc), "error")
+        return redirect(f"/c/{company_id}/settings")
     if request.session.get(COMPANY_KEY) == company_id:
         request.session.pop(COMPANY_KEY, None)
     flash(request, f"Deleted {company.name} and all of its leads, signals and messages.", "info")

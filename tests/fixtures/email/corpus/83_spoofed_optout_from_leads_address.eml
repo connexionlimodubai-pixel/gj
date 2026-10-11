@@ -1,0 +1,11 @@
+From: <info@spoofed-optout-hotel.example>
+To: Sam Rahman <sam@acme-mail.example>
+Subject: Unsubscribe
+Date: Mon, 12 Oct 2026 14:31:09 +0400
+Message-ID: <sp-2@evil.example>
+MIME-Version: 1.0
+Received: from evil.example (unknown [198.51.100.7])
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Unsubscribe

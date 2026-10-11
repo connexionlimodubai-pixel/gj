@@ -185,11 +185,28 @@
 {% if info and info.state in ("held", "waiting", "auto") %}
 <p class="email-line email-line-held">{{ icon("pause", 14) }}<span>{% if info.state == "auto" %}Auto-approved: approve it yourself to send it from your mailbox, or allow auto-approved emails on the <a href="/c/{{ msg.company_id }}/outreach#email">Email sending card</a>.{% elif info.state == "waiting" %}Approved. It goes out when OpenBerry can send again: {{ info.reason }}.{% else %}Not emailed now: {{ info.reason }}.{% endif %}</span></p>
 {% elif info and info.state in ("unknown", "failed", "bounced") %}
-<div class="email-line email-line-problem">{{ icon("alert", 14) }}<span>{% if info.state == "unknown" %}It may have been sent: the connection broke while your mail server was receiving it. Check your mailbox's Sent folder, then choose Mark sent or Send again.{% elif info.state == "bounced" %}{{ info.reason or "It bounced." }}{% else %}Not sent: {{ info.reason or "no details" }}{% endif %}</span>{% if info.state != "bounced" and (msg.status == "approved" or info.state == "unknown") %}{{ email_actions(msg, next_url, info.dead) }}{% endif %}</div>
+<div class="email-line email-line-problem">{{ icon("alert", 14) }}<span>{% if info.state == "unknown" %}{{ maybe_sent_text(info.saves_sent) }}{% elif info.state == "bounced" %}{{ info.reason or "It bounced." }}{% else %}Not sent: {{ info.reason or "no details" }}{% endif %}</span>{% if info.state != "bounced" and (msg.status == "approved" or info.state == "unknown") %}{{ email_actions(msg, next_url, info.dead) }}{% endif %}</div>
 {% endif %}
 {% if footer and msg.channel == "email" and msg.direction == "outbound" and msg.status in ("draft", "approved") and not msg.email_state %}
 <div class="email-footer-preview"><span class="label-sm">Added when sent</span><div class="email-footer-text">{{ footer }}</div></div>
 {% endif %}
+{%- endmacro %}
+
+{# An email that may have been sent. While OpenBerry saves the Sent copies itself (Save a copy: every preset but
+   Gmail), it couldn't for this one, so the Sent folder can't tell: a reply or bounce settles it, else Mark sent. #}
+{% macro maybe_sent_text(saves_sent) -%}
+{% if saves_sent %}It may have been sent: the connection broke while your mail server was receiving it. OpenBerry saves your Sent copies itself and couldn't for this one, so your Sent folder can't tell. A reply or a bounce settles it by itself; if unsure, choose Mark sent (Send again may make it arrive twice).{% else %}It may have been sent: the connection broke while your mail server was receiving it. Check your mailbox's Sent folder, then choose Mark sent or Send again.{% endif %}
+{%- endmacro %}
+
+{# A reply whose words look like an opt-out (repo.record_inbound): it stopped the lead's emails; the user says whether
+   to never email them again. #}
+{% macro opt_out_hint(msg, next_url, who="") -%}
+<div class="email-line email-line-hint" role="status">{{ icon("alert", 14) }}<span><strong>Looks like an opt-out{% if who %} from {{ who }}{% endif %}:</strong> “<bdi>{{ msg.opt_out_hint }}</bdi>”. The reply stopped this lead's emails, but OpenBerry wasn't sure it asks never to be emailed again. You decide.</span>
+<span class="email-actions">
+<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/opt-out" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm" type="submit" name="action" value="confirm" data-confirm="Never email this lead again? Their address goes on your never-email list, for every company, and the lead is disqualified.">{{ icon("ban", 14) }}Never email again</button></form>
+<form method="post" action="/c/{{ msg.company_id }}/messages/{{ msg.id }}/opt-out" data-keep-scroll>{{ csrf() }}<input type="hidden" name="next" value="{{ next_url }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="dismiss">{{ icon("check", 14) }}Not an opt-out</button></form>
+</span>
+</div>
 {%- endmacro %}
 
 {# dead: it failed because the address doesn't exist (it is on the never-email list): Try again can't work. #}

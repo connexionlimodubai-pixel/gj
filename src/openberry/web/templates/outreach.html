@@ -235,8 +235,9 @@
     <p class="queue-meta">{{ msg.channel|channel_label }} · step {{ msg.step }} · {{ m.when(msg.sent_at or msg.created_at) }}</p>
     {{ m.auto_line(msg, auto_states.get(msg.id), base ~ "/outreach?tab=" ~ tab, keep_scroll=true) }}
     {% if msg.subject %}<p class="queue-subject"><span class="muted">Subject:</span> {{ msg.subject }}</p>{% elif msg.channel == "email" and msg.direction == "outbound" and msg.status in ("draft", "approved") %}<p class="queue-subject field-error">{{ m.icon("alert", 14) }}<span>No subject yet: add one on the lead's page before you approve it.</span></p>{% endif %}
-    <div class="queue-body" id="q-{{ msg.id }}-body">{{ msg.body }}</div>
+    <div class="queue-body" id="q-{{ msg.id }}-body" dir="auto">{{ msg.body }}</div>
     {{ m.email_line(msg, email.info.get(msg.id), email.footer_added, base ~ "/outreach?tab=" ~ tab) }}
+    {% if msg.direction == "inbound" and msg.opt_out_hint %}{{ m.opt_out_hint(msg, base ~ "/outreach?tab=" ~ tab) }}{% endif %}
     {% if msg.channel == "linkedin_connect" %}
     <p class="counter{{ ' over' if too_long }}">{% if msg.status in ("draft", "approved") %}{{ msg.body|length }} / {{ note_max }} characters{% if too_long %}: too long for a connection note from your {{ linkedin_account_label(company) }} LinkedIn account, shorten it before sending{% endif %}{% else %}{{ msg.body|length }} characters{% endif %}</p>
     {% endif %}
@@ -244,11 +245,12 @@
       {% if msg.status == "draft" %}
       <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll="remove">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm" type="submit" name="action" value="approve">{{ m.icon("check", 14) }}Approve</button></form>
       {% endif %}
-      {% if msg.status in ("draft", "approved") %}
-      <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll="remove">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm btn-primary" type="submit" name="action" value="sent">{{ m.icon("send", 14) }}Mark sent</button></form>
+      {% if msg.status in ("draft", "approved") and not msg.email_state %}
+      {% set by_mailbox = msg.channel == "email" and company.outreach.email_sending %}
+      <form method="post" action="{{ base }}/messages/{{ msg.id }}" data-keep-scroll="remove">{{ m.csrf() }}<input type="hidden" name="next" value="{{ base }}/outreach?tab={{ tab }}"><button class="btn btn-sm {{ 'btn-ghost' if by_mailbox else 'btn-primary' }}" type="submit" name="action" value="sent"{% if by_mailbox %} title="Only if you sent it yourself: OpenBerry emails approved emails for you" data-confirm="Mark it sent? Only if you sent it yourself: OpenBerry then won't email it."{% endif %}>{{ m.icon("send", 14) }}Mark sent</button></form>
       {% endif %}
       {{ m.copy_button("#q-" ~ msg.id ~ "-body") }}
-      {% if msg.direction == "outbound" and msg.status in ("draft", "approved") %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{{ m.icon("edit", 14) }}Edit</a>
+      {% if msg.direction == "outbound" and msg.status in ("draft", "approved") and (not msg.email_state or msg.email_state == "failed") %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{{ m.icon("edit", 14) }}Edit</a>
       {% elif msg.direction == "outbound" %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">Open</a>
       {% else %}<a class="btn btn-sm btn-ghost" href="{{ base }}/leads/{{ msg.lead_id }}#outreach">{{ m.icon("reply", 14) }}Answer</a>{% endif %}
     </div>

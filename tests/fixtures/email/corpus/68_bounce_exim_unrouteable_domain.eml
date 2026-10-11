@@ -1,0 +1,25 @@
+From: Mail Delivery System <Mailer-Daemon@hostinger.com>
+To: Sam Rahman <sam@acme-mail.example>
+Subject: Mail delivery failed: returning message to sender
+Date: Mon, 12 Oct 2026 14:31:09 +0400
+Message-ID: <E1tXyZ-0007Ij-6G@mx1.hostinger.com>
+MIME-Version: 1.0
+In-Reply-To: <fc8cfe1e88b4f2e24efd4fb074e38792@acme-mail.example>
+References: <fc8cfe1e88b4f2e24efd4fb074e38792@acme-mail.example>
+Auto-Submitted: auto-replied
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+This message was created automatically by mail delivery software.
+
+A message that you sent could not be delivered to one or more of its
+recipients. This is a permanent error. The following address(es) failed:
+
+  info@barsha-heights-hotel.example
+    Unrouteable address
+
+------ This is a copy of the message, including all the headers. ------
+
+Message-ID: <fc8cfe1e88b4f2e24efd4fb074e38792@acme-mail.example>
+Subject: Airport transfers for your guests
+

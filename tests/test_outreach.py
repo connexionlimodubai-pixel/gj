@@ -98,6 +98,19 @@ def test_followup_template_is_never_a_second_connection_note(company: Company, l
     assert len(note) <= outreach.LINKEDIN_CONNECT_LIMIT and "https://" not in note
 
 
+def test_an_email_to_a_business_has_no_name_in_its_subject(company: Company, lead: Lead):
+    """R2UI-12a: a Google Maps business (an account lead, or no first name) gets "Quick idea for Palm Crest Resort",
+    never "there, quick idea for..."; a person keeps their name."""
+    hotel, _ = repo.upsert_lead(company.id, LeadIn(kind="account", lead_company="Palm Crest Resort",
+                                                   email="reservations@palmcrest.example"))
+    subject, _ = outreach.draft_template(company, hotel, [], "email")
+    assert subject == "Quick idea for Palm Crest Resort"
+    nameless, _ = repo.upsert_lead(company.id, LeadIn(full_name="", lead_company="Ghost Events LLC",
+                                                      email="events@ghost.example"))
+    assert outreach.draft_template(company, nameless, [], "email")[0] == "Quick idea for Ghost Events LLC"
+    assert outreach.draft_template(company, lead, [], "email")[0] == "Omar, quick idea for Northwind"
+
+
 def _long_profile(company: Company, account: str) -> Company:
     return repo.update_company(company.id, {
         "name": "Acme Executive Chauffeurs International",

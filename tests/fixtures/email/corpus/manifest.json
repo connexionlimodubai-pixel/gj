@@ -1,0 +1,1225 @@
+{
+ "us": "sam@acme-mail.example",
+ "footer": "Acme Chauffeurs · Office 1204, Bay Square 7, Business Bay, Dubai\nNot interested? Reply \"unsubscribe\" and we won't email you again.",
+ "old_footer": "Acme Chauffeurs, Business Bay, Dubai. Reply \"unsubscribe\" to opt out.",
+ "messages": [
+  {
+   "file": "01_gmail_booking_reply_en.eml",
+   "lead": "reservations@palmjumeirah-resort.example",
+   "sent_to": "reservations@palmjumeirah-resort.example",
+   "our_id": "<7f8cc828e5bb2b1532395827ffa9af13@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "EK 202",
+    "stop at Dubai Mall",
+    "18 Oct at 22:00",
+    "child seat"
+   ],
+   "drop": [
+    "Would a corporate rate sheet help"
+   ],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "02_outlook_desktop_reply_en.eml",
+   "lead": "fatima@alsuwaidi-law.example",
+   "sent_to": "fatima@alsuwaidi-law.example",
+   "our_id": "<bda55b5e7d366411d2680e220d1bf4e8@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "20 to 23 October",
+    "minimum 4 hours"
+   ],
+   "drop": [
+    "We drive guests"
+   ],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "Fatima",
+   "lead_kind": "person"
+  },
+  {
+   "file": "03_apple_mail_reply.eml",
+   "lead": "ahmed@dmc-arabia.example",
+   "sent_to": "ahmed@dmc-arabia.example",
+   "our_id": "<6877c3c257878bde32767400c6ba548a@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "FZ 1438",
+    "23:50"
+   ],
+   "drop": [
+    "We drive guests"
+   ],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "04_zoho_reply_unprefixed_quote.eml",
+   "lead": "info@desertdmc.example",
+   "sent_to": "info@desertdmc.example",
+   "our_id": "<4996ba494125c1873936b0bf1ff21191@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "Pickup: Address Downtown, 08:00"
+   ],
+   "drop": [
+    "We drive guests"
+   ],
+   "folder": "INBOX",
+   "note": "Zoho Mail's reply header is '---- On <date> <name> <address> wrote ---' and the plain-text part quotes without '>'",
+   "lead_name": "",
+   "lead_kind": "account"
+  },
+  {
+   "file": "05_zoho_reply_quoting_old_footer.eml",
+   "lead": "bookings@desertsafari-dmc.example",
+   "sent_to": "bookings@desertsafari-dmc.example",
+   "our_id": "<4c7b3fd27c97411bcd2258947d48421a@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "40 airport transfers a month"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "The user changed the footer after this email went out (current footer differs); Zoho quotes unprefixed",
+   "lead_name": "",
+   "lead_kind": "account"
+  },
+  {
+   "file": "06_outlook_arabic_reply_cp1256.eml",
+   "lead": "m.alnuaimi@jumeirah-events.example",
+   "sent_to": "m.alnuaimi@jumeirah-events.example",
+   "our_id": "<a2ee4014f134cba390cb181e371fcb6a@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "EK 2524",
+    "مول الإمارات"
+   ],
+   "drop": [
+    "We drive guests"
+   ],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "07_gmail_arabic_reply.eml",
+   "lead": "hessa@gulfevents.example",
+   "sent_to": "hessa@gulfevents.example",
+   "our_id": "<6667f60c011760d2ccdf0ff76172277c@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "مع توقف واحد"
+   ],
+   "drop": [
+    "We drive guests"
+   ],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "08_html_only_table_booking.eml",
+   "lead": "concierge@burjviewhotel.example",
+   "sent_to": "concierge@burjviewhotel.example",
+   "our_id": "<d9ea70a0498506c38a0344322d51bdda@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "BA 107",
+    "Flight BA 107",
+    "Guest Mr. John Carter"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "HTML-only message from a hotel system with the trip in a table",
+   "lead_name": "",
+   "lead_kind": "account"
+  },
+  {
+   "file": "09_reply_mixed_english_arabic.eml",
+   "lead": "sara.k@emiratesexpo-events.example",
+   "sent_to": "sara.k@emiratesexpo-events.example",
+   "our_id": "<cf8b470d14fe9d299b79a512eb3dd2f6@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "+971 50 123 4567",
+    "٣ سيارات"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "10_reply_not_interested.eml",
+   "lead": "gm@rovehotel-downtown.example",
+   "sent_to": "gm@rovehotel-downtown.example",
+   "our_id": "<c0b98b15d8cc128cbc95d1201c081c87@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "contract with another provider"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A plain no: stops the sequence, but isn't an opt-out by OpenBerry's rules",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "11_reply_dont_contact_on_mobile.eml",
+   "lead": "lina@marinagrand.example",
+   "sent_to": "lina@marinagrand.example",
+   "our_id": "<090e90ea7a40297b99866017132e3112@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "send the rate card here"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A hot lead asking to be emailed, not called",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "12_reply_stop_contacting_front_desk.eml",
+   "lead": "transport@atlantis-guestservices.example",
+   "sent_to": "transport@atlantis-guestservices.example",
+   "our_id": "<f170ef7494dd3120f66e81ef03f418fe@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "3 S-Class for 21 Oct"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A buyer redirecting us to them",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "13_reply_remove_my_address_pickup.eml",
+   "lead": "events@jw-marquis-dubai.example",
+   "sent_to": "events@jw-marquis-dubai.example",
+   "our_id": "<3c5bb807e94698f8ed7dfe73c9e2a110@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "EK 512"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "'remove my address' about a pickup address",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "14_reply_dont_email_invoices.eml",
+   "lead": "procurement@habtoor-events.example",
+   "sent_to": "procurement@habtoor-events.example",
+   "our_id": "<c8319920ed0d557b5b9653775c68c394@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "confirm the 3 cars for Friday"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "15_reply_arabic_dont_contact_on_whatsapp.eml",
+   "lead": "yousef@alfuttaim-travel.example",
+   "sent_to": "yousef@alfuttaim-travel.example",
+   "our_id": "<4f5c1c110acc6635910b634ec2a87de9@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "عرض سعر لسيارتين"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "'Don't contact me on WhatsApp, email me only'",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "16_reply_arabic_stop_sending_driver_old_address.eml",
+   "lead": "khalid@emaar-hospitality.example",
+   "sent_to": "khalid@emaar-hospitality.example",
+   "our_id": "<fbf0e5db2e1504c9284659af0e7f4475@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "برج خليفة"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "'Stop sending the driver to the old address'",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "17_reply_stop_sending_this_driver.eml",
+   "lead": "ops@arabian-adventures-dmc.example",
+   "sent_to": "ops@arabian-adventures-dmc.example",
+   "our_id": "<e063137970a46af0a6906e49100b9ac2@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "book 2 V-Class for 19 Oct"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "18_reply_unsubscribe_from_package.eml",
+   "lead": "admin@dwtc-exhibitors.example",
+   "sent_to": "admin@dwtc-exhibitors.example",
+   "our_id": "<b91fecdf87c458065f14a57adbbb3b50@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "per-trip rates"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A customer changing plan",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "19_reply_dont_want_to_unsubscribe.eml",
+   "lead": "nadia@goldenbeach-dmc.example",
+   "sent_to": "nadia@goldenbeach-dmc.example",
+   "our_id": "<a1b83f648bd55f75f26e050d4d5fcc73@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "winter rates"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "20_reply_with_hotel_signature_unsubscribe.eml",
+   "lead": "concierge@palazzo-versace-dxb.example",
+   "sent_to": "concierge@palazzo-versace-dxb.example",
+   "our_id": "<54a9317c4fd6ddddc9a6ec361eac1be0@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "corporate rate sheet"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A company signature that mentions unsubscribing from the hotel's own newsletters",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "21_reply_arabic_books_line_ending_colon.eml",
+   "lead": "info@expo-city-events.example",
+   "sent_to": "info@expo-city-events.example",
+   "our_id": "<f5b5bda5733ace4c928749f7c4c63d3f@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "3 فانات",
+    "5 نوفمبر"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "'We need to move books (كتب) and equipment for the Sharjah book fair:' then the details",
+   "lead_name": "",
+   "lead_kind": "account"
+  },
+  {
+   "file": "22_reply_underscore_separated_booking.eml",
+   "lead": "pa.ceo@meraas-holding.example",
+   "sent_to": "pa.ceo@meraas-holding.example",
+   "our_id": "<5605aa51523bb55ce3c54dbfa62826fc@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "LH 630",
+    "Bulgari Resort"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "23_outlook_mobile_reply.eml",
+   "lead": "omar@hotel-transport-dubai.example",
+   "sent_to": "omar@hotel-transport-dubai.example",
+   "our_id": "<32702b1c15fada0f27495648966bfc5e@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "Thursday works"
+   ],
+   "drop": [
+    "We drive guests"
+   ],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "24_apple_mail_html_only_reply.eml",
+   "lead": "events@marina-yacht-events.example",
+   "sent_to": "events@marina-yacht-events.example",
+   "our_id": "<1cda3ead0565e259812d5142d5945ef3@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "4 cars on 30 Oct"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "account"
+  },
+  {
+   "file": "25_reply_from_colleague_with_references.eml",
+   "lead": "john@palmjumeirah-resort.example",
+   "sent_to": "john@palmjumeirah-resort.example",
+   "our_id": "<ffd4fb147aa817863a41b279f2225493@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "10 transfers a week"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "Another person at the lead's company replies in thread",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "26_forward_from_colleague_no_references.eml",
+   "lead": "gm@citymax-hotels.example",
+   "sent_to": "gm@citymax-hotels.example",
+   "our_id": "<db85a0e180ed0fcfd6eeeccf700e6132@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "6 cars, 3 to 5 November"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "Outlook forwards carry no In-Reply-To/References; sender is not the lead but shares its domain",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "27_reply_without_references_from_lead.eml",
+   "lead": "Info@AlMaha-Desert-Resort.example",
+   "sent_to": "Info@AlMaha-Desert-Resort.example",
+   "our_id": "<f1f409598f26d2756f9f3088321fb4a0@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "9 Nov"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "New email (no References) from the lead's address, case differs",
+   "lead_name": "",
+   "lead_kind": "account"
+  },
+  {
+   "file": "28_optout_unsubscribe.eml",
+   "lead": "hr@dubai-holding-events.example",
+   "sent_to": "hr@dubai-holding-events.example",
+   "our_id": "<39fb4e18773a2773a61f735a909eb334@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "29_optout_outlook_remove_me_from_mailing_list.eml",
+   "lead": "manager@citycentre-hotels.example",
+   "sent_to": "manager@citycentre-hotels.example",
+   "our_id": "<1da0e5237a873093ad4ffa01f1231aef@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "30_optout_take_us_off_your_list.eml",
+   "lead": "front.office@sofitel-jbr.example",
+   "sent_to": "front.office@sofitel-jbr.example",
+   "our_id": "<11ac9a6d0d39c9e7be55a065d12d76eb@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "31_optout_please_stop.eml",
+   "lead": "reservations@grandhyatt-dubai.example",
+   "sent_to": "reservations@grandhyatt-dubai.example",
+   "our_id": "<0a0e8cb7916603136fd69200c481f27f@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "32_optout_dont_send_us_any_more_emails.eml",
+   "lead": "sales@roda-hotels.example",
+   "sent_to": "sales@roda-hotels.example",
+   "our_id": "<640e17d42b50f986bbdc8aaf7cdeb44a@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "33_optout_arabic_remove_me_from_your_list.eml",
+   "lead": "booking@alshindagha-dmc.example",
+   "sent_to": "booking@alshindagha-dmc.example",
+   "our_id": "<9f6952aded6225c78b1c1487b23f3d39@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "34_optout_arabic_unsubscribe.eml",
+   "lead": "admin@sharjah-events.example",
+   "sent_to": "admin@sharjah-events.example",
+   "our_id": "<d6a90bc8a908fed2c663965d04992dfe@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "35_optout_remove_us_from_distribution_list.eml",
+   "lead": "info@zabeel-house.example",
+   "sent_to": "info@zabeel-house.example",
+   "our_id": "<4951a584958278143014454de4068817@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "36_optout_do_not_send_any_more_emails.eml",
+   "lead": "travel@dubai-law-chambers.example",
+   "sent_to": "travel@dubai-law-chambers.example",
+   "our_id": "<00cd5bc9c2212f72bc24a4e483d9505a@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "37_optout_id_like_to_opt_out.eml",
+   "lead": "pa@emirates-law-group.example",
+   "sent_to": "pa@emirates-law-group.example",
+   "our_id": "<e27016a801be025dce3b0fcafc26bb75@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "38_optout_remove_this_email_address.eml",
+   "lead": "info@hatta-dmc.example",
+   "sent_to": "info@hatta-dmc.example",
+   "our_id": "<5397ef21cf476e71814cfedfaf98ae05@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "39_optout_dont_contact_again.eml",
+   "lead": "contact@jbr-concierge.example",
+   "sent_to": "contact@jbr-concierge.example",
+   "our_id": "<fa8b747605aa7c9cbf3190e8f0af66dc@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "40_optout_stop_spamming.eml",
+   "lead": "it@alfahim-legal.example",
+   "sent_to": "it@alfahim-legal.example",
+   "our_id": "<5f206f22aa135039b26a62dd5027ac5e@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "41_optout_subject_remove_only.eml",
+   "lead": "info@creekside-hotel.example",
+   "sent_to": "info@creekside-hotel.example",
+   "our_id": "<99aa86b9017ea1a84b55046e59fa3d81@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A new email with subject REMOVE and no text (people do this)",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "42_optout_re_subject_unsubscribe_empty_body.eml",
+   "lead": "frontdesk@bayview-hotel.example",
+   "sent_to": "frontdesk@bayview-hotel.example",
+   "our_id": "<8156450d0a1e7e24a7dc3321b263af86@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "Reply with UNSUBSCRIBE typed into the subject, nothing typed in the body",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "43_optout_no_wish_to_receive.eml",
+   "lead": "legal@hamdan-advocates.example",
+   "sent_to": "legal@hamdan-advocates.example",
+   "our_id": "<1bc5c32567ad02f91825a41ecf63a8f6@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "44_optout_delete_my_details.eml",
+   "lead": "privacy@majid-events.example",
+   "sent_to": "privacy@majid-events.example",
+   "our_id": "<54f98044a1436b1d976af1014e6d612f@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "45_optout_do_not_write_to_me.eml",
+   "lead": "director@alserkal-events.example",
+   "sent_to": "director@alserkal-events.example",
+   "our_id": "<a6ee1cdea6c483e9fb7b79fae6fb39a2@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "46_optout_arabic_remove_my_email.eml",
+   "lead": "info@liwa-dmc.example",
+   "sent_to": "info@liwa-dmc.example",
+   "our_id": "<03a0caa03162a113d4b272679e70a266@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "47_optout_arabic_dont_wish_to_receive.eml",
+   "lead": "contact@fujairah-tours.example",
+   "sent_to": "contact@fujairah-tours.example",
+   "our_id": "<c5d969531286aaa6c39f25a67e13cb1d@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "48_optout_arabic_dont_correspond_with_us.eml",
+   "lead": "admin@ajman-events.example",
+   "sent_to": "admin@ajman-events.example",
+   "our_id": "<6159c58abcccd3a247009ec11522593f@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "49_optout_arabic_gulf_dialect.eml",
+   "lead": "office@rak-dmc.example",
+   "sent_to": "office@rak-dmc.example",
+   "our_id": "<6a8d4f4713f0ee1b8d5d27f2092bea83@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "50_optout_arabic_please_dont_contact_us.eml",
+   "lead": "info@ain-heritage-tours.example",
+   "sent_to": "info@ain-heritage-tours.example",
+   "our_id": "<8d0dd86b6c35417537b904d157da4497@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "51_optout_gmail_list_unsubscribe_button.eml",
+   "lead": "reception@seashell-hotel.example",
+   "sent_to": "reception@seashell-hotel.example",
+   "our_id": "<a7e630013135141dc2cd0f178a044808@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "What Gmail's Unsubscribe button sends for our List-Unsubscribe mailto",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "52_optout_pa_forward_no_references.eml",
+   "lead": "omar.gm@desert-pearl-hotel.example",
+   "sent_to": "omar.gm@desert-pearl-hotel.example",
+   "our_id": "<863edd74e8e2c6915dfdfe13db4a4a74@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "The assistant forwards from her own address; Outlook forwards have no References",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "53_optout_in_junk_folder.eml",
+   "lead": "info@oasis-tours-dxb.example",
+   "sent_to": "info@oasis-tours-dxb.example",
+   "our_id": "<02df5158110f558674ee514e27239b5b@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "Junk",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "54_optout_html_only_gmail.eml",
+   "lead": "info@golden-sands-dmc.example",
+   "sent_to": "info@golden-sands-dmc.example",
+   "our_id": "<ae09c0c29e26aa018932f4582878f872@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "55_ooo_exchange_english.eml",
+   "lead": "director.sales@conrad-dubai.example",
+   "sent_to": "director.sales@conrad-dubai.example",
+   "our_id": "<0f19170ade36cb07c66982d88baacbae@acme-mail.example>",
+   "expect": "auto_reply",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "56_ooo_arabic_subject_no_auto_headers.eml",
+   "lead": "mariam@dubai-wedding-planners.example",
+   "sent_to": "mariam@dubai-wedding-planners.example",
+   "our_id": "<2f1ac96ed1c73cbb0c25e99965a70496@acme-mail.example>",
+   "expect": "auto_reply",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "Arabic out-of-office ('خارج المكتب') with no Auto-Submitted header",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "57_ooo_gmail_vacation_responder.eml",
+   "lead": "omar@luxury-dmc.example",
+   "sent_to": "omar@luxury-dmc.example",
+   "our_id": "<d361268202c2272eace2508757aed6bc@acme-mail.example>",
+   "expect": "auto_reply",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "58_ooo_arabic_auto_reply_subject.eml",
+   "lead": "events@emirates-palace-events.example",
+   "sent_to": "events@emirates-palace-events.example",
+   "our_id": "<fe52d2b948819b00af8f522f1333e964@acme-mail.example>",
+   "expect": "auto_reply",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "59_ack_hotel_ticket_system_no_headers.eml",
+   "lead": "reservations@atlantis-thepalm.example",
+   "sent_to": "reservations@atlantis-thepalm.example",
+   "our_id": "<07a190032a197d8e784214ea17d7dd59@acme-mail.example>",
+   "expect": "auto_reply",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A ticketing system's acknowledgement without Auto-Submitted/Precedence",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "60_ack_freshdesk_with_headers.eml",
+   "lead": "info@fairmont-palm-dubai.example",
+   "sent_to": "info@fairmont-palm-dubai.example",
+   "our_id": "<9d67760bdf2213b5de6b7739268ecaa8@acme-mail.example>",
+   "expect": "auto_reply",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "61_newsletter_from_lead.eml",
+   "lead": "info@vida-hotels-marina.example",
+   "sent_to": "info@vida-hotels-marina.example",
+   "our_id": "<0b9639501968ca418ac81379c90f9f15@acme-mail.example>",
+   "expect": "auto_reply",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "62_reply_via_google_group_collaborative_inbox.eml",
+   "lead": "reservations@hilton-dubai-creek.example",
+   "sent_to": "reservations@hilton-dubai-creek.example",
+   "our_id": "<03f1f0a1a733cb75c582fe75a10905e2@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "5 airport transfers next week"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A person answering from a Google Workspace collaborative inbox (Google Group) adds list headers",
+   "lead_name": "",
+   "lead_kind": "account"
+  },
+  {
+   "file": "63_dsn_zoho_user_unknown.eml",
+   "lead": "sales@crowneplaza-sz.example",
+   "sent_to": "sales@crowneplaza-sz.example",
+   "our_id": "<6d2ca2772a25634136af0dedbf818b7e@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "64_bounce_zoho_plain_text.eml",
+   "lead": "booking@qasr-al-sarab-tours.example",
+   "sent_to": "booking@qasr-al-sarab-tours.example",
+   "our_id": "<7e333fc7a2362275f152d9681e53fdc3@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "65_bounce_hostinger_exim_m365_access_denied.eml",
+   "lead": "events@marinagrand-hotel.example",
+   "sent_to": "events@marinagrand-hotel.example",
+   "our_id": "<6bb1b33be0813978261e00e02ffabf2e@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "66_bounce_exim_mailbox_full.eml",
+   "lead": "info@deira-city-tours.example",
+   "sent_to": "info@deira-city-tours.example",
+   "our_id": "<c0a31949c73ae7ff60381b1875b7a836@acme-mail.example>",
+   "expect": "soft_bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "Mailbox full: soft by OpenBerry's rules",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "67_exim_delay_warning.eml",
+   "lead": "sales@karama-hotel-apartments.example",
+   "sent_to": "sales@karama-hotel-apartments.example",
+   "our_id": "<1c295a88d04c718c023c45e96bfae437@acme-mail.example>",
+   "expect": "soft_bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A delay warning: the sequence goes on (auto_reply also acceptable)",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "68_bounce_exim_unrouteable_domain.eml",
+   "lead": "info@barsha-heights-hotel.example",
+   "sent_to": "info@barsha-heights-hotel.example",
+   "our_id": "<fc8cfe1e88b4f2e24efd4fb074e38792@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "The domain doesn't exist (a typo in a Google Maps listing)",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "69_dsn_gmail_does_not_exist.eml",
+   "lead": "omar.travel@gmail.com",
+   "sent_to": "omar.travel@gmail.com",
+   "our_id": "<8ea753dc1dafaa303b368e2f6bb4f43e@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "70_dsn_gmail_over_quota.eml",
+   "lead": "dubaichauffeur.client@gmail.com",
+   "sent_to": "dubaichauffeur.client@gmail.com",
+   "our_id": "<879cef30643067c585d10bc46d3eea53@acme-mail.example>",
+   "expect": "soft_bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "71_dsn_m365_recipient_not_found.eml",
+   "lead": "reservations@address-hotels-dxb.example",
+   "sent_to": "reservations@address-hotels-dxb.example",
+   "our_id": "<5f68e5c3167f575ebff56bf3cc1c92ef@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "72_dsn_m365_block_list.eml",
+   "lead": "events@dubai-opera-events.example",
+   "sent_to": "events@dubai-opera-events.example",
+   "our_id": "<8876cbc9077aefafa8befe76ce347cfd@acme-mail.example>",
+   "expect": "policy_reject",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "73_dsn_m365_mailbox_full.eml",
+   "lead": "ceo@difc-legal-partners.example",
+   "sent_to": "ceo@difc-legal-partners.example",
+   "our_id": "<bd511765257f1a2607c55dbed5159745@acme-mail.example>",
+   "expect": "soft_bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "74_dsn_postfix_user_unknown.eml",
+   "lead": "info@mirdif-limo-partners.example",
+   "sent_to": "info@mirdif-limo-partners.example",
+   "our_id": "<79732d3afcf23ac96401146458303f86@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "75_dsn_postfix_domain_not_found.eml",
+   "lead": "info@burjviewhotel-co.example",
+   "sent_to": "info@burjviewhotel-co.example",
+   "our_id": "<4231bb87e28ad17bdf067ddc07529cdf@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "76_dsn_postfix_delayed.eml",
+   "lead": "sales@jumeirah-creekside.example",
+   "sent_to": "sales@jumeirah-creekside.example",
+   "our_id": "<9ec41d05bdb1a007d5879add5da9c354@acme-mail.example>",
+   "expect": "soft_bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "77_dsn_gateway_status_5_0_0_recipnotfound.eml",
+   "lead": "booking@alseef-heritage-hotel.example",
+   "sent_to": "booking@alseef-heritage-hotel.example",
+   "our_id": "<bf40831ef86742b18c8e0c69f3dec0b4@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A relay reports Status 5.0.0 and passes on the 5.1.1 diagnostic",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "78_dsn_hostinger_status_5_0_0_no_such_user.eml",
+   "lead": "owner@small-dmc.example",
+   "sent_to": "owner@small-dmc.example",
+   "our_id": "<15e032b13969e1c127b26082ce465738@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "79_dsn_exchange_onprem_mailbox_unavailable.eml",
+   "lead": "manager@mailboxgone-hotel.example",
+   "sent_to": "manager@mailboxgone-hotel.example",
+   "our_id": "<83dc653dcdfbc405922afc404be8d3c5@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "80_dsn_yahoo_user_doesnt_have_account.eml",
+   "lead": "rentals@yahoo-client-dxb.example",
+   "sent_to": "rentals@yahoo-client-dxb.example",
+   "our_id": "<5b93d2b15ae5caf8cbfa443afaca10b3@acme-mail.example>",
+   "expect": "bounce",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "81_dsn_m365_dmarc_fail.eml",
+   "lead": "hello@aldhafra-tours.example",
+   "sent_to": "hello@aldhafra-tours.example",
+   "our_id": "<83fd52e0cb211920bd8af3c674dd376b@acme-mail.example>",
+   "expect": "policy_reject",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "82_spoofed_bounce_without_our_message_id.eml",
+   "lead": "gm@spoofed-target-hotel.example",
+   "sent_to": "gm@spoofed-target-hotel.example",
+   "our_id": "<a9a3f85e9c35eb575a48a7e1250ab830@acme-mail.example>",
+   "expect": "bounce|unmatched",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A forged bounce naming a lead's address, no Message-ID of ours: it can only make OpenBerry safer",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "83_spoofed_optout_from_leads_address.eml",
+   "lead": "info@spoofed-optout-hotel.example",
+   "sent_to": "info@spoofed-optout-hotel.example",
+   "our_id": "<027ab689fffa3e5b7ade6ea9d2eb123e@acme-mail.example>",
+   "expect": "opt_out",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "Forged From: can only make OpenBerry safer (the address is never emailed)",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "84_spoofed_from_our_own_mailbox.eml",
+   "lead": "info@spoofed-ourown.example",
+   "sent_to": "info@spoofed-ourown.example",
+   "our_id": "<2820f1578c2aceb1a361407a6c43833c@acme-mail.example>",
+   "expect": "ignored",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "From our own mailbox address: ignored by design",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "85_spoofed_unsubscribe_wrong_token.eml",
+   "lead": "info@spoofed-token-hotel.example",
+   "sent_to": "info@spoofed-token-hotel.example",
+   "our_id": "<a3d0cf91831c8534d2a64f6c477f1791@acme-mail.example>",
+   "expect": "unmatched",
+   "keep": [],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "A guessed token matches nothing",
+   "lead_name": "",
+   "lead_kind": "person"
+  },
+  {
+   "file": "86_outlook_russian_reply.eml",
+   "lead": "booking@aurora-tours-dubai.example",
+   "sent_to": "booking@aurora-tours-dubai.example",
+   "our_id": "<de9a30970123300e6b3bfad534598f1d@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "EK 132"
+   ],
+   "drop": [
+    "We drive guests"
+   ],
+   "folder": "INBOX",
+   "note": "",
+   "lead_name": "",
+   "lead_kind": "account"
+  },
+  {
+   "file": "87_outlook_russian_reply_old_footer.eml",
+   "lead": "info@silkroad-dmc.example",
+   "sent_to": "info@silkroad-dmc.example",
+   "our_id": "<142c2866787d1cb035ce112327a8ea18@acme-mail.example>",
+   "expect": "reply",
+   "keep": [
+    "тарифы на V-Class"
+   ],
+   "drop": [],
+   "folder": "INBOX",
+   "note": "Russian Outlook quote of an email sent with the previous footer",
+   "lead_name": "",
+   "lead_kind": "account"
+  }
+ ]
+}

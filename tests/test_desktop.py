@@ -283,6 +283,56 @@ def test_exit_after_ends_a_process_that_lingers(monkeypatch: pytest.MonkeyPatch)
     assert exited.wait(5) and codes == [3]
 
 
+@pytest.fixture
+def email_being_sent(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], None]]:
+    """An email handed to the mail server right now (services.send_next_email holds this flag); call the returned
+    function when the server has answered."""
+    from openberry import services
+
+    monkeypatch.setattr(web_app, "EMAIL_STOP_TIMEOUT", 3.0)
+    services._sending_now.set()
+    yield services._sending_now.clear
+    services._sending_now.clear()
+
+
+def test_closing_waits_for_an_email_being_sent_before_stopping_the_process(
+        monkeypatch: pytest.MonkeyPatch, email_being_sent: Callable[[], None],
+        caplog: pytest.LogCaptureFixture) -> None:
+    """WP5.6: the forced exit after closing waits (up to the email loop's stop timeout + EMAIL_EXIT_EXTRA) for the
+    mail server's answer to be recorded, so the email is neither sent twice nor left as "may have been sent"."""
+    exits: list[float] = []
+    monkeypatch.setattr(os, "_exit", lambda code: exits.append(time.monotonic()))
+    assert desktop.email_grace() == 3.0 + desktop.EMAIL_EXIT_EXTRA
+    answered = threading.Timer(0.4, email_being_sent)
+    started = time.monotonic()
+    answered.start()
+    with caplog.at_level(logging.WARNING, logger="openberry.desktop"):
+        desktop._hard_exit(0)
+    assert exits and exits[0] - started >= 0.35 and exits[0] - started < 3
+    assert "closing while an email was being sent" in caplog.text
+    exits.clear()
+    started = time.monotonic()
+    desktop._hard_exit(0)  # nothing being sent: no wait
+    assert exits and exits[0] - started < 0.1 and desktop.email_grace() == 0
+
+
+def test_stopping_the_server_gives_an_email_being_sent_the_time_it_needs(
+        email_being_sent: Callable[[], None]) -> None:
+    """WP5.6: the server's shutdown waits for the email loop, so DashboardServer.stop waits as long, not STOP_TIMEOUT."""
+    done = threading.Event()
+    thread = threading.Thread(target=done.wait, args=(0.5,), daemon=True)  # a shutdown that takes 0.5 seconds
+    thread.start()
+    server = desktop.DashboardServer(url="http://127.0.0.1:1", server=types.SimpleNamespace(should_exit=False),
+                                     thread=thread)
+    server.stop(timeout=0.05)
+    assert server.server.should_exit and not thread.is_alive()
+    email_being_sent()
+    slow = threading.Thread(target=threading.Event().wait, args=(1.0,), daemon=True)
+    slow.start()
+    desktop.DashboardServer(url="", server=types.SimpleNamespace(should_exit=False), thread=slow).stop(timeout=0.05)
+    assert slow.is_alive()  # nothing being sent: the usual timeout
+
+
 def test_a_finished_app_process_really_exits(tmp_path: Path) -> None:
     """A thread that never ends (a stuck GUI or .NET thread) must not keep a closed app's process,
     and with it desktop.lock, alive."""

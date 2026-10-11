@@ -261,8 +261,11 @@ def draft_template(company: Company, lead: Lead, signals: list[Signal], channel:
     body = _sign("\n".join(lines), o.signature, sender, channel)
     subject = ""
     if channel == "email":
-        subject = _short(f"{name}, quick idea for {lead.lead_company}" if lead.lead_company
-                         else f"Quick idea, {name}", 60)
+        if name == "there" or lead.kind == "account":  # a business, no person: no "there, quick idea for..."
+            subject = _short(f"Quick idea for {lead.lead_company}" if lead.lead_company else "Quick idea", 60)
+        else:
+            subject = _short(f"{name}, quick idea for {lead.lead_company}" if lead.lead_company
+                             else f"Quick idea, {name}", 60)
     return subject, body
 
 

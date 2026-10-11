@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS leads (
     tags TEXT NOT NULL DEFAULT '[]',
     last_signal_at TEXT,
     alerted_at TEXT,  -- when the hot-lead alert / auto-draft handled this lead; NULL again once it goes cold
+    alert_failed_at TEXT,  -- (version 6) when its alert first failed to reach any webhook: tried again for 24 hours
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -134,7 +135,9 @@ CREATE TABLE IF NOT EXISTS messages (
     email_claim TEXT NOT NULL DEFAULT '',  -- the sending worker's random token while it is claimed
     email_claimed_at TEXT,
     email_attempts INTEGER NOT NULL DEFAULT 0,
-    send_error TEXT NOT NULL DEFAULT ''  -- why sending failed, in plain words
+    send_error TEXT NOT NULL DEFAULT '',  -- why sending failed, in plain words
+    email_from TEXT NOT NULL DEFAULT '',  -- (version 6) a reply read in the inbox: who wrote it (maybe a colleague)
+    opt_out_hint TEXT NOT NULL DEFAULT ''  -- (version 6) a reply's words that look like an opt-out, for the user
 );
 CREATE INDEX IF NOT EXISTS ix_messages_company_status ON messages(company_id, status);
 
@@ -200,7 +203,7 @@ CREATE TABLE IF NOT EXISTS email_suppressions (
 -- inbox message's Message-ID, else its folder and UID) makes sure an inbox message is handled once.
 CREATE TABLE IF NOT EXISTS email_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    company_id INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+    company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,  -- kept when the company is deleted (version 6)
     lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
     message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     kind TEXT NOT NULL,
@@ -211,23 +214,44 @@ CREATE TABLE IF NOT EXISTS email_events (
 CREATE UNIQUE INDEX IF NOT EXISTS ix_email_events_inbound ON email_events(inbound_key) WHERE inbound_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_email_events_company ON email_events(company_id, created_at);
 
--- The mailbox's own state, one row per From address (changing mailboxes starts fresh): its pause, failures in a row,
--- the inbox check (when it last worked, its last error, and the last UID read in each folder).
+-- The mailbox's own state, one row per account (the username it signs in with: changing the From address to an alias
+-- keeps it, changing mailboxes starts fresh): its pause, failures in a row, the inbox check (when it last worked, its
+-- last error, and the last UID read in each folder).
 CREATE TABLE IF NOT EXISTS email_mailbox (
-    address TEXT PRIMARY KEY,
+    address TEXT PRIMARY KEY,                 -- the account: the sign-in username, lower case (Settings.mailbox_key)
     paused_until TEXT,
-    pause_reason TEXT NOT NULL DEFAULT '',
-    auth_failed INTEGER NOT NULL DEFAULT 0,   -- 1: login or security refused; nothing is tried until settings change
+    pause_reason TEXT NOT NULL DEFAULT '',    -- why auth_failed is set
+    auth_failed INTEGER NOT NULL DEFAULT 0,   -- 1: a login refused (no inbox check either), 2: a settings problem;
+                                              -- nothing is sent until the settings are saved or Try again
     failures INTEGER NOT NULL DEFAULT 0,      -- temporary sending failures in a row
     imap_state TEXT NOT NULL DEFAULT '{}',    -- {"INBOX": {"uidvalidity": n, "last_uid": n}, ...}
     imap_checked_at TEXT,                     -- the last inbox check that worked
     imap_error TEXT NOT NULL DEFAULT '',      -- why the last inbox check failed ('' when it worked)
     imap_tried_at TEXT,                       -- the last inbox check, whatever happened
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    until_reason TEXT NOT NULL DEFAULT ''     -- (version 6) why paused_until is set (a provider's block, failures)
 );
+
+-- Version 6. Emails that went out or may have (and attempts), copied here when their message, lead or company is
+-- deleted: "never the same step twice to an address", the follow-up wait, the daily limits and the minutes between
+-- two emails keep counting them, and a reply, opt-out or bounce that refers to one is still read. No cascade.
+CREATE TABLE IF NOT EXISTS email_sent_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL,                    -- lower case: where it went
+    step INTEGER NOT NULL DEFAULT 1,
+    email_message_id TEXT,                    -- its Message-ID header (none: sent by hand)
+    email_state TEXT NOT NULL DEFAULT '',     -- as messages.email_state: sent | unknown | bounced | failed | ''
+    sent_via TEXT NOT NULL DEFAULT '',
+    sent_at TEXT,
+    claimed_at TEXT,
+    replied_at TEXT,                          -- the address had replied (any reply through that lead)
+    company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_email_sent_log_address ON email_sent_log(address);
 """
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 # Columns schema version 5 added to messages: outbound emails OpenBerry sends from the user's mailbox.
 EMAIL_MESSAGE_COLUMNS = {
     "email_state": "TEXT NOT NULL DEFAULT ''",
@@ -237,7 +261,34 @@ EMAIL_MESSAGE_COLUMNS = {
     "email_claimed_at": "TEXT",
     "email_attempts": "INTEGER NOT NULL DEFAULT 0",
     "send_error": "TEXT NOT NULL DEFAULT ''",
+    "email_from": "TEXT NOT NULL DEFAULT ''",  # version 6
+    "opt_out_hint": "TEXT NOT NULL DEFAULT ''",  # version 6
 }
+
+
+def _keep_email_events(conn: sqlite3.Connection) -> None:
+    """Version 6: email_events outlive a deleted company (company_id becomes NULL): SQLite can't change a foreign key,
+    so the table is rebuilt once, with its rows and indexes."""
+    links = {row[3]: row[6] for row in conn.execute("PRAGMA foreign_key_list(email_events)")}  # column -> on_delete
+    if links.get("company_id", "").upper() != "CASCADE":
+        return
+    conn.execute("""CREATE TABLE email_events_v6 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+        lead_id INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+        message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+        kind TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '',
+        inbound_key TEXT,
+        created_at TEXT NOT NULL)""")
+    conn.execute("INSERT INTO email_events_v6 (id, company_id, lead_id, message_id, kind, detail, inbound_key, "
+                 "created_at) SELECT id, company_id, lead_id, message_id, kind, detail, inbound_key, created_at "
+                 "FROM email_events")
+    conn.execute("DROP TABLE email_events")
+    conn.execute("ALTER TABLE email_events_v6 RENAME TO email_events")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_email_events_inbound ON email_events(inbound_key) "
+                 "WHERE inbound_key IS NOT NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_email_events_company ON email_events(company_id, created_at)")
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -259,9 +310,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN approved_via TEXT NOT NULL DEFAULT ''")
         if "auto_blocked" not in message_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN auto_blocked INTEGER NOT NULL DEFAULT 0")
-        for column, kind in EMAIL_MESSAGE_COLUMNS.items():  # version 5: email sending
+        for column, kind in EMAIL_MESSAGE_COLUMNS.items():  # version 5: email sending; 6: who wrote, opt-out hints
             if column not in message_columns:
                 conn.execute(f"ALTER TABLE messages ADD COLUMN {column} {kind}")
+        if "alert_failed_at" not in columns:  # version 6: hot-lead alerts that failed are tried again
+            conn.execute("ALTER TABLE leads ADD COLUMN alert_failed_at TEXT")
+        if "until_reason" not in {row[1] for row in conn.execute("PRAGMA table_info(email_mailbox)")}:
+            # Version 6: a provider's block keeps its own reason when a refused login is fixed.
+            conn.execute("ALTER TABLE email_mailbox ADD COLUMN until_reason TEXT NOT NULL DEFAULT ''")
+            conn.execute("UPDATE email_mailbox SET until_reason = pause_reason WHERE paused_until IS NOT NULL "
+                         "AND auth_failed = 0")
+        _keep_email_events(conn)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_messages_email_mid ON messages(email_message_id) "
                      "WHERE email_message_id IS NOT NULL")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_messages_email_state ON messages(email_state) "

@@ -135,7 +135,26 @@ def exit_after(grace: float, code: int) -> threading.Timer:
     return timer
 
 
+EMAIL_EXIT_EXTRA = 5.0  # seconds on top of the email loop's own stop timeout (web/app.py EMAIL_STOP_TIMEOUT)
+
+
+def email_grace() -> float:
+    """How long to wait before stopping the process: while an email is being sent, long enough for the mail server's
+    answer to be recorded (so it is never sent twice, nor shown as "may have been sent"), else 0."""
+    try:
+        from .services import email_in_progress
+        from .web.app import EMAIL_STOP_TIMEOUT
+    except Exception:  # pragma: no cover - a broken install: nothing to wait for
+        return 0.0
+    return EMAIL_STOP_TIMEOUT + EMAIL_EXIT_EXTRA if email_in_progress() else 0.0
+
+
 def _hard_exit(code: int) -> None:
+    if wait := email_grace():
+        log.warning("closing while an email was being sent: waiting up to %.0f seconds for it", wait)
+        deadline = time.monotonic() + wait
+        while email_grace() and time.monotonic() < deadline:
+            time.sleep(0.2)
     log.warning("OpenBerry did not exit within %.0f seconds of closing: stopping it", EXIT_GRACE)
     for handler in logging.getLogger().handlers:
         with contextlib.suppress(Exception):
@@ -438,6 +457,9 @@ class DashboardServer:
 
     def stop(self, timeout: float = STOP_TIMEOUT) -> None:
         self.server.should_exit = True
+        if grace := email_grace():  # the server's shutdown waits for the email loop: give it the time it needs
+            log.warning("closing while an email was being sent: waiting up to %.0f seconds for it", grace)
+            timeout = max(timeout, grace)
         self.thread.join(timeout)
         if self.thread.is_alive():
             log.warning("the server did not stop within %.0f seconds", timeout)

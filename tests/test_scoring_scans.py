@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import sqlite3
 import threading
@@ -273,6 +274,138 @@ async def test_lead_that_went_cold_is_alerted_again_when_hot_again(company, aler
     repo.update_lead(lead.id, {"status": "qualified"})
     await services.alert_new_hot_leads(company.id)
     assert alerts == [[lead.id], [lead.id]]
+
+
+SLACK = "https://hooks.slack.com/services/T0/B0/x"
+
+
+def flaky_webhooks(monkeypatch: pytest.MonkeyPatch, answers: list[list[str]]) -> list[list[int]]:
+    """notify_hot_leads gives the webhooks reached, one entry of `answers` per alert ([] when every one failed: a
+    network drop); returns the lead ids of each alert tried."""
+    tried: list[list[int]] = []
+
+    async def notify(company, leads, client=None):
+        tried.append([lead.id for lead in leads])
+        return answers.pop(0) if answers else []
+
+    monkeypatch.setattr(services, "notify_hot_leads", notify)
+    return tried
+
+
+async def test_an_alert_that_reached_no_webhook_is_sent_at_the_next_tick_without_a_second_draft(company, monkeypatch):
+    """WP5.3: with the webhook unreachable at the first tick, the second tick alerts the same leads, and the auto-draft
+    made at the first tick isn't made again."""
+    repo.update_company(company.id, {"outreach": {"mode": "auto_draft"}, "notify": {"slack_webhook_url": SLACK}})
+    tried = flaky_webhooks(monkeypatch, [[], ["slack"]])
+    ann, _ = repo.upsert_lead(company.id, hot_lead_in())
+    bob, _ = repo.upsert_lead(company.id, hot_lead_in("Bob Hot"))
+    first = await services.alert_new_hot_leads(company.id)
+    assert first["notified"] == [] and sorted(first["newly_hot"]) == sorted([ann.id, bob.id]) and first["drafted"] == 2
+    drafts = len(repo.list_messages(company.id))
+    second = await services.alert_new_hot_leads(company.id)
+    assert second["notified"] == ["slack"] and second["retried"] == sorted([ann.id, bob.id])
+    assert second["newly_hot"] == [] and second["drafted"] == 0 and len(repo.list_messages(company.id)) == drafts
+    assert await services.alert_new_hot_leads(company.id) == {"newly_hot": [], "notified": [], "drafted": 0}
+    assert len(tried) == 2
+    assert await services.alert_active_companies() == {}  # nothing left to try
+
+
+async def test_a_failing_alert_is_tried_for_a_day_then_given_up(company, monkeypatch):
+    """WP5.3: a webhook that stays down is tried at every tick for 24 hours after the first failure, then the alert is
+    given up (the lead stays alerted, the scheduler stops trying)."""
+    repo.update_company(company.id, {"notify": {"slack_webhook_url": SLACK}})
+    tried = flaky_webhooks(monkeypatch, [])
+    clock = [repo.utcnow()]
+    monkeypatch.setattr(repo, "utcnow", lambda: clock[0])
+    ann, _ = repo.upsert_lead(company.id, hot_lead_in())
+    await services.alert_new_hot_leads(company.id)
+    for hours in (1, 22):
+        clock[0] += timedelta(hours=hours)
+        assert (await services.alert_new_hot_leads(company.id))["retried"] == [ann.id]
+    clock[0] += timedelta(hours=2)  # 25 hours after the first failure: the last try
+    await services.alert_new_hot_leads(company.id)
+    clock[0] += timedelta(hours=1)
+    assert await services.alert_new_hot_leads(company.id) == {"newly_hot": [], "notified": [], "drafted": 0}
+    assert len(tried) == 4
+    with db.connect() as c:
+        row = c.execute("SELECT alerted_at, alert_failed_at FROM leads WHERE id = ?", (ann.id,)).fetchone()
+    assert row["alerted_at"] and row["alert_failed_at"] is None
+
+
+async def test_without_webhooks_an_alert_is_never_tried_again(company, monkeypatch):
+    """WP5.3: no webhook set (the dashboard's own list shows hot leads): nothing to try again."""
+    tried = flaky_webhooks(monkeypatch, [])
+    repo.upsert_lead(company.id, hot_lead_in())
+    await services.alert_new_hot_leads(company.id)
+    assert (await services.alert_new_hot_leads(company.id))["newly_hot"] == [] and len(tried) == 1
+
+
+def test_a_scan_stamped_in_the_future_counts_as_due(company):
+    """WP5.2: a last scan stamped hours ahead (the computer's clock went back) doesn't stop the scans until then."""
+    now = repo.utcnow()
+    repo.set_last_scan(company.id, now + timedelta(hours=4))
+    assert company.id in [c.id for c in repo.companies_due_for_scan(now=now)]
+    repo.set_last_scan(company.id, now + timedelta(minutes=1))  # a clock a little ahead: within the slack
+    assert company.id not in [c.id for c in repo.companies_due_for_scan(now=now)]
+
+
+async def run_scheduler_until(monkeypatch: pytest.MonkeyPatch, settings, done) -> None:
+    """Runs the scheduler with 10 ms ticks until done() (or it stops by itself: a test failure)."""
+    monkeypatch.setattr(scheduler, "MIN_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(settings, "scheduler_tick_seconds", 0)
+    stop = asyncio.Event()
+    loop = asyncio.create_task(scheduler.scheduler_loop(stop))
+    for _ in range(300):
+        await asyncio.sleep(0.01)
+        if done() or loop.done():
+            break
+    stop.set()
+    await asyncio.wait_for(loop, 5)
+
+
+async def test_the_scheduler_survives_a_tick_that_fails(settings, monkeypatch, caplog):
+    """WP5.5: a scan, alert or auto-approve step that raises is logged and the next tick runs anyway."""
+    calls: list[str] = []
+
+    async def failing_once(name: str):
+        calls.append(name)
+        if calls.count(name) == 1:
+            raise RuntimeError(f"{name} broke")
+        return [] if name == "scan" else {}
+
+    monkeypatch.setattr(scheduler, "scan_due_companies", lambda: failing_once("scan"))
+    monkeypatch.setattr(scheduler, "alert_active_companies", lambda: failing_once("alert"))
+    monkeypatch.setattr(scheduler, "auto_approve_active_companies", lambda: failing_once("approve"))
+    with caplog.at_level(logging.ERROR, logger="openberry.scheduler"):
+        await run_scheduler_until(monkeypatch, settings, lambda: calls.count("approve") >= 2)
+    assert calls.count("scan") >= 2 and calls.count("alert") >= 2 and calls.count("approve") >= 2
+    for text in ("scheduler tick failed", "hot-lead alerts failed", "auto-approve failed"):
+        assert text in caplog.text
+
+
+async def test_the_email_loop_survives_a_tick_that_fails(monkeypatch, caplog):
+    """WP5.5: a send that raises (a bug, a full disk) is logged and the next tick sends again."""
+    sends: list[int] = []
+
+    def send_next_email(now=None):
+        sends.append(1)
+        if len(sends) == 1:
+            raise RuntimeError("send broke")
+        return {"status": "idle"}
+
+    monkeypatch.setattr(repo, "expire_email_claims", lambda now=None: None)
+    monkeypatch.setattr(services, "inbox_due", lambda now=None: False)
+    monkeypatch.setattr(services, "send_next_email", send_next_email)
+    stop = asyncio.Event()
+    with caplog.at_level(logging.ERROR, logger="openberry.scheduler"):
+        task = asyncio.create_task(scheduler.email_loop(stop, tick=0.01))
+        for _ in range(300):
+            await asyncio.sleep(0.01)
+            if len(sends) >= 2 or task.done():
+                break
+        stop.set()
+        await asyncio.wait_for(task, 5)
+    assert len(sends) >= 2 and "email loop tick failed" in caplog.text
 
 
 def test_upgrading_an_old_database_adds_alerted_at_without_re_alerting(settings):

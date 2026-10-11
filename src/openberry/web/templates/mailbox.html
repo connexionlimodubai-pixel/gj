@@ -44,9 +44,13 @@
   <div class="agent-pause" role="alert">
     {{ m.icon("alert", 18) }}
     <div class="min0 grow">
-      <p><strong>{% if mailbox.auth_failed %}Sending and inbox checks are paused until you fix the mailbox settings:{% else %}Sending is paused until {{ (mailbox.paused_until|todatetime)|local_dt }}:{% endif %}</strong></p>
+      <p><strong>{% if mailbox.login_refused %}Sending and inbox checks are paused until you fix the mailbox settings:{% elif mailbox.auth_failed %}Sending is paused until you fix the mailbox settings (replies are still read):{% else %}Sending is paused until {{ (mailbox.paused_until|todatetime)|local_dt }}:{% endif %}</strong></p>
       <p class="agent-reason">{{ mailbox.pause_reason or "No details given." }}</p>
-      <p class="small muted">{% if mailbox.auth_failed %}Save the settings with the right password, or click Try again or Check inbox once it is fixed.{% else %}It starts again by itself then. Try again starts it now.{% endif %}</p>
+      {% if mailbox.auth_failed and mailbox.paused_until %}
+      <p><strong>Also paused until {{ (mailbox.paused_until|todatetime)|local_dt }}:</strong></p>
+      <p class="agent-reason">{{ mailbox.wait_reason or "No details given." }}</p>
+      {% endif %}
+      <p class="small muted">{% if mailbox.auth_failed %}Save the settings with the right password, or click {% if mailbox.login_refused %}Try again or Check inbox{% else %}Try again{% endif %} once it is fixed.{% if mailbox.paused_until %} Saving them doesn't lift your mail provider's block: check your mailbox in the provider's webmail before you click Try again.{% endif %}{% else %}It starts again by itself then. Try again starts it now.{% endif %}</p>
     </div>
     <form method="post" action="/mailbox">{{ m.csrf() }}<button class="btn btn-sm" type="submit" name="action" value="retry">{{ m.icon("refresh", 14) }}Try again</button></form>
   </div>
@@ -102,8 +106,8 @@
         {% if locked.password %}
         <p class="key-status">Set outside OpenBerry ({{ states.password.name }}).</p>
         {% else %}
-        <input class="input" id="mb-password" name="password" type="password" value="" autocomplete="off" spellcheck="false" autocapitalize="off"{% if not password_saved %} required{% endif %} placeholder="{{ 'Saved. Type a new one to change it.' if password_saved else 'Your mailbox password or app password' }}" aria-describedby="mb-password-help">
-        <p class="help" id="mb-password-help">{% if password_saved %}{{ m.icon("check", 12) }} Saved. Leave it empty to keep it.{% else %}With two-step sign-in, use an app password.{% endif %}</p>
+        <input class="input" id="mb-password" name="password" type="password" value="" autocomplete="off" spellcheck="false" autocapitalize="off"{% if not password_saved %} required{% endif %} placeholder="{{ 'Saved. Type a new one to change it.' if password_saved else 'Your mailbox password or app password' }}" aria-describedby="mb-password-help"{% if typed %} autofocus{% endif %}>
+        <p class="help" id="mb-password-help">{% if typed %}{{ m.icon("alert", 12) }} Passwords are never shown again: type it again to save these settings.{% elif password_saved %}{{ m.icon("check", 12) }} Saved. Leave it empty to keep it.{% else %}With two-step sign-in, use an app password.{% endif %}</p>
         {% endif %}
       </div>
     </div>
@@ -154,7 +158,7 @@
   <ul class="list suppression-list">
     {% for s in suppressions %}
     <li class="list-item">
-      <div class="min0 grow"><span class="lead-name break">{{ s.email }}</span><span class="sub">{{ {"opt_out": "Opted out", "bounce": "Bounced", "manual": "Marked by you"}[s.reason] }} · {{ m.when(s.created_at) }}{% if s.detail %} · {{ s.detail }}{% endif %}</span></div>
+      <div class="min0 grow"><span class="lead-name break">{{ s.email }}</span><span class="sub">{{ {"opt_out": "Opted out", "bounce": "Bounced", "manual": "Marked by you"}[s.reason] }} · {{ m.when(s.created_at) }}{% if s.detail %} · <bdi>{{ s.detail }}</bdi>{% endif %}</span></div>
       <form method="post" action="/mailbox">{{ m.csrf() }}<input type="hidden" name="suppression_id" value="{{ s.id }}"><button class="btn btn-sm btn-ghost" type="submit" name="action" value="unsuppress" data-confirm="{{ 'Only remove it if this person asked to hear from you again. Remove ' ~ s.email ~ '?' if s.reason == 'opt_out' else 'Remove ' ~ s.email ~ ' from this list? OpenBerry may email it again.' }}">Remove</button></form>
     </li>
     {% endfor %}

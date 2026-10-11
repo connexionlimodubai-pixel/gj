@@ -48,6 +48,22 @@
 {% if email.attention %}
 <div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}{% set one = email.attention|length == 1 %}<p><strong>{{ email.attention|length|plural("email") }} from your mailbox need{{ "s" if one }} you:</strong> {{ "it" if one else "they" }} may have been sent, or sending failed. <a href="{{ base }}/outreach#email">Check {{ "it" if one else "them" }} on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
 {% endif %}
+{% if email.hints %}
+<section class="card hint-card" aria-labelledby="hints-title">
+  <header class="card-head"><div><h2 id="hints-title" class="title-icon">{{ m.icon("alert") }}{{ email.hints|length|plural("reply", "replies") }} may ask not to be emailed again</h2>
+    <p class="card-sub">Each reply already stopped that lead's emails. Say whether it is an opt-out.</p></div></header>
+  <ul class="list email-attention">
+    {% for msg in email.hints[:5] %}
+    {% set lead = hint_leads.get(msg.lead_id) %}
+    <li class="list-item"><div class="min0 grow">
+      <a class="lead-name" href="{{ base }}/leads/{{ msg.lead_id }}#msg-{{ msg.id }}">{% if lead %}{{ m.lead_title(lead) }}{% else %}Lead {{ msg.lead_id }}{% endif %}</a>
+      {{ m.opt_out_hint(msg, base, msg.email_from if lead and msg.email_from and msg.email_from != lead.email|lower else "") }}
+    </div></li>
+    {% endfor %}
+  </ul>
+  {% if email.hints|length > 5 %}<p class="small muted">+{{ email.hints|length - 5 }} more on the <a href="{{ base }}/outreach#email">Outreach page</a>.</p>{% endif %}
+</section>
+{% endif %}
 
 <section class="kpis" aria-label="Key numbers">
   {% for k in kpis %}

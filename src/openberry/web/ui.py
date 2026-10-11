@@ -60,8 +60,9 @@ CHANNEL_LABELS = {
 SOURCE_LABELS = {
     "hackernews": "Hacker News", "reddit": "Reddit", "github": "GitHub", "greenhouse": "Greenhouse",
     "lever": "Lever", "ashby": "Ashby", "google_news": "Google News", "rss": "RSS", "linkedin": "LinkedIn",
-    "web": "Web", "manual": "Manual", "claude": "Claude", "csv": "CSV import", "demo": "Demo",
+    "web": "Web", "manual": "Manual", "claude": "Claude", "csv": "CSV import",
     "sec_edgar": "SEC EDGAR", "google_places": "Google Maps",
+    "demo": "Sample (old demo)",  # rows 0.1.x's demo left (sample_cleanup); no longer a filter option
 }
 LEAD_SOURCES = SIGNAL_SOURCES
 # ScanRun.status -> label; other statuses are shown humanized with a neutral badge.

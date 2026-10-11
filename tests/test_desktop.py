@@ -234,8 +234,9 @@ def lock_holder(home: Path) -> Iterator[desktop.InstanceLock]:
 # --------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("argv", [
-    ["serve", "--port", "9000"], ["mcp"], ["scan", "--company", "1"], ["demo"], ["rescore"], ["init-db"],
+    ["serve", "--port", "9000"], ["mcp"], ["scan", "--company", "1"], ["rescore"], ["init-db"],
     ["--version"], ["-h"], ["--help"], ["desktop", "--smoke"],
+    ["demo"], ["scna"],  # removed or mistyped commands too: the command line refuses them, the app doesn't start
 ])
 def test_the_app_executable_also_runs_cli_commands(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
@@ -243,6 +244,27 @@ def test_the_app_executable_also_runs_cli_commands(argv: list[str], monkeypatch:
     monkeypatch.setattr(desktop, "run", lambda *a, **k: pytest.fail("the app must not start"))
     desktop.main(argv)
     assert calls == [argv]
+
+
+@pytest.mark.parametrize("argv", [["demo"], ["scna"], ["demo", "--help"]])
+def test_unknown_commands_exit_2_without_starting_the_app(argv: list[str], monkeypatch: pytest.MonkeyPatch,
+                                                         capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(desktop, "run", lambda *a, **k: pytest.fail("the app must not start"))
+    with pytest.raises(SystemExit) as exc:
+        desktop.main(argv)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert f"invalid choice: '{argv[0]}'" in err
+    # `openberry-cli demo` from an old guide or script also says why it's gone and what to do instead.
+    assert ("The demo was removed in OpenBerry 0.2.0. Register your company" in err) is (argv[0] == "demo")
+
+
+def test_a_finder_argument_alone_still_starts_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    runs: list[Any] = []
+    monkeypatch.setattr(cli, "main", lambda argv: pytest.fail("not a CLI command"))
+    monkeypatch.setattr(desktop, "run", lambda args, stop=None: runs.append(args) or 0)
+    desktop.main(["-psn_0_1"])  # what older macOS Finders pass to a double-clicked app
+    assert runs[0].ignored == ["-psn_0_1"]
 
 
 def test_other_arguments_start_the_app(monkeypatch: pytest.MonkeyPatch) -> None:

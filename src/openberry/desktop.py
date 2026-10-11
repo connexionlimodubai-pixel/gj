@@ -59,7 +59,9 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 HEALTHZ_APP = "openberry"  # /healthz answers {"ok": true, "app": "openberry"} (web/app.py)
 # First arguments handed to the command line (cli.main), so the packaged app's executable also works
 # as `openberry`: Claude Desktop can start `OpenBerry mcp`, and CI can run `OpenBerry desktop --smoke`.
-CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "demo", "rescore", "init-db", "--version", "-h", "--help"})
+# Any other first argument that isn't an option goes there too, so a typo or a removed command gets
+# argparse's "invalid choice" instead of starting the app.
+CLI_COMMANDS = frozenset({"serve", "desktop", "mcp", "scan", "rescore", "init-db", "--version", "-h", "--help"})
 
 
 class DesktopError(RuntimeError):
@@ -107,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         multiprocessing.freeze_support()  # a packaged Windows app must not re-launch itself for child processes
     args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] in CLI_COMMANDS:
+    if args and (args[0] in CLI_COMMANDS or not args[0].startswith("-")):  # options (macOS's -psn_...) start the app
         from . import cli
 
         # The windowed executable has no console: `OpenBerry serve` would crash in uvicorn's log setup

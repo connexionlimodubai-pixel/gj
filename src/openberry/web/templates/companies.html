@@ -61,10 +61,9 @@
 {% else %}
 <div class="card">
   {% call m.empty("board", "No companies registered yet") %}
-  <p>Register your company to start collecting intent signals, or load the demo to look around first.</p>
+  <p>Register your company to start collecting intent signals.</p>
   <div class="btn-row center">
     <a class="btn btn-primary" href="/register">{{ m.icon("plus") }}Register a company</a>
-    <form method="post" action="/demo">{{ m.csrf() }}<button class="btn" type="submit">{{ m.icon("sparkles") }}Load demo data</button></form>
   </div>
   {% endcall %}
 </div>

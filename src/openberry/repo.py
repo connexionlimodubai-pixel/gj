@@ -1645,6 +1645,10 @@ def _sent_before_problem(msg: Message, sent: set[tuple[str, int]]) -> str:
 
 def _agent_send_problem(c: sqlite3.Connection, company: Company, msg: Message, lead: Lead, now: datetime) -> str:
     """Why the agent must not send this message, or "" if it may (status and company switches aside)."""
+    from .sample_cleanup import sample_lead_problem  # sample_cleanup imports repo
+
+    if problem := sample_lead_problem(lead):
+        return problem
     if msg.direction != "outbound":
         return "it is not an outbound message"
     if msg.sent_at is not None:  # e.g. sent, then set back to approved: never again, and never uncounted
@@ -1925,13 +1929,13 @@ def resume_agent_sending(company_id: int, conn: sqlite3.Connection | None = None
 # auto_approve_hours from when it was written or last edited, and at least that long after auto-approve was
 # turned on (auto_approve_since), so turning it on never approves a backlog at once. With AI agent sending on,
 # the user's browser agent may then send the approved LinkedIn messages, so auto-approve leaves alone whatever a
-# person should look at first: drafts the user held, leads a person handles or must never contact, a connection
-# note too long for the account, banned words, unfilled placeholders, an email without a subject, a step already
-# sent, the first LinkedIn message after a connection request (did they accept?), and a second message to the same
-# lead. A draft it leaves alone is flagged (messages.auto_blocked): once the reason goes away (the earlier message
-# was sent or skipped, the lead set back, a banned word removed...), it waits a full review window from then, so
-# nothing is approved the moment the reason goes away. send_queue and confirm_agent_sent still check every one of
-# the agent's own rules afterwards.
+# person should look at first: drafts the user held, fictional sample leads an older version left (sample_cleanup),
+# leads a person handles or must never contact, a connection note too long for the account, banned words, unfilled
+# placeholders, an email without a subject, a step already sent, the first LinkedIn message after a connection
+# request (did they accept?), and a second message to the same lead. A draft it leaves alone is flagged
+# (messages.auto_blocked): once the reason goes away (the earlier message was sent or skipped, the lead set back, a
+# banned word removed...), it waits a full review window from then, so nothing is approved the moment the reason
+# goes away. send_queue and confirm_agent_sent still check every one of the agent's own rules afterwards.
 
 AUTO_ONE_PER_LEAD_APPROVED = ("another message to this lead is approved and not sent yet (one message per lead at a "
                               "time)")
@@ -1963,6 +1967,8 @@ def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
     (a newer row) still goes before the step-2 message that follows it.
     A draft repeating a step already sent doesn't hold up the lead's other drafts: it is stale.
     """
+    from .sample_cleanup import sample_lead_problem  # sample_cleanup imports repo
+
     where, params = "company_id = ? AND direction = 'outbound' AND status = 'draft'", [company.id]
     if lead_id is not None:
         where += " AND lead_id = ?"
@@ -1999,7 +2005,8 @@ def _auto_approve_plan(c: sqlite3.Connection, company: Company, now: datetime,
         item["state"] = "due" if item["at"] <= now else "waiting"
         lead = leads.get(msg.lead_id)
         if lead is not None and lead.id not in lead_problems:
-            lead_problems[lead.id] = (_lead_status_problem(lead) or (LEAD_REPLIED if lead.id in replied else "")
+            lead_problems[lead.id] = (sample_lead_problem(lead) or _lead_status_problem(lead)
+                                      or (LEAD_REPLIED if lead.id in replied else "")
                                       or _excluded_problem(company, lead))
         sent_before = {(channel, step) for mid, channel, step in sent.get(msg.lead_id, []) if mid != msg.id}
         sent_channels = {channel for channel, _ in sent_before}
@@ -2527,6 +2534,10 @@ def _email_send_problem(company: Company, msg: Message, lead: Lead, thread: list
     """Why OpenBerry must not send this email now ("" if it may), the company-wide switches and limits aside.
 
     `thread` is _email_threads': the lead's messages and the other emails to its address."""
+    from .sample_cleanup import sample_lead_problem  # sample_cleanup imports repo
+
+    if problem := sample_lead_problem(lead):
+        return problem
     if msg.direction != "outbound" or msg.channel != "email" or msg.status != "approved":
         return "it is not an approved email"
     if msg.sent_at is not None:

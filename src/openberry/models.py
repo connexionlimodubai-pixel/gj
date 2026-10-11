@@ -34,7 +34,7 @@ PROSPECT_TYPES = ("business_search",)
 
 SIGNAL_SOURCES = (
     "hackernews", "reddit", "github", "greenhouse", "lever", "ashby",
-    "google_news", "rss", "sec_edgar", "google_places", "linkedin", "web", "manual", "claude", "csv", "demo",
+    "google_news", "rss", "sec_edgar", "google_places", "linkedin", "web", "manual", "claude", "csv",
 )
 
 SENIORITIES: dict[str, str] = {

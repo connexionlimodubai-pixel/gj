@@ -119,7 +119,7 @@ def browser_submit(client: TestClient, page: str, action: str):
 def test_pages_render_on_empty_database(client):
     home = client.get("/")
     assert home.status_code == 200
-    assert "Register your company" in home.text and "Load demo data" in home.text
+    assert "Register your company" in home.text and "Load demo data" not in home.text
     for path in ("/companies", "/register", "/help"):
         resp = client.get(path)
         assert resp.status_code == 200, path
@@ -1130,7 +1130,11 @@ def test_help_uses_the_address_the_page_was_opened_on(client, web_settings):
     blocks = _help_blocks(page)
     assert '"http://127.0.0.1:8977/mcp"' in blocks["cmd-http"]
     # Quoted, so zsh doesn't treat the "?" as a glob.
-    assert blocks["curl-example"].startswith('curl -s "http://127.0.0.1:8977/api/companies/1/leads?tier=hot" ')
+    assert blocks["curl-example"].startswith('curl -s "http://127.0.0.1:8977/api/companies" ')  # no company yet
+    company = repo.create_company(CompanyIn(name="Acme"))
+    blocks = _help_blocks(other_port.get("/help").text)
+    curl = f'curl -s "http://127.0.0.1:8977/api/companies/{company.id}/leads?tier=hot" '
+    assert blocks["curl-example"].startswith(curl)
     assert "8000" not in blocks["cmd-http"] + blocks["curl-example"]
     assert "but <code>OPENBERRY_BASE_URL</code> is <code>http://127.0.0.1:8000</code>" in page
     same = TestClient(client.app, base_url="http://127.0.0.1:8000").get("/help").text
@@ -1215,8 +1219,43 @@ def test_people_tile_counts_people_added_this_week(sample_company):
 
 def test_source_filter_lists_each_source_once(client, company):
     assert len(ui.LEAD_SOURCES) == len(set(ui.LEAD_SOURCES))
-    assert client.get(f"/c/{company.id}/leads").text.count('<option value="demo"') == 1
-    assert client.get(f"/c/{company.id}/signals").text.count('<option value="demo"') == 1
+    for path in (f"/c/{company.id}/leads", f"/c/{company.id}/signals"):
+        page = client.get(path).text
+        assert page.count('<option value="manual"') == 1 and page.count('<option value="google_places"') == 1
+        assert '<option value="demo"' not in page  # the demo is gone: not a filter in every company any more
+
+
+# --------------------------------------------------------------------------------------
+# The demo is gone (0.2.0): first run, help, routes
+# --------------------------------------------------------------------------------------
+
+def test_first_run_has_no_demo_and_says_how_sending_works(client):
+    home = client.get("/").text
+    assert "demo" not in home.lower()
+    assert "Register your company" in home and "Set up with Claude" in home and 'href="/help#h-prompts"' in home
+    assert "sent without you" not in home
+    assert "Nothing is sent until it is approved: by you, or by auto-approve if you turn it on." in home
+    assert "Google Maps businesses (with your API key)" in home and "your own mailbox" in home
+    board = client.get("/companies").text
+    assert "No companies registered yet" in board and "demo" not in board.lower()
+
+
+def test_help_without_a_company_offers_the_onboarding_prompt(client):
+    page = client.get("/help").text
+    assert "company 1" not in page and "/api/companies/1" not in page
+    assert "onboard_company" in page and 'curl -s "http://testserver/api/companies" ' in page
+
+
+def test_help_with_a_company_names_it(client, company):
+    page = client.get("/help").text
+    assert f"company {company.id}&#39;s profile" in page and f"/api/companies/{company.id}/leads?tier=hot" in page
+
+
+def test_the_demo_route_is_gone(client):
+    from openberry.sample_cleanup import REMOVED_COMMAND
+
+    assert post(client, f"/{REMOVED_COMMAND}").status_code == 404  # with a valid CSRF token: the route is gone
+    assert repo.list_companies() == []
 
 
 def test_source_copy_uses_form_labels_and_points_reddit_at_the_server_setup(client, company):

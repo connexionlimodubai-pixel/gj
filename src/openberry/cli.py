@@ -1,4 +1,4 @@
-"""Command line: `openberry serve | desktop | mcp | scan | demo | rescore | init-db`."""
+"""Command line: `openberry serve | desktop | mcp | scan | rescore | init-db`."""
 
 from __future__ import annotations
 
@@ -83,13 +83,6 @@ def _scan(args: argparse.Namespace) -> None:
         print(json.dumps({"company_id": company_id, **stats}, indent=2, default=str))
 
 
-def _demo(_: argparse.Namespace) -> None:
-    from .seed import seed_demo
-
-    company_id = seed_demo()
-    print(f"Demo company created with id {company_id}. Run `openberry serve` and open http://127.0.0.1:8000")
-
-
 def _rescore(_: argparse.Namespace) -> None:
     from . import repo
 
@@ -131,14 +124,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", action="append", help="only this collector (repeatable), e.g. hackernews")
     p.set_defaults(func=_scan)
 
-    sub.add_parser("demo", help="create a demo company with sample leads").set_defaults(func=_demo)
     sub.add_parser("rescore", help="recompute every lead score").set_defaults(func=_rescore)
     sub.add_parser("init-db", help="create the SQLite database").set_defaults(func=_init_db)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit:
+        from .sample_cleanup import REMOVED_COMMAND, REMOVED_COMMAND_NOTE
+
+        if argv[:1] == [REMOVED_COMMAND]:  # argparse said "invalid choice"; say why it's gone and what to do
+            print(REMOVED_COMMAND_NOTE, file=sys.stderr)
+        raise
     # Logs go to stderr: stdout belongs to the MCP protocol in `openberry mcp`.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # it logs full request URLs at INFO; webhook URLs are secrets

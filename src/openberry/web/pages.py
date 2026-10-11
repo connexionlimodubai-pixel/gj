@@ -241,7 +241,7 @@ def sources_panel(company: Company) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------------------
-# Home, demo, company switcher, registration board
+# Home, company switcher, registration board
 # --------------------------------------------------------------------------------------
 
 @router.get("/")
@@ -252,15 +252,6 @@ def home(request: Request) -> Response:
     remembered = request.session.get(COMPANY_KEY)
     target = next((c for c in companies if c.id == remembered), companies[0])
     return redirect(f"/c/{target.id}")
-
-
-@router.post("/demo")
-def load_demo(request: Request, form: FormData = Depends(checked_form)) -> Response:
-    from ..seed import seed_demo
-
-    company_id = seed_demo()
-    flash(request, "Demo data loaded. Everything here is fictional; delete the demo company when you're done.")
-    return redirect(f"/c/{company_id}")
 
 
 @router.get("/switch")
@@ -371,7 +362,7 @@ def help_page(request: Request) -> Response:
     packaged = bool(getattr(sys, "frozen", False))
     return render(request, "help.html", {
         "active": "help", "title": "Connect Claude & API", "db_path": str(settings.db_path.resolve()),
-        "api_token_set": bool(settings.api_token), "example_company": companies[0].id if companies else 1,
+        "api_token_set": bool(settings.api_token), "example_company": companies[0].id if companies else None,
         "http_mcp": settings.http_mcp_enabled, "launch": launch, "launch_shell": shell_line(
             [launch["command"], *launch["args"]]), "docker_shell": shell_line(DOCKER_MCP),
         "desktop_config": json.dumps(desktop, indent=2, ensure_ascii=False),

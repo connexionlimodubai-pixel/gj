@@ -62,11 +62,10 @@ You need [uv](https://docs.astral.sh/uv/getting-started/installation/), a fast P
 
 ```bash
 git clone https://github.com/connexionlimodubai-pixel/gj.git openberry && cd openberry
-uv run openberry demo     # optional: a demo company with sample leads (all fictional)
 uv run openberry serve    # → open http://127.0.0.1:8000
 ```
 
-Click **Register company**, fill in the form, then **Run scan now** on your dashboard.
+Register your company (or ask Claude to interview you: see below), then click **Run scan now** on your dashboard.
 Data lives in `~/.openberry/openberry.db` (move it with `OPENBERRY_HOME` or `OPENBERRY_DB`).
 
 ### With Docker
@@ -97,7 +96,7 @@ For **Claude Code**: run `claude` inside this folder (the included `.mcp.json` r
 
 Then ask Claude things like:
 - *"Set up OpenBerry for my company: read example.com, interview me, and register us."*
-- *"Run today's lead hunt for company 1 and show me the 10 hottest leads with why."*
+- *"Run today's lead hunt for my company and show me the 10 hottest leads with why."*
 - *"Find the decision-makers at the companies that are hiring, and add them."*
 - *"Draft LinkedIn connection notes for every hot lead that has no message yet."*
 
@@ -175,7 +174,7 @@ openberry desktop [--no-window]                # the dashboard in its own window
 openberry mcp                                  # MCP over stdio (what Claude Desktop runs)
 openberry mcp --http --port 8001               # standalone MCP over HTTP (bearer token)
 openberry scan [--company 1] [--source hackernews]
-openberry demo | rescore | init-db
+openberry rescore | init-db
 ```
 (Prefix with `uv run` if you haven't installed it with `pip install .`.)
 If you change `--host` or `--port`, set `OPENBERRY_BASE_URL` to the URL you open in the browser: Claude's links use it,

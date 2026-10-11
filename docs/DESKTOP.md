@@ -83,8 +83,8 @@ The window uses Microsoft Edge WebView2, which Windows 10 and 11 already include
 
 ## Using the app
 
-- The first time, choose **Load demo data** to look around with made-up leads, or **Register your company**
-  to start for real.
+- The first time, choose **Register your company** and fill in the form, or [connect Claude](#connect-claude-desktop)
+  and ask it to interview you and register your company.
 - The dashboard runs on your computer at `http://127.0.0.1:8000`, or at the next free number up to 8099
   if 8000 is taken. Only your own computer can open it.
 - If you open the app while it is already running, it doesn't start a second copy. On a Mac it brings
@@ -251,7 +251,7 @@ How it fits together:
   `packaging/launcher.py`, and they share the `_internal` folder:
   - `OpenBerry` has no console.
   - `openberry-cli` has a console, for Claude Desktop's stdio and for every `openberry` command
-    (`openberry-cli serve`, `openberry-cli demo`, …).
+    (`openberry-cli serve`, `openberry-cli scan`, …).
 
   Both run `openberry.desktop.main`. On a Mac the spec wraps the folder into `OpenBerry.app`
   (`io.openberry.desktop`), with both executables in `Contents/MacOS`. On Linux it leaves out pywebview.
@@ -262,10 +262,10 @@ How it fits together:
   - `--release-tag vX.Y.Z` checks the version.
 - **`packaging/smoke_test.py`** checks a build with a temporary data folder:
   1. `--version`
-  2. `demo`
-  3. `serve`: health check, the demo dashboard, the Connect Claude page and a static file.
-  4. An MCP handshake over stdio with `tools/list` (25 tools) and a tool call.
-  5. `OpenBerry --smoke`: the app starts its server, checks it and stops, without a window.
+  2. `serve`: health check, then it registers a company and a lead through the JSON API and opens the dashboard,
+     the lead's page, the Connect Claude page and a static file.
+  3. An MCP handshake over stdio with `tools/list` (25 tools) and a tool call that sees that company.
+  4. `OpenBerry --smoke`: the app starts its server, checks it and stops, without a window.
 
   It exits with an error and says what broke.
 - **`packaging/icons/`** holds the app icons. `packaging/make_icons.py` makes them from the dashboard's logo.

@@ -49,8 +49,9 @@
 <div class="flash flash-warning agent-banner" role="alert">{{ m.icon("alert") }}{% set one = email.attention|length == 1 %}<p><strong>{{ email.attention|length|plural("email") }} from your mailbox need{{ "s" if one }} you:</strong> {{ "it" if one else "they" }} may have been sent, or sending failed. <a href="{{ base }}/outreach#email">Check {{ "it" if one else "them" }} on the Outreach page{{ m.icon("chevron-right", 12) }}</a></p></div>
 {% endif %}
 {% if email.hints %}
+{# One row per lead to decide on: a colleague's note about several leads is on each of them, so leads are counted. #}
 <section class="card hint-card" aria-labelledby="hints-title">
-  <header class="card-head"><div><h2 id="hints-title" class="title-icon">{{ m.icon("alert") }}{{ email.hints|length|plural("reply", "replies") }} may ask not to be emailed again</h2>
+  <header class="card-head"><div><h2 id="hints-title" class="title-icon">{{ m.icon("alert") }}{{ email.hints|map(attribute="lead_id")|unique|list|length|plural("lead") }} may not want to be emailed again</h2>
     <p class="card-sub">Each reply already stopped that lead's emails. Say whether it is an opt-out.</p></div></header>
   <ul class="list email-attention">
     {% for msg in email.hints[:5] %}

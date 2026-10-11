@@ -38,7 +38,7 @@ MESSAGE_ACTIONS = {"save": None, "approve": "approved", "sent": "sent", "skip": 
 HOLD_ACTIONS = {"hold": True, "release": False}
 # What the lead page's timeline shows of what came back to the mailbox (replies are messages of their own).
 EMAIL_TIMELINE_EVENTS = ("auto_reply", "bounce", "soft_bounce", "policy_reject", "opt_out", "send_failed", "unknown",
-                         "resolved")
+                         "resolved", "edited")
 NO_SUBJECT = "Add a subject first: an email needs one."
 
 

@@ -687,13 +687,52 @@ def test_a_reply_that_looks_like_an_opt_out_asks_you_on_every_page(client, compa
         assert "Looks like an opt-out" in text and "remove me from your list" in text, where
         assert f'action="{base}/messages/{hint.id}/opt-out"' in page, where
         assert 'value="confirm"' in page and "Never email again" in text and "Not an opt-out" in text, where
-    assert "may ask not to be emailed again" in pages["dashboard"]
+    assert "may not want to be emailed again" in pages["dashboard"]
     resp = post(client, f"{base}/messages/{hint.id}/opt-out", {"action": "dismiss", "next": f"{base}/leads/{lina}"},
                 page=f"{base}/leads/{lina}")
     page = follow(client, resp)
     assert "it isn't an opt-out" in flashes(page) and "Looks like an opt-out" not in page
     assert repo.get_lead(lina).status == "replied" and not repo.suppressed_addresses(["lina@gulfbank.example"])
-    assert "may ask not to be emailed again" not in client.get(base).text
+    assert "may not want to be emailed again" not in client.get(base).text
+
+
+def test_a_colleagues_note_about_several_leads_is_one_reply(client, company, offline_mail):
+    """P2-INBOX-2: three people at a hotel were emailed, and a PA writes about "our GM" without naming him. The note is
+    on each lead's page, flagged on each so the user says which lead it is about. It is one reply in the numbers
+    (Claude's pipeline report too) and on the Replies tab. The dashboard counts the leads to decide on."""
+    ready(company)
+    leads = []
+    for hours, name in ((3, "Omar"), (2, "Karim"), (1, "Rania")):
+        address = f"{name.lower()}@desert-pearl-hotel.example"
+        lead = lead_with_email(company, address, name)
+        msg = repo.create_message(lead, "Hi, we drive your guests to and from DXB.", channel="email",
+                                  subject="Airport transfers", status="approved")
+        with db.connect() as c:
+            c.execute("UPDATE messages SET status = 'sent', sent_at = ?, sent_via = 'smtp', email_state = 'sent', "
+                      "email_message_id = ?, email_to = ? WHERE id = ?",
+                      (repo.iso(repo.utcnow() - timedelta(hours=hours)), f"<{name}-1@acme-mail.example>", address,
+                       msg.id))
+        leads.append(lead)
+    assert services.check_inbox()["status"] == "ok"
+    offline_mail.deliver((f"From: Noura <pa@desert-pearl-hotel.example>\r\nTo: {FROM}\r\n"
+                          "Subject: RE: Airport transfers\r\nMessage-ID: <pa-note@desert-pearl-hotel.example>\r\n"
+                          "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                          "Our GM asked me to tell you: please remove him from your list.\r\n").encode())
+    assert services.check_inbox()["recorded"] == 1
+    assert len(repo.opt_out_hints(company.id)) == 3  # the user decides for each lead
+    assert repo.company_stats(company.id)["messages"]["received"] == 1
+    assert mcp_server.pipeline_report(company.id)["stats"]["messages"]["received"] == 1
+    base = f"/c/{company.id}"
+    replies = client.get(f"{base}/outreach?tab=replies").text
+    assert re.search(r'\?tab=replies"[^>]*>Replies<span class="count">1</span>', replies)
+    assert len(re.findall(r'class="card queue-item"', replies)) == 1 and "please remove him from your list" in replies
+    dashboard = html_lib.unescape(client.get(base).text)
+    assert "3 leads may not want to be emailed again" in dashboard
+    for lead in leads:
+        page = html_lib.unescape(client.get(f"{base}/leads/{lead}").text)
+        # "· found in your inbox" is the note's own line: the opt-out form's help also says "found in your inbox".
+        assert "pa@desert-pearl-hotel.example</bdi> wrote about" in page and "· found in your inbox" in page
+        assert "please remove him from your list" in page and 'value="confirm"' in page
 
 
 def test_never_email_again_on_a_flagged_reply_is_the_full_opt_out(client, company, offline_mail):
@@ -807,6 +846,26 @@ def test_an_email_that_may_have_been_sent_is_read_only_on_the_lead_page(client, 
                 page=f"/c/{company.id}/outreach")
     flashed = flashes(follow(client, resp))
     assert "It is a draft now: approve it again" in flashed and "sent again" not in flashed
+
+
+def test_an_email_edited_after_send_again_says_so_on_the_lead_page(client, company):
+    """P2-INBOX-4: an email that may have been sent goes back to the queue with Send again, and the user changes its
+    text on the lead page. The timeline says the first copy may have had the old text, so a reply to it stops this
+    email without marking it sent."""
+    ready(company)
+    lina = lead_with_email(company)
+    msg = repo.create_message(lina, "Hello", channel="email", subject="Cars", status="approved")
+    with db.connect() as c:
+        c.execute("UPDATE messages SET email_state = 'unknown', email_claimed_at = ? WHERE id = ?", (repo.iso(), msg.id))
+        c.execute("INSERT INTO email_events (company_id, lead_id, message_id, kind, detail, created_at) "
+                  "VALUES (?, ?, ?, 'unknown', 'The connection broke', ?)", (company.id, lina, msg.id, repo.iso()))
+    base, lead_page = f"/c/{company.id}", f"/c/{company.id}/leads/{lina}"
+    follow(client, post(client, f"{base}/messages/{msg.id}/email", {"action": "send_again"}, page=f"{base}/outreach"))
+    resp = post(client, f"{base}/messages/{msg.id}", {"action": "save", "subject": "Cars", "body": "Hello, new text.",
+                                                      "next": lead_page}, page=lead_page)
+    page = html_lib.unescape(follow(client, resp))
+    assert "Text changed" in page and repo.EDITED_AFTER_MAYBE_SENT in page
+    assert repo.get_message(msg.id).body == "Hello, new text."
 
 
 def test_replies_and_details_are_shown_in_the_writers_direction(client, company, offline_mail):

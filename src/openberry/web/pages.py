@@ -541,7 +541,9 @@ def outreach_page(request: Request, company_id: int, tab: str = "drafts") -> Res
     due = repo.auto_approve_due(company_id)
     tab = choice(tab, dict(OUTREACH_TABS)) or "drafts"
     counts = repo.company_stats(company_id)["messages"]
-    replies = repo.list_messages(company_id, direction="inbound", limit=200)
+    # A colleague's note also put on the other leads it may be about is one reply: listed once (each lead's page has it).
+    replies = [m for m in repo.list_messages(company_id, direction="inbound", limit=200)
+               if m.generated_by != repo.INBOX_COPY]
     followups = repo.followups_due(company_id)
     tab_counts = {"drafts": counts["draft"], "approved": counts["approved"], "sent": counts["sent"],
                   "replies": len(replies), "followups": len(followups)}

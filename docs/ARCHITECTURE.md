@@ -176,7 +176,9 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
 - **Files:** `openberry` and the desktop app run with umask 077. The data folder, `logs/` and `backups/` are created with
   mode 0700, and the database, its `-wal` and `-shm` and every backup are set to 0600 (Linux, macOS, Docker's `/data`).
   At start (`config.private_files`) an existing data folder (`OPENBERRY_HOME`) is set to 0700 and its `.env` to 0600 when
-  the user owns them, so a folder an older version made is private too. A failed chmod never stops the start.
+  the user owns them, so a folder an older version made is private too. Only a real folder and a regular file are
+  changed: a symlink, a device such as `/dev/null`, a FIFO or a socket is left alone. A failed chmod never stops the
+  start.
 - **Headers:** a strict CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: same-origin`, `Permissions-Policy` and
   `Cross-Origin-Opener-Policy: same-origin` on every response, error pages included; `Cache-Control: no-store` on everything
   but `/static`; HSTS when `OPENBERRY_BASE_URL` is https. `/api/openapi.json` needs a login or the API token in server mode.

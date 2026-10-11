@@ -350,6 +350,35 @@ def test_another_accounts_data_folder_is_left_alone_and_a_failed_chmod_never_sto
 
 
 @posix_only
+def test_only_a_regular_env_file_and_a_real_data_folder_are_made_private(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2F-2: OPENBERRY_ENV_FILE=/dev/null (a device) or a FIFO reads as an empty file and keeps its mode: as root,
+    chmod 0600 on /dev/null would lock every other account out of it. A symlinked .env or data folder is left alone
+    too: its target may be anywhere."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    elsewhere.chmod(0o755)
+    shared_env = elsewhere / "openberry.env"
+    shared_env.write_text("GITHUB_TOKEN=x\n", encoding="utf-8")
+    shared_env.chmod(0o644)
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    fifo.chmod(0o666)
+    (tmp_path / "link.env").symlink_to(shared_env)
+    (tmp_path / "home").symlink_to(elsewhere, target_is_directory=True)
+    monkeypatch.setattr(config, "OPENBERRY_HOME", tmp_path / "home")
+    for env_file in (fifo, tmp_path / "link.env"):
+        monkeypatch.setenv("OPENBERRY_ENV_FILE", str(env_file))
+        config.private_files()
+        assert mode(fifo) == 0o666 and stat.S_ISFIFO(fifo.stat().st_mode)
+        assert mode(shared_env) == 0o644 and mode(elsewhere) == 0o755
+    monkeypatch.setenv("OPENBERRY_ENV_FILE", str(shared_env))  # the file itself, not a link to it
+    monkeypatch.setattr(config, "OPENBERRY_HOME", elsewhere)
+    config.private_files()
+    assert mode(shared_env) == 0o600 and mode(elsewhere) == 0o700
+
+
+@posix_only
 def test_a_data_folder_set_to_the_home_folder_keeps_its_permissions(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     me = tmp_path / "me"

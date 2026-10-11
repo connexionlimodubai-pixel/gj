@@ -21,6 +21,7 @@ from openberry import backups, cli, db, repo, sample_cleanup
 from openberry.mcp_server import build_server
 from openberry.models import CompanyIn, LeadIn, SignalIn
 from openberry.sample_cleanup import SAMPLE_LEAD_REASON, PlanChanged, cleanup_plan, is_sample_lead
+from openberry.web import forms
 from openberry.web.app import create_app
 from sample_data import LEGACY_NAME, _company, seed_sample_company
 
@@ -31,6 +32,9 @@ CSRF_META = re.compile(r'<meta name="csrf-token" content="([^"]+)">')
 PLAN_FIELD = re.compile(r'name="plan" value="([^"]+)"')
 TABLES = ("companies", "leads", "lead_keys", "signals", "messages", "scan_runs", "place_ids", "email_events",
           "email_suppressions", "api_usage")
+# Claude's note on a sample company that is still fictional (CleanupPlan.repurposed is False).
+FICTIONAL = ("This is the sample company from the old demo: fictional people and companies, never contacted. Don't "
+             "work on it.")
 
 
 def legacy_company(**outreach: Any) -> int:
@@ -481,7 +485,8 @@ def test_a_sample_company_the_user_made_their_own_isnt_called_fictional(client, 
     repo.update_lead(lead_named(sample_id, "Priya Nair"), {"notes": "call her"})  # still a sample lead
     text = "This company still holds 13 sample leads from the old demo. Sample leads are never contacted."
     note, shown = list_companies_note(sample_id), sample_banner(client, sample_id)
-    assert note == f"{text} The user can remove them with the banner on its dashboard."
+    assert note == (f"{text} The banner on its dashboard removes the 12 untouched ones. The user can delete the "
+                    "others from their lead pages.")
     assert text in shown and f'href="/c/{sample_id}/sample">' in shown and "Remove sample leads" in shown
     for words in ("fictional", "Don't work on it", "Nothing is ever sent", "Delete sample company"):
         assert words not in note and words not in shown, words
@@ -509,10 +514,99 @@ def test_leads_added_to_the_sample_company_dont_make_it_the_users(client, monkey
     later(monkeypatch)
     repo.upsert_lead(sample_id, LeadIn(full_name="Real HN user", source="hackernews",
                                        profile_url="https://news.ycombinator.com/user?id=x"))
-    assert list_companies_note(sample_id) == sample_cleanup.COMPANY_NOTE
+    assert list_companies_note(sample_id) == (
+        f"{FICTIONAL} The banner on its dashboard removes only its 13 untouched sample leads and keeps the company. "
+        "The user can delete the company on its Company profile page (Delete company).")
     shown = sample_banner(client, sample_id)
     assert f"{sample_cleanup.BANNER_TEXT} Nothing is ever sent to them." in shown
     assert "Remove sample leads" in shown  # the company holds a lead that isn't sample data: it stays
+
+
+def page_button(client: TestClient, company_id: int) -> str:
+    """The removal page's confirm button."""
+    page = html.unescape(client.get(f"/c/{company_id}/sample").text)
+    button = re.search(r'<button class="btn btn-danger" type="submit">(.*?)</button>', page, re.S).group(1)
+    return re.sub(r"<[^>]+>", "", button).strip()
+
+
+# What the removal page's button says for each banner button (CleanupPlan.removes).
+PAGE_BUTTONS = {"Delete sample company": "Delete the sample company", "Remove sample leads": "Remove {n} sample leads",
+                "Remove sample marker": "Remove the sample marker"}
+
+
+@pytest.mark.parametrize("state", ["untouched", "lead_added", "all_touched", "repurposed_all_touched"])
+def test_the_banner_and_claudes_note_offer_what_the_removal_page_does(state, client, monkeypatch):
+    """P2F-3: the banner's button and Claude's note say what the removal page removes (CleanupPlan.removes): the whole
+    company, only its untouched sample leads, or no leads. They never promise a delete or a removal it doesn't do."""
+    sample_id = seed_sample_company(legacy_demo=True)
+    later(monkeypatch)
+    if state == "lead_added":  # 0.1.x scanned the demo company: a real lead in it keeps the company
+        repo.upsert_lead(sample_id, LeadIn(full_name="Real HN user", source="hackernews",
+                                           profile_url="https://news.ycombinator.com/user?id=x"))
+    if state in ("all_touched", "repurposed_all_touched"):  # e.g. Claude assessed every lead in 0.1.x
+        for lead in repo.list_leads(sample_id, limit=100)[0]:
+            repo.update_lead(lead.id, {"notes": "tried the demo"})
+    if state == "repurposed_all_touched":
+        repo.update_company(sample_id, {"name": "Gulf Executive Cars", "website": "https://gulfexec.example"})
+    plan = cleanup_plan(sample_id)
+    shown, note = sample_banner(client, sample_id), list_companies_note(sample_id)
+    button = re.search(r'href="/c/\d+/sample">(.*?)</a>', shown, re.S).group(1)
+    button = re.sub(r"<[^>]+>", "", button).strip()
+    assert page_button(client, sample_id) == PAGE_BUTTONS[button].format(n=len(plan.sample_lead_ids))
+    expected = {
+        "untouched": ("Delete sample company", sample_cleanup.COMPANY_NOTE),
+        "lead_added": ("Remove sample leads", f"{FICTIONAL} The banner on its dashboard removes "
+                       "only its 13 untouched sample leads and keeps the company. The user can delete the company on "
+                       "its Company profile page (Delete company)."),
+        "all_touched": ("Remove sample marker", f"{FICTIONAL} The banner on its dashboard removes "
+                        "no leads and keeps the company. The user can delete the company on its Company profile page "
+                        "(Delete company)."),
+        "repurposed_all_touched": ("Remove sample marker", "This company still holds 13 sample leads from the old "
+                                   "demo. Sample leads are never contacted. The user can delete them from their lead "
+                                   "pages."),
+    }[state]
+    assert (button, note) == expected
+
+
+@pytest.mark.parametrize("change", ["paused", "saved_unchanged", "outreach_switch"])
+def test_a_sample_company_only_paused_or_saved_unchanged_is_still_fictional(change, client, monkeypatch):
+    """P2F-4: only a change to who the company is (a field in PROFILE_LABELS) makes it the user's own. Pause, a profile
+    saved unchanged and the Outreach switches change its updated_at only: Claude is still told it is fictional and not
+    to work on it, and the banner still says so. Help's prompts don't name it."""
+    sample_id = seed_sample_company(legacy_demo=True)
+    later(monkeypatch)
+    if change == "paused":
+        repo.update_company(sample_id, {"status": "paused"})
+    elif change == "saved_unchanged":  # Save on the profile form, nothing changed
+        values = {k: v for k, v in forms.company_to_values(repo.get_company(sample_id)).items() if v not in ("", [])}
+        values["csrf_token"] = csrf(client, f"/c/{sample_id}/settings")
+        assert client.post(f"/c/{sample_id}/settings", data=values, follow_redirects=False).status_code == 303
+    else:
+        repo.update_company(sample_id, {"outreach": {"agent_sending": True}})
+    plan = cleanup_plan(sample_id)
+    assert plan.profile_edited is True and len(plan.sample_fields) == len(sample_cleanup.PROFILE_LABELS)
+    assert plan.repurposed is False
+    note = list_companies_note(sample_id)
+    assert note.startswith(FICTIONAL)
+    assert f"{sample_cleanup.BANNER_TEXT} Nothing is ever sent to them." in sample_banner(client, sample_id)
+    assert "onboard_company" in client.get("/help").text and f"company {sample_id}" not in client.get("/help").text
+    repo.update_company(sample_id, {"outreach": {"signature": "Pat — Gulf Executive Cars"}})  # who it is: now theirs
+    assert cleanup_plan(sample_id).repurposed is True and "fictional" not in list_companies_note(sample_id)
+
+
+def test_help_prompts_name_a_sample_company_the_user_made_their_own(client, monkeypatch):
+    """P2F-5: Help's example prompts follow the same rule as the banner and Claude's note. The old demo company the
+    user turned into their only company is theirs: the prompts name it, and don't ask to register a company."""
+    sample_id = seed_sample_company(legacy_demo=True)
+    later(monkeypatch)
+    repo.update_company(sample_id, {"name": "Gulf Executive Cars", "website": "https://gulfexec.example"})
+    repo.upsert_lead(sample_id, LeadIn(full_name="Pat Real", source="claude",
+                                       linkedin_url="https://www.linkedin.com/in/pat-real"))
+    assert [c.id for c in repo.list_companies()] == [sample_id]
+    page = client.get("/help").text
+    assert f"company {sample_id}&#39;s profile" in page and "onboard_company prompt" not in page
+    assert f"/api/companies/{sample_id}/leads?tier=hot" in page
+    assert sample_cleanup.fictional_company_ids() == set() and sample_cleanup.sample_company_ids() == {sample_id}
 
 
 # --------------------------------------------------------------------------------------

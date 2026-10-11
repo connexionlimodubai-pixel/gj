@@ -533,6 +533,78 @@ def test_approve_on_the_outreach_page_covers_only_the_text_it_showed(client, com
     assert b"Text you never saw." in offline_mail.sent[0]["data"]
 
 
+def card_fields(client: TestClient, base: str, message_id: int) -> dict[str, str]:
+    """The hidden fields of a draft's Approve form on the Outreach page's Drafts tab."""
+    page = client.get(f"{base}/outreach?tab=drafts").text
+    forms = re.findall(rf'<form method="post" action="{base}/messages/{message_id}"[^>]*>(.*?)</form>', page, re.S)
+    form = next(f for f in forms if 'value="approve"' in f)
+    return dict(re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)"', form))
+
+
+def test_approve_on_a_stale_page_leaves_a_message_sent_skipped_or_deleted_since_alone(client, company,
+                                                                                    offline_mail):
+    """P2F-1: Approve is only shown on drafts and approved messages. Clicked on a page opened before the message was
+    marked sent, skipped or deleted, it changes nothing (the text is the same, so the version alone doesn't catch
+    it), and the flash says what happened."""
+    ready(company)
+    base = f"/c/{company.id}"
+    linkedin = repo.create_message(lead_with_email(company), "Hi Lina, a short note.", channel="linkedin_dm")
+    email = repo.create_message(lead_with_email(company, "omar@gulfbank.example", "Omar Haddad"), "Short note.",
+                                channel="email", subject="Hello")
+    gone = repo.create_message(lead_with_email(company, "sara@gulfbank.example", "Sara Ali"), "Hi Sara.")
+    shown = {m.id: card_fields(client, base, m.id) for m in (linkedin, email, gone)}
+    repo.update_message(linkedin.id, status="sent")  # Claude records it as sent (MCP update_message)
+    repo.update_message(email.id, status="skipped")  # skipped in another tab, or by Claude
+    repo.delete_message(gone.id)
+    month = repo.utcnow() + timedelta(days=30)
+    assert [d["lead"].id for d in repo.followups_due(company.id, now=month)] == [linkedin.lead_id]
+    for msg, status in ((linkedin, "sent"), (email, "skipped")):
+        resp = client.post(f"{base}/messages/{msg.id}", data={**shown[msg.id], "action": "approve"},
+                           follow_redirects=False)
+        assert resp.headers["location"] == f"{base}/outreach?tab=drafts"
+        assert (f"This message was marked {status} since you opened the page, so it wasn't approved."
+                in flashes(follow(client, resp)))
+        assert repo.get_message(msg.id).status == status
+    assert repo.get_message(linkedin.id).sent_at is not None
+    assert [d["lead"].id for d in repo.followups_due(company.id, now=month)] == [linkedin.lead_id]
+    assert services.send_next_email()["status"] == "idle" and offline_mail.sent == []
+    resp = client.post(f"{base}/messages/{gone.id}", data={**shown[gone.id], "action": "approve"},
+                       follow_redirects=False)
+    assert resp.headers["location"] == f"{base}/outreach?tab=drafts"
+    assert "This message was deleted since you opened the page. Nothing was changed." in flashes(follow(client, resp))
+    # The lead page's Approve posts the text: the same rule.
+    lead_url = f"{base}/leads/{linkedin.lead_id}"
+    resp = post(client, f"{base}/messages/{linkedin.id}", {"action": "approve", "body": linkedin.body,
+                                                           "next": f"{lead_url}#msg-{linkedin.id}"}, page=lead_url)
+    assert "marked sent since you opened the page" in flashes(follow(client, resp))
+    assert repo.get_message(linkedin.id).status == "sent"
+
+
+def test_approve_on_a_stale_page_after_auto_approve(client, company, offline_mail):
+    """P2F-1: auto-approve approved the draft and OpenBerry emailed it while the Drafts tab stayed open: Approve on
+    that card leaves it sent. Auto-approved but not emailed, the same text becomes the user's own approval."""
+    ready(company, auto_approve=True, auto_approve_hours=1, email_send_auto_approved=True)
+    base = f"/c/{company.id}"
+    msg = repo.create_message(lead_with_email(company), "Short note.", channel="email", subject="Hello")
+    shown = card_fields(client, base, msg.id)
+    assert repo.auto_approve_due(company.id, now=repo.utcnow() + 2 * timedelta(hours=1))["approved"] == [msg.id]
+    assert services.send_next_email()["status"] == "sent"
+    resp = client.post(f"{base}/messages/{msg.id}", data={**shown, "action": "approve"}, follow_redirects=False)
+    assert "marked sent since you opened the page, so it wasn't approved" in flashes(follow(client, resp))
+    sent = repo.get_message(msg.id)
+    assert (sent.status, sent.email_state, sent.approved_via) == ("sent", "sent", "auto")
+    assert len(offline_mail.sent) == 1
+    repo.update_company(company.id, {"outreach": {"email_send_auto_approved": False}})
+    second = repo.create_message(lead_with_email(company, "omar@gulfbank.example", "Omar Haddad"), "Another note.",
+                                 channel="email", subject="Hello")
+    shown = card_fields(client, base, second.id)
+    assert repo.auto_approve_due(company.id, now=repo.utcnow() + 2 * timedelta(hours=1))["approved"] == [second.id]
+    resp = client.post(f"{base}/messages/{second.id}", data={**shown, "action": "approve"}, follow_redirects=False)
+    assert "OpenBerry will email it from your mailbox" in flashes(follow(client, resp))
+    approved = repo.get_message(second.id)
+    assert (approved.status, approved.approved_via) == ("approved", "")
+
+
 def test_an_email_being_sent_cant_be_deleted_from_the_dashboard(client, company):
     ready(company)
     lead = lead_with_email(company)

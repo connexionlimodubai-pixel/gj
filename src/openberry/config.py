@@ -564,12 +564,13 @@ def _home_or_above(path: Path) -> bool:
 
 
 def _owner_only(path: Path, mode: int, folder: bool) -> None:
-    """chmod `path` to `mode` when it is a folder (or a file) this user owns. Errors are ignored: OpenBerry still
-    starts."""
+    """chmod `path` to `mode` when it is a real folder (or a regular file) this user owns. A symlink is left alone
+    (its target may be anywhere), and so is a device, FIFO or socket: OPENBERRY_ENV_FILE=/dev/null as root would
+    otherwise lock everyone else out of /dev/null. Errors are ignored: OpenBerry still starts."""
     try:
-        st = path.stat()
-        if (st.st_uid == os.getuid() and stat.S_ISDIR(st.st_mode) == folder
-                and stat.S_IMODE(st.st_mode) != mode):
+        st = path.lstat()
+        kind_ok = stat.S_ISDIR(st.st_mode) if folder else stat.S_ISREG(st.st_mode)
+        if st.st_uid == os.getuid() and kind_ok and stat.S_IMODE(st.st_mode) != mode:
             path.chmod(mode)
     except OSError:
         pass

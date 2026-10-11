@@ -423,7 +423,11 @@ def bulk_message_action(request: Request, company_id: int, form: FormData = Depe
 @router.post("/c/{company_id}/messages/{message_id}")
 def message_action(request: Request, company_id: int, message_id: int,
                    form: FormData = Depends(checked_form)) -> Response:
-    message = repo.get_message(message_id)
+    try:
+        message = repo.get_message(message_id)
+    except repo.NotFound:  # deleted since the page was opened: in another tab, or by Claude
+        flash(request, "This message was deleted since you opened the page. Nothing was changed.", "error")
+        return redirect(safe_next(form.get("next"), f"/c/{company_id}/outreach").split("#", 1)[0])
     if message.company_id != company_id:
         raise repo.NotFound(f"message {message_id} not found")
     back = safe_next(form.get("next"), f"/c/{company_id}/leads/{message.lead_id}#outreach")
@@ -452,9 +456,11 @@ def message_action(request: Request, company_id: int, message_id: int,
         return redirect(back)
     # The Outreach page's Approve posts no text, only the version of the text it showed: an edit Claude or another
     # tab saved since then is not approved unread. A post without one (a page from before) approves nothing.
+    # Approve is only shown on drafts and approved messages: one sent or skipped since the page opened stays so.
     version = _form_text(form, "version") if action == "approve" and not edits else None
     try:
-        updated = repo.update_message(message_id, status=MESSAGE_ACTIONS[action], version=version, **edits)
+        updated = repo.update_message(message_id, status=MESSAGE_ACTIONS[action], version=version,
+                                      pending_only=action == "approve", **edits)
     except ValueError as exc:
         flash(request, str(exc), "error")
         return redirect(back)

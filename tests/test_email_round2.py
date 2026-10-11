@@ -505,12 +505,12 @@ def test_something_coming_back_for_a_maybe_sent_draft_makes_it_sent(company, box
     assert (stored.status, stored.email_state) == ("sent", "sent")
 
 
-@pytest.mark.parametrize("answers_it", [True, False])
-def test_a_reply_after_send_again_is_read_and_the_email_is_not_sent_twice(company, box, answers_it):
+@pytest.mark.parametrize("sender,answers_it", [(LINA, True), (LINA, False), ("lina.noor@gmail.com", True)])
+def test_a_reply_after_send_again_is_read_and_the_email_is_not_sent_twice(company, box, sender, answers_it):
     """EMAIL-3: an email may have been sent (the connection broke during DATA). At 19:00 in Dubai the user chooses Send
     again: it waits for the sending hours. That evening Lina answers the first copy, which did arrive, or writes a new
     email from her phone. It is read, and nothing goes out in the morning. A reply to the first copy (Send again keeps
-    its Message-ID) also records the email as sent."""
+    its Message-ID) also records the email as sent. So does one from her own Gmail, found only by that Message-ID."""
     turn_on(company)
     lina = lead(company, LINA, full_name="Lina Noor")
     msg = approved(lina)
@@ -521,7 +521,7 @@ def test_a_reply_after_send_again_is_read_and_the_email_is_not_sent_twice(compan
     evening = NOW + timedelta(hours=9)  # 19:00 in Dubai: outside the sending hours
     services.check_inbox(now=evening)
     repo.resolve_email(msg.id, "send_again", now=evening)
-    box.deliver(reply("Thanks Sam, please call me tomorrow instead.", refers=header if answers_it else ""))
+    box.deliver(reply("Thanks Sam, please call me tomorrow instead.", sender=sender, refers=header if answers_it else ""))
     assert services.check_inbox(now=evening + timedelta(minutes=5))["recorded"] == 1
     assert repo.get_lead(lina).status == "replied"
     stored = repo.get_message(msg.id)

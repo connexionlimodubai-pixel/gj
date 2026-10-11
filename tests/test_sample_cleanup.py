@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import subprocess
 from contextlib import closing
 from datetime import timedelta
 from pathlib import Path

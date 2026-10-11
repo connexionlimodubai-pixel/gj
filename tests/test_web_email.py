@@ -133,7 +133,7 @@ def test_saving_the_mailbox_writes_the_data_folders_env_file_and_checks_the_inbo
     settings = config.get_settings()
     assert (settings.smtp_host, settings.smtp_port, settings.imap_host) == ("smtppro.zoho.com", 465, "imappro.zoho.com")
     assert settings.smtp_username == FROM and settings.smtp_password == PASSWORD
-    text = env_file().read_text()
+    text = env_file().read_text(encoding="utf-8")
     assert 'OPENBERRY_SMTP_HOST="smtppro.zoho.com"' in text and "OPENBERRY_IMAP_SAVE_SENT=\"true\"" in text
     if sys.platform != "win32":
         assert stat.S_IMODE(env_file().stat().st_mode) == 0o600
@@ -242,7 +242,7 @@ def test_settings_from_the_environment_win_and_are_read_only(client, monkeypatch
     assert re.search(r'id="mb-smtp_host"[^>]*readonly', page) and "Set outside OpenBerry" in page
     follow(client, save_mailbox(client, provider="other", smtp_host="other.example", imap_host="imap.example.com"))
     assert config.get_settings().smtp_host == "smtp.from-env.example"
-    assert "OPENBERRY_SMTP_HOST" not in env_file().read_text()
+    assert "OPENBERRY_SMTP_HOST" not in env_file().read_text(encoding="utf-8")
 
 
 def test_the_test_email_goes_to_your_own_address_only_and_is_rate_limited(client, offline_mail):
@@ -277,7 +277,7 @@ def test_check_inbox_retry_and_disconnect(client, company, offline_mail):
     assert "Inbox checked" in flashes(follow(client, post(client, "/mailbox", {"action": "check"})))
     page = follow(client, post(client, "/mailbox", {"action": "disconnect"}))
     assert "Email sending is off for every company" in flashes(page)
-    assert "OPENBERRY_SMTP_PASSWORD" not in env_file().read_text() and config.get_settings().smtp_password == ""
+    assert "OPENBERRY_SMTP_PASSWORD" not in env_file().read_text(encoding="utf-8") and config.get_settings().smtp_password == ""
     assert repo.get_company(company.id).outreach.email_sending is False
 
 

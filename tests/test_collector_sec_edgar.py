@@ -176,7 +176,7 @@ async def test_sends_declared_user_agent_and_documented_params(company):
     handler = FakeEdgar()
     await run(configure(company), handler)
     assert len(handler.requests) == 2
-    for request, form in zip(handler.requests, ("D", "8-K")):
+    for request, form in zip(handler.requests, ("D", "8-K"), strict=True):
         assert request.method == "GET"
         assert f"{request.url.scheme}://{request.url.host}{request.url.path}" == EFTS
         assert dict(request.url.params) == {"q": Q, "forms": form, "dateRange": "custom",
@@ -528,7 +528,7 @@ async def test_time_budget_stops_before_requests(company):
 
 
 async def test_403_html_stops_all_sec_requests(company):
-    blocked = httpx.Response(403, text=(FIXTURES / "undeclared_tool_403.html").read_text(),
+    blocked = httpx.Response(403, text=(FIXTURES / "undeclared_tool_403.html").read_text(encoding="utf-8"),
                              headers={"Content-Type": "text/html"})
     handler = FakeEdgar(routes={}, default=blocked)
     signals, ctx = await run(configure(company, sec_queries=["a", "b"]), handler)

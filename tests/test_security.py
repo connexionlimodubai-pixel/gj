@@ -145,7 +145,7 @@ def test_the_server_command_refuses_for_real(tmp_path: Path) -> None:
     env = {**os.environ, "OPENBERRY_HOME": str(tmp_path), "OPENBERRY_ENV_FILE": str(tmp_path / "none.env"),
            "OPENBERRY_PASSWORD": "a", "PYTHONPATH": os.pathsep.join(sys.path)}
     done = subprocess.run([sys.executable, "-m", "openberry", "serve", "--host", "0.0.0.0", "--port", "0"],
-                          env=env, capture_output=True, text=True, timeout=60)
+                          env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     assert done.returncode == 1 and "OPENBERRY_PASSWORD is too short" in done.stderr
     assert not (tmp_path / "openberry.db").exists()
 
@@ -376,7 +376,8 @@ def test_a_lead_search_leaves_no_query_string_in_the_log(tmp_path: Path) -> None
     env = {**os.environ, "OPENBERRY_HOME": str(tmp_path), "OPENBERRY_ENV_FILE": str(tmp_path / "none.env"),
            "OPENBERRY_SCHEDULER": "false", "PYTHONPATH": os.pathsep.join(sys.path)}
     server = subprocess.Popen([sys.executable, "-m", "openberry", "serve", "--port", str(port)], env=env,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                              errors="replace")
     base = f"http://127.0.0.1:{port}"
     try:
         deadline = time.monotonic() + 30

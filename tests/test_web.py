@@ -1413,7 +1413,7 @@ def test_paused_agent_sending_shows_a_banner_and_can_be_resumed(client, company)
     assert "pill-agent-paused" in card and "Paused until" in text_of(card)
     assert f'action="{base}/outreach/agent/resume"' in card and "<script>alert(1)</script>" not in page
     assert "Nothing is queued while sending is paused." in text_of(card)
-    assert f'id="agent-prompt-1"' in card  # the prompt is still there for after the pause
+    assert 'id="agent-prompt-1"' in card  # the prompt is still there for after the pause
     # The message the agent was on stays approved, waiting for the user.
     assert repo.get_message(msg.id).status == "approved"
 

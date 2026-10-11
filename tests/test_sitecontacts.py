@@ -298,8 +298,10 @@ async def test_robots_404_allows_everything_and_redirects_are_followed():
 
 
 async def test_too_many_robots_redirects_count_as_unreachable():
-    pages = {f"https://loop.example-biz.ae/r{n}/robots.txt": (lambda n: lambda r: redirect(
-        f"https://loop.example-biz.ae/r{n + 1}/robots.txt"))(n) for n in range(10)}
+    def to_next(n: int):
+        return lambda r: redirect(f"https://loop.example-biz.ae/r{n + 1}/robots.txt")
+
+    pages = {f"https://loop.example-biz.ae/r{n}/robots.txt": to_next(n) for n in range(10)}
     pages["https://loop.example-biz.ae/robots.txt"] = lambda r: redirect("https://loop.example-biz.ae/r0/robots.txt")
     sites = FakeSites(pages)
     assert (await skipped("https://loop.example-biz.ae/", sites)).reason == "robots"
@@ -417,7 +419,8 @@ async def test_pages_are_parsed_in_a_worker_thread(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.parametrize("filler", [" " * 200_000, "<div>\n  " * 40_000, "\xa0 " * 100_000, "( " * 100_000,
-                                    "[ at " * 40_000])
+                                    "[ at " * 40_000],
+                         ids=["spaces", "nested-divs", "nbsp", "parentheses", "brackets-at"])
 async def test_a_page_of_whitespace_is_read_quickly(filler: str):
     # Page builders nest thousands of indented empty divs: the visible text is one long run of whitespace.
     body = f"<title>Spaces Co</title><body>{filler}<p>info [at] spaces.ae</p></body>"

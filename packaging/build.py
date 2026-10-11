@@ -6,6 +6,10 @@ Runs PyInstaller with packaging/openberry.spec, then packs the result into one a
   OpenBerry-macos-arm64.zip    OpenBerry.app, zipped with `ditto` to keep its symlinks and signature
   OpenBerry-linux-x64.tar.gz   the OpenBerry folder, with its file permissions
 
+Each download also holds LICENSE.txt (OpenBerry's MIT license) and THIRD_PARTY_NOTICES.txt (the licenses of
+everything the app bundles): in the OpenBerry folder, and next to OpenBerry.app on a Mac, where adding files
+inside the signed app would break its signature.
+
 The names carry no version number on purpose: the release says which version it is, and
 https://github.com/<owner>/<repo>/releases/latest/download/<name> then always gets the newest one.
 
@@ -18,16 +22,20 @@ See docs/DESKTOP.md.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import os
 import platform
 import re
 import shutil
+import sqlite3
+import ssl
 import subprocess
 import sys
+import sysconfig
 import tarfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "packaging" / "openberry.spec"
@@ -37,6 +45,8 @@ APP_NAME = "OpenBerry"
 CLI_NAME = "openberry-cli"
 OS_NAMES = {"win32": "windows", "darwin": "macos", "linux": "linux"}
 ARCH_NAMES = {"x86_64": "x64", "amd64": "x64", "x64": "x64", "arm64": "arm64", "aarch64": "arm64"}
+LICENSE_FILE = "LICENSE.txt"
+NOTICES_FILE = "THIRD_PARTY_NOTICES.txt"
 
 
 class BuildError(RuntimeError):
@@ -115,15 +125,34 @@ def folder_size(path: Path) -> int:
     return sum(p.lstat().st_size for p in path.rglob("*") if p.is_symlink() or p.is_file())
 
 
-def make_archive(app: Path, destination: Path, system: str = sys.platform) -> Path:
-    """Pack the built app (folder or .app) into `destination`, keeping its top-level folder name."""
+def make_archive(app: Path, destination: Path, system: str = sys.platform, beside: Sequence[Path] = ()) -> Path:
+    """Pack the built app (folder or .app) into `destination`, keeping its top-level folder name.
+
+    `beside`: files that go next to the app at the top of the archive (the license files of a Mac download).
+    """
     if not app.exists():
         raise BuildError(f"{app} does not exist: build the app first")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.unlink(missing_ok=True)
     if system == "darwin":
         # zipfile and shutil would turn the bundle's symlinks into copies and break its code signature.
-        subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(destination)], check=True)
+        if not beside:
+            subprocess.run(["ditto", "-c", "-k", "--keepParent", str(app), str(destination)], check=True)
+            return destination
+        # ditto archives the contents of a folder: one holding the app (moved, never copied) and the files.
+        stage = app.parent / f".{destination.name}.stage"
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir()
+        try:
+            for path in beside:
+                shutil.copy2(path, stage / path.name)
+            app.rename(stage / app.name)
+            try:
+                subprocess.run(["ditto", "-c", "-k", str(stage), str(destination)], check=True)
+            finally:
+                (stage / app.name).rename(app)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
     elif destination.name.endswith(".tar.gz"):
         with tarfile.open(destination, "w:gz") as tar:  # keeps the executables executable
             tar.add(app, arcname=app.name)
@@ -131,6 +160,169 @@ def make_archive(app: Path, destination: Path, system: str = sys.platform) -> Pa
         base = destination.with_suffix("")  # make_archive adds .zip
         shutil.make_archive(str(base), "zip", root_dir=app.parent, base_dir=app.name)
     return destination
+
+
+# --------------------------------------------------------------------------------------
+# License notices: OpenBerry's license and the licenses of what the app bundles
+# --------------------------------------------------------------------------------------
+
+_REQUIREMENT = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?")
+_EXTRA_MARKER = re.compile(r"""extra\s*==\s*["']([^"']+)["']""")
+_LICENSE_FILE_NAME = re.compile(r"LICEN[CS]E|COPYING|NOTICE|AUTHORS", re.IGNORECASE)
+
+
+def _normalize(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _marker_applies(marker: str, extras: set[str]) -> bool:
+    """Whether a requirement's environment marker holds here, for one of `extras` (or none)."""
+    marker = marker.strip()
+    if not marker:
+        return True
+    try:
+        from packaging.markers import Marker  # PyInstaller depends on it: always there when building
+    except ImportError:  # without it: only the extras are checked; an installed distribution counts as bundled
+        wanted = {_normalize(e) for e in _EXTRA_MARKER.findall(marker)}
+        return not wanted or bool(wanted & extras)
+    parsed = Marker(marker)
+    return any(parsed.evaluate({"extra": extra}) for extra in (sorted(extras) or [""]))
+
+
+def bundled_distributions(root: str = "openberry", extras: Sequence[str] = ()) -> list[importlib.metadata.Distribution]:
+    """The installed distributions the app bundles: what `root` (with `extras`) requires, and what those require.
+    Development tools (the dev extra, PyInstaller) are not among them."""
+    found: dict[str, tuple[importlib.metadata.Distribution, set[str]]] = {}
+    todo: list[tuple[str, set[str]]] = [(root, {_normalize(e) for e in extras})]
+    while todo:
+        name, wanted = todo.pop()
+        try:
+            dist = importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            continue  # not installed here, so not bundled either
+        key = _normalize(dist.metadata["Name"] or name)
+        if key in found and wanted <= found[key][1]:
+            continue
+        found[key] = (dist, (found[key][1] if key in found else set()) | wanted)
+        for requirement in dist.requires or []:
+            spec, _, marker = requirement.partition(";")
+            match = _REQUIREMENT.match(spec)
+            if match and _marker_applies(marker, wanted):
+                todo.append((match[1], {_normalize(e) for e in (match[2] or "").split(",") if e.strip()}))
+    return sorted((dist for key, (dist, _) in found.items() if key != _normalize(root)),
+                  key=lambda d: _normalize(d.metadata["Name"] or ""))
+
+
+def license_name(dist: importlib.metadata.Distribution) -> str:
+    meta = dist.metadata
+    if expression := (meta.get("License-Expression") or "").strip():
+        return expression
+    text = (meta.get("License") or "").strip()
+    if text and "\n" not in text and len(text) <= 80:
+        return text
+    classifiers = [c.split(" :: ")[-1] for c in meta.get_all("Classifier") or [] if c.startswith("License ::")]
+    return ", ".join(classifiers) or ("see the license text below" if text else "unknown")
+
+
+def license_texts(dist: importlib.metadata.Distribution) -> Iterator[tuple[str, str]]:
+    """(file name, text) of each license file in the distribution's metadata folder (.dist-info, and its licenses/
+    folder)."""
+    for file in dist.files or []:
+        parts = PurePosixPath(file.as_posix()).parts
+        if len(parts) < 2 or not parts[0].endswith(".dist-info") or not _LICENSE_FILE_NAME.search(parts[-1]):
+            continue
+        try:
+            text = file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if text.strip():
+            yield "/".join(parts[1:]), text.strip()
+
+
+def _python_license() -> str:
+    for folder in (Path(sys.base_prefix), Path(sysconfig.get_paths()["stdlib"])):
+        for name in ("LICENSE.txt", "LICENSE"):
+            try:
+                return (folder / name).read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+    return "PSF License Agreement: https://docs.python.org/3/license.html"
+
+
+# The license of the Microsoft Edge WebView2 SDK, whose DLLs pywebview bundles for the Windows window.
+WEBVIEW2_LICENSE = """Copyright (C) Microsoft Corporation. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+following conditions are met:
+
+   * Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+     disclaimer.
+   * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the
+     following disclaimer in the documentation and/or other materials provided with the distribution.
+   * The name of Microsoft Corporation, or the names of its contributors may not be used to endorse or promote
+     products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE."""
+
+
+def component_notices(system: str = sys.platform) -> list[tuple[str, str, str]]:
+    """(name, license, text) of what the app bundles besides Python packages."""
+    notices = [
+        (f"Python {platform.python_version()}", "PSF-2.0",
+         _python_license() + "\n\nPython's standard library also bundles zlib, bzip2, xz, libffi, expat and mpdecimal: "
+         "their licenses are listed at https://docs.python.org/3/license.html"),
+        (ssl.OPENSSL_VERSION, "Apache-2.0" if ssl.OPENSSL_VERSION_INFO[0] >= 3 else "OpenSSL and SSLeay licenses",
+         "Python's ssl module. https://www.openssl.org/source/license.html"),
+        (f"SQLite {sqlite3.sqlite_version}", "Public domain",
+         "Python's sqlite3 module. SQLite is in the public domain: https://www.sqlite.org/copyright.html"),
+        ("PyInstaller bootloader", "GPL-2.0-or-later WITH Bootloader-exception",
+         "The program that starts the app. Its license allows distributing programs built with it under any license: "
+         "https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING.txt"),
+    ]
+    if system == "win32":
+        notices.append(("Microsoft Edge WebView2 SDK (Microsoft.Web.WebView2.Core.dll, "
+                        "Microsoft.Web.WebView2.WinForms.dll, WebView2Loader.dll)", "BSD-3-Clause", WEBVIEW2_LICENSE))
+    return notices
+
+
+def notices_text(version: str, system: str = sys.platform) -> str:
+    """THIRD_PARTY_NOTICES.txt: every bundled component and Python package with its license, then the license
+    texts. The packages are read from this environment, the one PyInstaller bundles (installed from uv.lock)."""
+    # Linux leaves pywebview out (openberry.spec), so the desktop extra counts on Windows and macOS only.
+    dists = bundled_distributions("openberry", ("desktop",) if system in ("win32", "darwin") else ())
+    rule = "=" * 78
+    lines = [f"OpenBerry {version}: third-party notices", "",
+             "OpenBerry is MIT licensed (LICENSE.txt). The app bundles the software below, each under its own license.",
+             "The full license texts follow the list.", "", rule, "Bundled components", rule, ""]
+    components = component_notices(system)
+    lines += [f"- {name}: {license}" for name, license, _ in components]
+    lines += ["", rule, "Python packages", rule, ""]
+    lines += [f"- {d.metadata['Name']} {d.version}: {license_name(d)}" for d in dists]
+    for name, license, text in components:
+        lines += ["", rule, f"{name} ({license})", rule, "", text]
+    for dist in dists:
+        lines += ["", rule, f"{dist.metadata['Name']} {dist.version} ({license_name(dist)})", rule]
+        texts = list(license_texts(dist))
+        for file_name, text in texts:
+            lines += ["", f"--- {file_name} ---", "", text]
+        if not texts:
+            lines += ["", "No license file in the package. Its license: " + license_name(dist) + "."]
+    return "\n".join(lines) + "\n"
+
+
+def write_license_files(folder: Path, version: str, system: str = sys.platform, root: Path = ROOT) -> list[Path]:
+    """Write LICENSE.txt and THIRD_PARTY_NOTICES.txt into `folder`; returns both paths."""
+    folder.mkdir(parents=True, exist_ok=True)
+    license_file, notices_file = folder / LICENSE_FILE, folder / NOTICES_FILE
+    license_file.write_text((root / "LICENSE").read_text(encoding="utf-8"), encoding="utf-8")
+    notices_file.write_text(notices_text(version, system), encoding="utf-8")
+    return [license_file, notices_file]
 
 
 def write_github_output(values: Mapping[str, str], environ: Mapping[str, str] | None = None) -> bool:
@@ -180,8 +372,14 @@ def build(args: argparse.Namespace) -> Layout:
     # Forward slashes: the paths work in every shell, Git Bash on Windows included.
     outputs = {"version": version, "app": layout.app.as_posix(), "gui": layout.gui.as_posix(),
                "cli": layout.cli.as_posix()}
+    if sys.platform == "darwin":  # next to OpenBerry.app: files added inside it would break its signature
+        license_files = write_license_files(dist / "licenses", version)
+    else:
+        license_files = write_license_files(layout.app, version)
+    print(f"Licenses: {', '.join(p.as_posix() for p in license_files)}")
     if not args.no_archive:
-        archive = make_archive(layout.app, dist / archive_name(platform_tag()))
+        beside = license_files if sys.platform == "darwin" else ()
+        archive = make_archive(layout.app, dist / archive_name(platform_tag()), beside=beside)
         print(f"Download: {archive} ({megabytes(archive.stat().st_size)})")
         outputs["archive"] = archive.as_posix()
     write_github_output(outputs)

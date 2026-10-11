@@ -964,6 +964,7 @@ def test_stdio_subprocess_smoke(tmp_path: Path):
     env = {**os.environ, "OPENBERRY_DB": str(tmp_path / "stdio.db"),
            "OPENBERRY_ENV_FILE": str(tmp_path / "missing.env"), "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen([sys.executable, "-m", "openberry", "mcp"], cwd=tmp_path, env=env, text=True,
+                            encoding="utf-8", errors="replace",  # the MCP SDK writes UTF-8 on every system
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     lines: queue.Queue[str | None] = queue.Queue()
     stderr: list[str] = []

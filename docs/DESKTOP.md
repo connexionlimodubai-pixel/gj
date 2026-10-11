@@ -24,6 +24,8 @@ release, and under **Assets** download the file for your computer:
 | Linux, 64-bit | `OpenBerry-linux-x64.tar.gz` |
 
 The file names are the same for every version (version 0.1.0 used names like `OpenBerry-0.1.0-windows-x64.zip`); the release title says which version you have.
+`SHA256SUMS` in the same list holds each file's checksum. To check a download on Windows, run
+`certutil -hashfile OpenBerry-windows-x64.zip SHA256` in a terminal and compare; on a Mac or Linux, `shasum -a 256 <file>`.
 
 There is no download for Macs with an Intel processor yet. To check which kind you have, open the
 Apple menu and click **About This Mac**: "Chip: Apple M…" means Apple silicon.
@@ -297,8 +299,7 @@ PyInstaller can't make a Windows app on a Mac, for example. You need [uv](https:
 copy of this repository.
 
 ```bash
-uv sync --extra desktop                     # on Linux: uv sync (no window there)
-uv pip install pyinstaller pyinstaller-hooks-contrib
+uv sync --extra desktop --group build       # on Linux: uv sync --group build (no window there)
 uv run --no-sync python packaging/build.py  # build the app and its download
 uv run --no-sync python packaging/smoke_test.py dist/OpenBerry/openberry-cli dist/OpenBerry/OpenBerry
 ```
@@ -313,6 +314,7 @@ What the build makes in `dist/`:
 | The app | `OpenBerry/OpenBerry.exe` | `OpenBerry.app` | `OpenBerry/OpenBerry` |
 | Command line (Claude Desktop runs `openberry-cli mcp`) | `OpenBerry/openberry-cli.exe` | `OpenBerry.app/Contents/MacOS/openberry-cli` | `OpenBerry/openberry-cli` |
 | The download | `OpenBerry-windows-x64.zip` | `OpenBerry-macos-arm64.zip` | `OpenBerry-linux-x64.tar.gz` |
+| Licenses | `OpenBerry/LICENSE.txt`, `OpenBerry/THIRD_PARTY_NOTICES.txt` | `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt` next to `OpenBerry.app` in the download (`licenses/` in `dist/`) | as on Windows |
 
 How it fits together:
 
@@ -324,8 +326,13 @@ How it fits together:
 
   Both run `openberry.desktop.main`. On a Mac the spec wraps the folder into `OpenBerry.app`
   (`io.openberry.desktop`), with both executables in `Contents/MacOS`. On Linux it leaves out pywebview.
+  It leaves out Python's `readline` and `curses` modules everywhere: on Linux `readline` would bring
+  GNU Readline (GPL-3.0) into the download.
 - **`packaging/build.py`** runs PyInstaller, then packs the download. On a Mac it uses `ditto`, which keeps
-  the app's symlinks and signature. Its options:
+  the app's symlinks and signature. Every download holds `LICENSE.txt` (OpenBerry's MIT license) and
+  `THIRD_PARTY_NOTICES.txt`: the licenses of Python, OpenSSL, SQLite, the PyInstaller bootloader, the WebView2
+  SDK (Windows) and every Python package the app bundles, read from the build's environment (installed from
+  `uv.lock`). On a Mac they sit next to `OpenBerry.app`: files added inside it would break its signature. Its options:
   - `--skip-build` only repacks.
   - `--no-archive` only builds.
   - `--release-tag vX.Y.Z` checks the version.
@@ -344,6 +351,9 @@ To run the app from source instead, use `uv run openberry desktop`, after `uv sy
 
 ## Releasing a new version
 
+Push a tag, and only a tag. Never create the release in GitHub's web page: a release made there has no downloads,
+becomes "Latest" at once, and every download link in this guide and the README then answers 404.
+
 1. Set the same new version in `src/openberry/__init__.py` (`__version__`) and in `pyproject.toml`. Then run
    `uv lock` and merge the change into `main`.
 2. Tag the release and push the tag:
@@ -352,14 +362,29 @@ To run the app from source instead, use `uv run openberry desktop`, after `uv sy
    git push origin v0.2.0
    ```
 3. The **Desktop app** workflow (`.github/workflows/desktop.yml`) then:
-   1. Builds the app on Windows, macOS (Apple silicon) and Linux.
+   1. Runs the tests and builds the app on Windows, macOS (Apple silicon) and Linux.
    2. Smoke-tests each build.
-   3. Attaches the three downloads to a GitHub Release named after the tag, with notes generated from the merged changes.
+   3. Creates a draft release named "OpenBerry v0.2.0" with the three downloads, `SHA256SUMS` (their checksums)
+      and notes generated from the merged changes. A draft is invisible to the download links.
+   4. Publishes the draft as the latest release, once it holds every file.
+   5. Checks that the three `releases/latest/download/...` links answer 200.
 
-   If the tag doesn't match the version in the code, the build stops before anything is published.
+   If the tag doesn't match the version in the code, or a test or a build fails, nothing is published.
 
-Pull requests and pushes to `main` that change the app run the same build and smoke test. Their downloads stay
+Pull requests and pushes to `main` that change the app run the same tests, build and smoke test. Their downloads stay
 under the run's **Artifacts** for 14 days.
+
+**If a release goes wrong:**
+- *A build or a test failed:* nothing was published. Fix the problem on `main`, then move the tag to the fixed
+  commit and push it again: `git tag -f v0.2.0 && git push -f origin v0.2.0`.
+- *The workflow stopped at "Create the release as a draft" because the release exists:* someone created it in the
+  web page. Delete that release (keep the tag): `gh release delete v0.2.0 -R connexionlimodubai-pixel/gj`, then
+  re-run the failed jobs from the workflow run's page. A draft an earlier run left is replaced by itself.
+- *"Check the download links" failed:* open the release. If a file is missing, delete the release (keep the tag) and
+  re-run the failed jobs. If GitHub was only slow, re-run that job.
+- *The download links answer 404 after all:* another release without files is marked "Latest". Delete it
+  (`gh release delete <tag> --cleanup-tag`), or open the last good release, choose **Edit** and tick
+  **Set as the latest release**.
 
 **Not done yet:**
 - Code signing (Windows) and notarisation (macOS). Until then, people see the warnings described above.

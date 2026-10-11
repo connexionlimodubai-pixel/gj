@@ -227,7 +227,9 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/SIGNALS.md](
 
 ```bash
 uv sync --extra dev
+uv run playwright install chromium        # once: the browser tests skip without it
 uv run pytest            # ~1,380 tests, no network needed
+uvx ruff@0.16.8 check src tests packaging # the lint CI runs
 ```
 
 MIT licensed. Not affiliated with Gojiberry.

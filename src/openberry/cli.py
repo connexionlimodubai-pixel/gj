@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import sqlite3
@@ -28,7 +29,8 @@ def serve_options(settings: Any, host: str, port: int) -> dict[str, Any]:
 def _serve(args: argparse.Namespace) -> None:
     import uvicorn
 
-    from .config import get_settings
+    from .config import OPENBERRY_HOME, get_settings
+    from .desktop import serve_lock
     from .web.app import UnsafeStart, create_app
 
     settings = get_settings()
@@ -36,7 +38,14 @@ def _serve(args: argparse.Namespace) -> None:
         app = create_app(host=args.host)  # refuses a host other computers reach without a (long enough) password
     except UnsafeStart as exc:
         sys.exit(f"openberry serve: {exc}")
-    uvicorn.run(app, **serve_options(settings, args.host, args.port))
+    lock = serve_lock(OPENBERRY_HOME)
+    lock.acquire()  # held while it serves: `openberry restore` refuses until it stops (it sends emails)
+    try:
+        uvicorn.run(app, **serve_options(settings, args.host, args.port))
+    finally:
+        lock.release()
+        with contextlib.suppress(OSError):
+            lock.path.unlink()
 
 
 def _desktop(args: argparse.Namespace) -> None:
@@ -193,15 +202,17 @@ def _restore(args: argparse.Namespace) -> None:
     if done.previous:
         print(f"Your data from before the restore was saved first: {done.previous}")
     if done.kept_email_history:
-        print("The opt-outs, the never-email list and the record of sent emails were kept from it.")
+        print("The never-email list and the record of sent emails were kept from it. So were the opt-outs, replies "
+              "and sends it recorded for the leads and messages in the backup.")
     elif done.previous:
-        print("It could not be read, so its opt-outs, never-email list and record of sent emails were not kept.")
+        print("It could not be read, so its never-email list, opt-outs, replies and record of sent messages were not "
+              "kept.")
     if done.sending_turned_off:
         print("Email sending and AI agent sending are now off for: " + ", ".join(done.sending_turned_off) + ".")
     else:
         print("Email sending and AI agent sending are off for every company.")
-    print("Emails sent after this backup was made may show as not sent yet: before you turn sending back on, "
-          "compare the Outreach page with your mailbox's Sent folder.")
+    print("Leads and messages added after this backup was made are not in it: before you turn sending back on, "
+          "check LinkedIn and your mailbox's Sent folder.")
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from .config import get_settings, make_private, private_dir
 
@@ -328,7 +328,7 @@ class UpgradeBackupFailed(DatabaseProblem):
 DISK_FULL = "Your disk is full, so OpenBerry can't save anything. Free some space, then try again."
 DAMAGED = "OpenBerry's data file is damaged: restore a backup (Your data)."
 BUSY = "The database is busy, try again in a moment."
-DAMAGED_WORDS = ("malformed", "not a database", "disk i/o error")
+DAMAGED_WORDS = ("malformed", "not a database")  # the file itself (is_damaged)
 
 
 def log_location() -> str:
@@ -345,14 +345,23 @@ def is_disk_full(exc: BaseException | None) -> bool:
         isinstance(exc, (OSError, sqlite3.Error)) and ("disk is full" in text or "no space left" in text))
 
 
+def is_damaged(exc: BaseException) -> bool:
+    """SQLite found the file itself damaged: malformed, or not a database. A disk I/O error isn't counted: it may be
+    the disk alone (a full one can't hold the -shm file, say). problem_text still says to restore a backup for it."""
+    text = str(exc).lower()
+    code = str(getattr(exc, "sqlite_errorname", "") or "")
+    return isinstance(exc, sqlite3.DatabaseError) and (code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB"))
+                                                       or any(w in text for w in DAMAGED_WORDS))
+
+
 def problem_text(exc: BaseException, path: Path | None = None) -> str | None:
     """A database error in plain words, naming the data folder and the log file; None for any other error."""
     text = str(exc).lower()
     code = str(getattr(exc, "sqlite_errorname", "") or "")
     if is_disk_full(exc) or code.startswith("SQLITE_FULL"):
         base = DISK_FULL
-    elif isinstance(exc, sqlite3.DatabaseError) and (code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB", "SQLITE_IOERR"))
-                                                     or any(w in text for w in DAMAGED_WORDS)):
+    elif is_damaged(exc) or (isinstance(exc, sqlite3.DatabaseError) and (code.startswith("SQLITE_IOERR")
+                                                                         or "disk i/o error" in text)):
         base = DAMAGED
     elif isinstance(exc, sqlite3.OperationalError) and (code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED"))
                                                         or "locked" in text or "busy" in text):
@@ -434,6 +443,17 @@ def backup_to(dest: Path, source: Path | None = None) -> Path:
             tmp.unlink()
         raise
     return dest
+
+
+def read_only_uri(path: PurePath) -> str:
+    """A URI that opens the database file at `path`, an absolute path, read-only (sqlite3.connect with uri=True, or
+    ATTACH). as_uri encodes the path: a '#' or '%' in a folder's name is part of it, not the URI's syntax. A Windows
+    network path (\\\\server\\share\\...) would make "server" the URI's authority, which SQLite refuses: it gets an
+    empty one instead (file:////server/share/...), and SQLite opens //server/share/..."""
+    uri = path.as_uri()
+    if not uri.startswith("file:///"):
+        uri = "file:////" + uri.removeprefix("file://")
+    return uri + "?mode=ro"
 
 
 def file_version(conn: sqlite3.Connection) -> int:

@@ -20,7 +20,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
 from . import mailer
-from .db import connect
+from .db import connect, read_only_uri
 from .models import (
     AGENT_CHANNELS,
     AGENT_PAUSE_REASON_MAX,
@@ -3720,16 +3720,22 @@ def email_attention(company_id: int, now: datetime | None = None,
 @contextmanager
 def _file_write_locked(path: Path, attach: Path | None = None) -> Iterator[sqlite3.Connection]:
     """_write_locked on a database file that isn't the one in use (a restore's copy of the backup). `attach` is opened
-    read-only as "prev" before the write lock is taken: ATTACH can't run inside a transaction."""
+    read-only as "prev" before the write lock is taken: ATTACH can't run inside a transaction.
+
+    The changes are folded into the file itself before it returns (a checkpoint). Closing the connection does that
+    too, but SQLite ignores a failure there (a full disk) and keeps the -wal file, which the restore then deletes.
+    A checkpoint that can't finish raises instead, so the restore stops before the swap."""
     conn = sqlite3.connect(path, timeout=30, uri=True)  # uri: the ATTACH names its file read-only
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         if attach is not None:
-            conn.execute("ATTACH DATABASE ? AS prev", (attach.resolve().as_uri() + "?mode=ro",))
+            conn.execute("ATTACH DATABASE ? AS prev", (read_only_uri(attach.absolute()),))
         conn.execute("BEGIN IMMEDIATE")
         yield conn
         conn.commit()
+        if conn.execute("PRAGMA main.wal_checkpoint(TRUNCATE)").fetchone()[0]:
+            raise sqlite3.OperationalError("database is locked")
     except BaseException:
         conn.rollback()
         raise
@@ -3760,15 +3766,27 @@ def _same_row(table: str, column: str) -> str:
 
 def keep_email_history(path: Path, previous: Path) -> None:
     """Copy into the database file at `path` (a restore's copy, before it takes the live file's place) what
-    `previous`, the data it replaces, knows and must never forget: the never-email list and opt-outs, email_sent_log,
-    and an email_sent_log entry for each email that went out or may have (sent, unknown, or being sent: unknown) and
-    that `path` doesn't have as sent. The claim's never-twice check, the follow-up wait, the daily limits and the
-    inbox check then count what happened after the backup was made. Ids are kept only where `path` has the same row.
+    `previous`, the data it replaces, knows and must never forget, so the restore makes nobody be contacted again:
+
+    - the never-email list and opt-outs, and email_sent_log;
+    - an email_sent_log entry for each email that went out or may have (sent, unknown, or being sent: unknown) and that
+      `path` doesn't have as sent. The claim's never-twice check, the follow-up wait, the daily limits and the inbox
+      check then count what happened after the backup was made;
+    - the messages sent there on any channel (marked sent, the agent's, the emails OpenBerry sent);
+    - the replies, a colleague's notes too, and the inbox messages it read, so the inbox check doesn't record them
+      again (its place in each folder goes back with the backup);
+    - the leads' opt-outs: what record_opt_out writes on the lead, and a company lead's company on the never-contact
+      list (a LinkedIn-only lead has no address for the never-email list);
+    - the monthly count of paid API calls (the Google Maps cap): the larger one.
+
+    Rows in `path` change only where it has the same row (same id and created_at): a lead or message added after the
+    backup was made isn't in it. Doing it again (restores back and forth) adds nothing twice.
 
     `previous` may be older than the email tables. Raises sqlite3.Error when it can't be read (a damaged file), and
     nothing is copied then."""
     # `path` already has this email as sent, or as maybe sent: it counts there.
     known = "(r.sent_at IS NOT NULL OR r.status IN ('sent', 'replied') OR r.email_state IN ('unknown', 'data'))"
+    stamp = iso()
     with _file_write_locked(path, attach=previous) as c:
         tables = {r[0] for r in c.execute("SELECT name FROM prev.sqlite_master WHERE type = 'table'")}
         if not {"companies", "leads", "messages"} <= tables:  # an empty file: nothing to keep
@@ -3778,6 +3796,24 @@ def keep_email_history(path: Path, previous: Path) -> None:
                       f"detail, created_at) SELECT s.email, s.reason, {_same_row('companies', 's.company_id')}, "
                       f"{_same_row('leads', 's.lead_id')}, {_same_row('messages', 's.message_id')}, s.detail, "
                       "s.created_at FROM prev.email_suppressions s")
+        # Columns an older version didn't have (sent_via: version 3, the email ones: 5, who wrote a reply: 6) read as
+        # their defaults.
+        have = {r[1] for r in c.execute("PRAGMA prev.table_info(messages)")}
+        m = {name: f"m.{name}" if name in have else default for name, default in (
+            ("sent_via", "''"), ("email_state", "''"), ("email_to", "''"), ("email_message_id", "NULL"),
+            ("email_claimed_at", "NULL"), ("email_from", "''"), ("opt_out_hint", "''"))}
+        # Sent there and not here: sent after the backup was made. The lead was contacted, as every send records.
+        sent = ("m.id = r.id AND m.created_at = r.created_at AND m.direction = 'outbound' AND (m.sent_at IS NOT NULL "
+                "OR m.status IN ('sent', 'replied')) AND r.sent_at IS NULL AND r.status NOT IN ('sent', 'replied')")
+        c.execute("UPDATE main.leads SET status = 'contacted', updated_at = ? WHERE status IN ('new', 'qualified') "
+                  f"AND id IN (SELECT r.lead_id FROM main.messages r JOIN prev.messages m ON {sent})", (stamp,))
+        c.execute(
+            "UPDATE main.messages AS r SET status = m.status, subject = m.subject, body = m.body, "
+            f"sent_at = COALESCE(m.sent_at, m.updated_at), sent_via = {m['sent_via']}, updated_at = m.updated_at, "
+            f"email_state = {m['email_state']}, email_to = {m['email_to']}, "
+            f"email_message_id = COALESCE({m['email_message_id']}, r.email_message_id), "
+            f"email_claimed_at = {m['email_claimed_at']}, email_claim = '', send_error = '' "
+            f"FROM prev.messages m WHERE {sent}")
         if "email_sent_log" in tables:
             c.execute("INSERT INTO main.email_sent_log (address, step, email_message_id, email_state, sent_via, "
                       "sent_at, claimed_at, replied_at, company_id, created_at) SELECT s.address, s.step, "
@@ -3788,11 +3824,11 @@ def keep_email_history(path: Path, previous: Path) -> None:
                       "AND r.email_message_id IS s.email_message_id) "
                       "AND NOT EXISTS (SELECT 1 FROM main.messages r WHERE r.email_message_id = s.email_message_id "
                       f"AND {known})")
-        # Columns an older version didn't have (sent_via: version 3, the email ones: 5) read as their defaults.
-        have = {r[1] for r in c.execute("PRAGMA prev.table_info(messages)")}
-        m = {name: f"m.{name}" if name in have else default for name, default in (
-            ("sent_via", "''"), ("email_state", "''"), ("email_to", "''"), ("email_message_id", "NULL"),
-            ("email_claimed_at", "NULL"))}
+            # A reply about an email whose lead was deleted before the backup was made.
+            c.execute("UPDATE main.email_sent_log AS r SET replied_at = s.replied_at FROM prev.email_sent_log s "
+                      "WHERE r.address = s.address AND r.step = s.step AND r.created_at = s.created_at "
+                      "AND r.email_message_id IS s.email_message_id AND r.replied_at IS NULL "
+                      "AND s.replied_at IS NOT NULL")
         address = f"COALESCE(NULLIF(lower(trim({m['email_to']})), ''), lower(trim(l.email)))"
         c.execute(
             "INSERT INTO main.email_sent_log (address, step, email_message_id, email_state, sent_via, sent_at, "
@@ -3811,4 +3847,64 @@ def keep_email_history(path: Path, previous: Path) -> None:
             f"AND NOT EXISTS (SELECT 1 FROM main.messages r WHERE r.email_message_id = {m['email_message_id']} "
             f"AND {known}) "
             f"AND NOT EXISTS (SELECT 1 FROM main.email_sent_log r WHERE r.email_message_id = {m['email_message_id']})",
-            (iso(),))
+            (stamp,))
+        # Replies to its leads that it doesn't have: new rows, as every check that a lead replied reads them. The same
+        # words at the same time are the same reply, already here. The reply stopped the lead's sequence, and moved it
+        # to replied unless it was a colleague's (the lead stayed where it was there).
+        replies = ("FROM prev.messages m JOIN main.leads l ON l.id = m.lead_id JOIN prev.leads p ON p.id = l.id "
+                   "AND p.created_at = l.created_at WHERE m.direction = 'inbound' AND NOT EXISTS (SELECT 1 FROM "
+                   "main.messages r WHERE r.lead_id = m.lead_id AND r.direction = 'inbound' "
+                   "AND r.created_at = m.created_at AND r.body = m.body)")
+        replied = c.execute(f"SELECT DISTINCT l.id, p.status {replies}").fetchall()
+        c.execute(
+            "INSERT INTO main.messages (company_id, lead_id, direction, channel, step, subject, body, status, "
+            "generated_by, created_at, updated_at, sent_at, sent_via, email_from, opt_out_hint) SELECT l.company_id, "
+            "m.lead_id, m.direction, m.channel, m.step, m.subject, m.body, m.status, m.generated_by, m.created_at, "
+            f"m.updated_at, m.sent_at, {m['sent_via']}, {m['email_from']}, {m['opt_out_hint']} {replies} ORDER BY m.id")
+        for r in replied:
+            _stop_sequence(c, r["id"])
+            if r["status"] not in ("new", "qualified", "contacted"):
+                c.execute("UPDATE main.leads SET status = 'replied', updated_at = ? WHERE id = ? "
+                          "AND status IN ('new', 'qualified', 'contacted')", (stamp, r["id"]))
+        if "email_events" in tables:  # what the inbox check read: never recorded twice
+            c.execute("INSERT OR IGNORE INTO main.email_events (company_id, lead_id, message_id, kind, detail, "
+                      f"inbound_key, created_at) SELECT {_same_row('companies', 'e.company_id')}, "
+                      f"{_same_row('leads', 'e.lead_id')}, {_same_row('messages', 'e.message_id')}, e.kind, e.detail, "
+                      "e.inbound_key, e.created_at FROM prev.email_events e WHERE e.inbound_key IS NOT NULL")
+        _keep_opt_outs(c)
+        if "api_usage" in tables:  # a count that goes back would let the cap be passed, and Google bill it
+            c.execute("INSERT INTO main.api_usage (service, month, used, updated_at) SELECT service, month, used, "
+                      "updated_at FROM prev.api_usage WHERE true ON CONFLICT(service, month) DO UPDATE SET "
+                      "used = MAX(used, excluded.used), updated_at = MAX(updated_at, excluded.updated_at)")
+
+
+def _keep_opt_outs(c: sqlite3.Connection) -> None:
+    """keep_email_history: a lead's opt-out that the restored data ("main") doesn't have, from the replaced data
+    ("prev"), as record_opt_out wrote it: the "unsubscribed" tag, the status and the dated note. A company lead's
+    company goes on the never-contact list again where it was there."""
+    rows = c.execute("SELECT r.id, r.kind, r.lead_company, r.company_id, r.tags, r.notes, p.tags AS was_tags, "
+                     "p.status AS was_status, p.notes AS was_notes, x.icp AS was_icp FROM main.leads r "
+                     "JOIN prev.leads p ON p.id = r.id AND p.created_at = r.created_at "
+                     "LEFT JOIN prev.companies x ON x.id = p.company_id WHERE p.tags LIKE ?",
+                     (f'%"{OPT_OUT_TAG}"%',)).fetchall()
+    for r in rows:
+        tags = _loads(r["tags"], [])
+        if OPT_OUT_TAG in tags or OPT_OUT_TAG not in _loads(r["was_tags"], []):
+            continue
+        notes = r["notes"]
+        for line in r["was_notes"].splitlines():
+            if OPT_OUT_NOTE in line and line.strip() not in notes:
+                notes = f"{notes}\n{line.strip()}".strip()
+        status = r["was_status"] if r["was_status"] in LEAD_STATUSES else "disqualified"
+        update_lead(r["id"], {"tags": [*tags, OPT_OUT_TAG], "notes": notes, "status": status}, conn=c)
+        _unapprove_emails(c, r["id"])
+        c.execute("UPDATE main.messages SET opt_out_hint = '' WHERE lead_id = ? AND opt_out_hint != ''", (r["id"],))
+        name = r["lead_company"].strip()
+        icp = _loads(r["was_icp"], {})
+        listed = (icp.get("exclude_companies") or []) if isinstance(icp, dict) else []
+        if r["kind"] == "account" and name and name.casefold() in {str(e).casefold() for e in listed}:
+            company = get_company(r["company_id"], conn=c)
+            if name.casefold() not in {e.casefold() for e in company.icp.exclude_companies}:
+                c.execute("UPDATE main.companies SET icp = json_set(icp, '$.exclude_companies', json(?)) "
+                          "WHERE id = ? AND json_valid(icp)",
+                          (json.dumps([*company.icp.exclude_companies, name]), r["company_id"]))

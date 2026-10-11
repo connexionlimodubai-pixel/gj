@@ -256,7 +256,7 @@ class Restored:
     previous: Path | None  # the snapshot of the data the restore replaced (None: there was none)
     version: int  # the backup's database version (it was upgraded when older)
     sending_turned_off: list[str]  # companies whose email or AI agent sending was on in the backup
-    kept_email_history: bool = False  # the replaced data's opt-outs and sent emails were kept (repo.keep_email_history)
+    kept_email_history: bool = False  # what the replaced data knows of opt-outs, replies and sends was kept
 
 
 def check_backup_file(path: Path) -> int:
@@ -266,8 +266,8 @@ def check_backup_file(path: Path) -> int:
     if not path.is_file():
         raise RestoreRefused(f"There is no file at {path}.")
     try:
-        # as_uri encodes the path: a '#' or '%' in a folder's name is part of it, not the URI's syntax.
-        with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        # absolute, not resolve: Windows would turn a mapped drive (Z:) into its \\server\share path.
+        with contextlib.closing(sqlite3.connect(db.read_only_uri(path.absolute()), uri=True)) as conn:
             result = conn.execute("PRAGMA integrity_check").fetchone()[0]
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             version = db.file_version(conn)
@@ -284,13 +284,15 @@ def check_backup_file(path: Path) -> int:
 
 
 def _app_running() -> bool:
+    """The desktop app or `openberry serve` runs on this data: both send emails, and write while the restore runs."""
     from .config import OPENBERRY_HOME
-    from .desktop import app_is_running
+    from .desktop import app_is_running, serve_is_running
 
-    return app_is_running(OPENBERRY_HOME)
+    return app_is_running(OPENBERRY_HOME) or serve_is_running(OPENBERRY_HOME)
 
 
-CLOSE_FIRST = "Close OpenBerry and quit Claude Desktop (right-click its icon by the clock, Quit), then try again."
+CLOSE_FIRST = ("Close OpenBerry (or stop openberry serve) and quit Claude Desktop (right-click its icon by the clock, "
+               "Quit), then try again.")
 
 
 def _busy(exc: sqlite3.Error) -> bool:
@@ -315,7 +317,8 @@ def _raw_copy(live: Path, now: datetime | None) -> Path:
 def _set_aside(live: Path, now: datetime | None) -> tuple[Path, bool]:
     """Snapshot the live data while holding its write lock, then fold its -wal file into it (a checkpoint), so
     deleting the -wal loses nothing. RestoreRefused while another program writes or reads it. A damaged file is kept
-    as it is (that is often why a backup is restored). Returns the copy, and whether it is a damaged file's."""
+    as it is (that is often why a backup is restored). Any other error, a full disk say, stops the restore. Returns
+    the copy, and whether it is a damaged file's."""
     busy = RestoreRefused("Another program is using your data right now. " + CLOSE_FIRST)
     conn = sqlite3.connect(live, timeout=RESTORE_LOCK_TIMEOUT, isolation_level=None)
     try:
@@ -329,6 +332,8 @@ def _set_aside(live: Path, now: datetime | None) -> tuple[Path, bool]:
         except sqlite3.DatabaseError as exc:
             if _busy(exc):
                 raise busy from exc
+            if not db.is_damaged(exc):
+                raise
             log.warning("the data being replaced is damaged (%s): keeping its files as they are", exc)
             return _raw_copy(live, now), True
         if blocked:
@@ -338,21 +343,28 @@ def _set_aside(live: Path, now: datetime | None) -> tuple[Path, bool]:
     return previous, False
 
 
+def _unsaved(path: Path) -> bool:
+    """The database file at `path` has changes in its -wal file: deleting that would lose them (a checkpoint empties
+    it)."""
+    wal = path.with_name(path.name + "-wal")
+    return wal.exists() and wal.stat().st_size > 0
+
+
 def _keep_email_history(incoming: Path, previous: Path, damaged: bool) -> bool:
     """repo.keep_email_history from `previous`, read-only. A damaged file's copy that can't be read is skipped, with a
-    warning, and the restore goes on: returns False. That is also a file that opens but has a damaged table (what the
-    dashboard calls a damaged data file). Any other error, a full disk say, stops the restore. Reading `previous` makes
-    -wal and -shm files next to it: those are deleted after."""
+    warning, and the restore goes on: returns False. That is also a file that opens but has a damaged table (SQLite
+    says it is malformed). Any other error stops the restore: a full disk, or a disk I/O error (one can't make the
+    -shm file). Reading `previous` makes -wal and -shm files next to it: those are deleted after."""
     from . import repo
 
     made = [p for p in (previous.with_name(previous.name + s) for s in ("-wal", "-shm")) if not p.exists()]
     try:
         repo.keep_email_history(incoming, previous)
     except sqlite3.Error as exc:
-        if not (damaged or (db.problem_text(exc) or "").startswith(db.DAMAGED)):
+        if not (damaged or db.is_damaged(exc)):
             raise
-        log.warning("could not read the damaged data being replaced (%s): its opt-outs, never-email list and record "
-                    "of sent emails are not kept", exc)
+        log.warning("could not read the damaged data being replaced (%s): its opt-outs, never-email list, replies and "
+                    "record of sent messages are not kept", exc)
         return False
     finally:
         for path in made:
@@ -364,12 +376,12 @@ def _keep_email_history(incoming: Path, previous: Path, damaged: bool) -> bool:
 def restore(backup: Path, *, app_running: Callable[[], bool] | None = None, now: datetime | None = None) -> Restored:
     """Put `backup` back as the live database (`openberry restore FILE`).
 
-    Refuses while the desktop app runs or another program is writing the database. The backup is checked first
-    (integrity_check, a version this OpenBerry can open), then copied next to the live file, and the copy is made
-    ready: upgraded when older, email sending and AI agent sending turned off for every company (emails sent after the
-    backup was made aren't in it, so its approved emails would go out a second time), and the replaced data's
-    opt-outs, never-email list and record of sent emails copied in (repo.keep_email_history). The live data is saved
-    as a before-restore snapshot, its -wal and -shm files are deleted (they belong to the replaced data and would be
+    Refuses while the desktop app or `openberry serve` runs, or another program is writing the database. The backup is
+    checked first (integrity_check, a version this OpenBerry can open), then copied next to the live file, and the copy
+    is made ready: upgraded when older, email sending and AI agent sending turned off for every company (messages sent
+    after the backup was made aren't in it, so its approved ones would go out a second time), and what the replaced
+    data knows of opt-outs, replies and sends copied in (repo.keep_email_history). The live data is saved as a
+    before-restore snapshot, its -wal and -shm files are deleted (they belong to the replaced data and would be
     replayed into the backup), and the copy takes its place (os.replace).
 
     That swap is the last step: stopped before it, the live data is as it was (anything that fails raises
@@ -400,6 +412,10 @@ def restore(backup: Path, *, app_running: Callable[[], bool] | None = None, now:
         if live.exists():
             previous, damaged = _set_aside(live, now)
             kept = _keep_email_history(incoming, previous, damaged)
+            if not damaged and _unsaved(live):  # written since its snapshot: deleting its -wal would lose that
+                raise RestoreRefused("Another program is using your data right now. " + CLOSE_FIRST)
+        if _unsaved(incoming):  # repo._file_write_locked saved the copy's changes in its file: deleted after the swap
+            raise sqlite3.OperationalError("the copy of the backup is not completely saved")
         for suffix in ("-wal", "-shm", "-journal"):
             leftover = live.with_name(live.name + suffix)
             if leftover.exists():

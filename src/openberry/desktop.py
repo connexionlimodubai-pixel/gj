@@ -109,6 +109,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         import multiprocessing
 
         multiprocessing.freeze_support()  # a packaged Windows app must not re-launch itself for child processes
+    config.private_files()  # the data folder, database, backups and logs: for this user only
     args = list(sys.argv[1:] if argv is None else argv)
     if args and (args[0] in CLI_COMMANDS or not args[0].startswith("-")):  # options (macOS's -psn_...) start the app
         from . import cli
@@ -164,7 +165,7 @@ def configure_logging(home: Path) -> Path | None:
     if getattr(sys, "frozen", False) or not (_usable(sys.stdout) and _usable(sys.stderr)):
         path = home / "logs" / "desktop.log"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            config.private_dir(path.parent)
             file_handler = RotatingFileHandler(path, maxBytes=LOG_FILE_BYTES, backupCount=LOG_FILE_BACKUPS,
                                                encoding="utf-8")
         except OSError:
@@ -214,7 +215,7 @@ class InstanceLock:
         if self._file is not None:
             return True
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            config.private_dir(self.path.parent)
             fh = open(self.path, "a+b")  # noqa: SIM115 (kept open while the lock is held)
         except OSError as exc:  # can't lock in this folder: start anyway, as without the lock
             log.warning("could not open %s (%s): not checking for another running OpenBerry", self.path, exc)
@@ -275,7 +276,7 @@ def app_is_running(home: Path) -> bool:
 def write_state(home: Path, url: str) -> None:
     """Write OPENBERRY_HOME/desktop.json for this process's server (atomically: readers never see half a file)."""
     path = home / DESKTOP_STATE_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
+    config.private_dir(path.parent)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(json.dumps({"url": url, "pid": os.getpid(), "version": __version__}), encoding="utf-8")
@@ -422,7 +423,7 @@ def persistent_secret_key(home: Path) -> str:
             return key
     key = secrets.token_hex(32)
     try:
-        home.mkdir(parents=True, exist_ok=True)
+        config.private_dir(home)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # readable by this user only
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(key)

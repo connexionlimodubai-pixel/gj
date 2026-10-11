@@ -9,16 +9,34 @@ import logging
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import __version__
+
+
+def serve_options(settings: Any, host: str, port: int) -> dict[str, Any]:
+    """uvicorn.run's options for `openberry serve`."""
+    return {
+        "host": host, "port": port, "log_level": "info",
+        # X-Forwarded-For/-Proto from these proxies only (None: uvicorn's default, 127.0.0.1). Behind a proxy
+        # container every visitor would otherwise have the proxy's address and share one login limit.
+        "proxy_headers": True, "forwarded_allow_ips": settings.trusted_proxies or None,
+        "access_log": False,  # its lines would log every lead search's query string
+    }
 
 
 def _serve(args: argparse.Namespace) -> None:
     import uvicorn
 
-    from .web.app import create_app
+    from .config import get_settings
+    from .web.app import UnsafeStart, create_app
 
-    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info", proxy_headers=True)
+    settings = get_settings()
+    try:
+        app = create_app(host=args.host)  # refuses a host other computers reach without a (long enough) password
+    except UnsafeStart as exc:
+        sys.exit(f"openberry serve: {exc}")
+    uvicorn.run(app, **serve_options(settings, args.host, args.port))
 
 
 def _desktop(args: argparse.Namespace) -> None:
@@ -220,6 +238,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from .config import private_files
+
+    private_files()  # the data folder, database and backups hold personal data: for this user only
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
         args = build_parser().parse_args(argv)

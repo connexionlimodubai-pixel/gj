@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from .config import get_settings
+from .config import get_settings, make_private, private_dir
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -369,13 +369,14 @@ def backup_to(dest: Path, source: Path | None = None) -> Path:
     dest = Path(dest)
     if not source.is_file():
         raise FileNotFoundError(f"there is no database at {source}")
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(dest.parent)
     tmp = dest.with_name(f".{dest.name}.{os.getpid()}-{threading.get_ident()}.tmp")
     try:
         with contextlib.closing(sqlite3.connect(source, timeout=30)) as src, \
                 contextlib.closing(sqlite3.connect(tmp)) as out:
             src.execute("PRAGMA busy_timeout=30000")
             src.backup(out)
+        make_private(tmp)  # a copy of the same personal data
         os.replace(tmp, dest)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -476,13 +477,15 @@ def _use_wal(conn: sqlite3.Connection, timeout: float = 30.0) -> None:
 def init_db(path: Path | None = None) -> Path:
     path = path or db_path()
     if str(path) != ":memory:":
-        path.parent.mkdir(parents=True, exist_ok=True)
+        private_dir(path.parent)
     conn = sqlite3.connect(path, timeout=30)  # another process may be upgrading the same file
     try:
         _use_wal(conn)
         _before_upgrade(conn, path)
         conn.executescript(SCHEMA)
         _migrate(conn)
+        if str(path) != ":memory:":  # lead personal data and inbox replies: for this user only
+            make_private(path, *(path.with_name(path.name + suffix) for suffix in ("-wal", "-shm")))
     finally:
         conn.close()
     return path

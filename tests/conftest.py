@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,15 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     db.reset_init_cache()
     yield s
     db.reset_init_cache()
+
+
+@pytest.fixture(autouse=True)
+def _keep_umask():
+    """cli.main and desktop.main set a private umask (config.private_files) for the whole process: undo it."""
+    umask = os.umask(0o022)
+    os.umask(umask)
+    yield
+    os.umask(umask)
 
 
 @pytest.fixture

@@ -2330,10 +2330,13 @@ class MCPHTTPEndpoint:
     """
 
     def __init__(self, server: MCPServer, settings: Settings) -> None:
+        from .web.ratelimit import Limits
+
         self.server = server
         self.settings = settings
         self.security = transport_security(settings)
         self._manager: StreamableHTTPSessionManager | None = None
+        self._limits = Limits()  # used when the app has none of its own (app.state.limits)
 
     @asynccontextmanager
     async def lifespan(self) -> AsyncIterator[None]:
@@ -2347,8 +2350,30 @@ class MCPHTTPEndpoint:
             finally:
                 self._manager = None
 
+    def _throttled(self, scope: Scope, authorization: str) -> Response | None:
+        """429 for an address that sent 20 wrong API tokens in 10 minutes (the dashboard's /api counts too); a wrong
+        token sent now counts. None when the request may go on to check_auth."""
+        from starlette.requests import Request
+
+        from .web.auth import sent_token, too_many_tokens
+        from .web.ratelimit import client_key, retry_header
+
+        token = sent_token(authorization)
+        if not self.settings.api_token or not token:
+            return None
+        app_limits = getattr(getattr(scope.get("app"), "state", None), "limits", None)
+        failures = (app_limits or self._limits).token_failures
+        client = client_key(Request(scope))
+        if wait := failures.retry_after(client):
+            return JSONResponse({"error": "too_many_attempts", "message": too_many_tokens(wait)}, status_code=429,
+                                headers=retry_header(wait))
+        if not hmac.compare_digest(token.encode(), self.settings.api_token.encode()):
+            failures.hit(client)
+        return None
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        refusal = check_auth(self.settings, Headers(scope=scope).get("authorization", ""))
+        authorization = Headers(scope=scope).get("authorization", "")
+        refusal = self._throttled(scope, authorization) or check_auth(self.settings, authorization)
         if refusal is None and self._manager is None:
             refusal = JSONResponse({"error": "unavailable",
                                     "message": "The MCP endpoint is not running (app lifespan hooks not started)."},

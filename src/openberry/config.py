@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -192,6 +193,12 @@ class Settings:
     # mode, the dashboard (besides localhost and base_url's host; the dashboard also accepts
     # any IP address, /mcp does not). "*" disables the check.
     allowed_hosts: list[str] = field(default_factory=list)
+    # `openberry serve` on an address other computers can reach refuses to start without a password (start_check),
+    # unless this is set: for a login that something in front of OpenBerry asks for.
+    allow_no_password: bool = False
+    # Reverse proxies whose X-Forwarded-For / X-Forwarded-Proto headers `openberry serve` trusts (uvicorn's
+    # forwarded_allow_ips): IP addresses or networks, "*" for any. Empty: uvicorn's default (127.0.0.1).
+    trusted_proxies: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -225,6 +232,9 @@ class Settings:
                                                     DEFAULT_GOOGLE_PLACES_MONTHLY_LIMIT)),
             google_places_key_status=os.environ.get("OPENBERRY_GOOGLE_PLACES_KEY_STATUS", "").strip(),
             allowed_hosts=[h.strip() for h in os.environ.get("OPENBERRY_ALLOWED_HOSTS", "").split(",") if h.strip()],
+            allow_no_password=_bool("OPENBERRY_ALLOW_NO_PASSWORD", False),
+            trusted_proxies=[h.strip() for h in os.environ.get("OPENBERRY_TRUSTED_PROXIES", "").split(",")
+                             if h.strip()],
         )
         for name in MAILBOX_SETTINGS:  # parsed as apply_setting parses them
             spec = DASHBOARD_SETTINGS[name]
@@ -420,3 +430,112 @@ def refresh_saved_settings(settings: Settings | None = None) -> bool:
             apply_setting(name, new, path, settings)
             changed = True
     return changed
+
+
+# --------------------------------------------------------------------------------------
+# Starting a server other computers can reach (`openberry serve --host 0.0.0.0`)
+# --------------------------------------------------------------------------------------
+
+MIN_PASSWORD_CHARS = 12
+MIN_SECRET_CHARS = 32
+SECRET_COMMAND = 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+
+
+def is_loopback(host: str) -> bool:
+    """True for addresses only this computer can reach: localhost, 127.0.0.0/8 and ::1."""
+    name = host.strip().strip("[]").lower()
+    if name == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+@dataclass
+class StartCheck:
+    refusals: list[str] = field(default_factory=list)  # the server must not start
+    warnings: list[str] = field(default_factory=list)
+
+
+def start_check(settings: Settings, host: str, environ: Any = None) -> StartCheck:
+    """What is unsafe about serving the dashboard on `host` with these settings. Nothing on a loopback address: there
+    only this computer can open it, so `openberry serve` and the desktop app work as before, without a password."""
+    environ = os.environ if environ is None else environ
+    check = StartCheck()
+    if is_loopback(host):
+        return check
+    make = f"To make one: {SECRET_COMMAND}"
+    password = settings.password
+    if not password and not settings.allow_no_password:
+        check.refusals.append(
+            f"OpenBerry has no password, and on {host} other computers can open it: anyone who reaches it could read "
+            f"and change your data. Set OPENBERRY_PASSWORD ({MIN_PASSWORD_CHARS} characters or more), or serve on "
+            "127.0.0.1. If something in front of OpenBerry already asks for a login, set "
+            "OPENBERRY_ALLOW_NO_PASSWORD=true.")
+    elif password and len(password) < MIN_PASSWORD_CHARS:
+        check.refusals.append(
+            f"OPENBERRY_PASSWORD is too short: use at least {MIN_PASSWORD_CHARS} characters when other computers can "
+            f"open OpenBerry (on {host}). {make}")
+    if password:
+        secret = environ.get("OPENBERRY_SECRET_KEY", "")
+        if not secret:
+            check.warnings.append(f"OPENBERRY_SECRET_KEY is not set, so every restart logs everyone out. {make}")
+        elif len(secret) < MIN_SECRET_CHARS:
+            check.warnings.append(f"OPENBERRY_SECRET_KEY is shorter than {MIN_SECRET_CHARS} characters: someone who "
+                                  f"guesses it can make their own login. {make}")
+    token = settings.api_token
+    if not token:
+        check.warnings.append(
+            "OPENBERRY_API_TOKEN is not set, so the JSON API and /mcp are off." if password else
+            "OPENBERRY_API_TOKEN is not set, so anyone who reaches OpenBerry can use its JSON API and /mcp. "
+            + make)
+    elif len(token) < MIN_SECRET_CHARS:
+        check.warnings.append(f"OPENBERRY_API_TOKEN is shorter than {MIN_SECRET_CHARS} characters, which makes it "
+                              f"easier to guess. {make}")
+    base = urlsplit(settings.base_url)
+    if base.scheme == "http" and base.hostname and not is_loopback(base.hostname):
+        check.warnings.append(
+            f"OPENBERRY_BASE_URL is {settings.base_url}: over http:// the password and the login cookie cross the "
+            "network unencrypted. Put OpenBerry behind an HTTPS proxy and set OPENBERRY_BASE_URL to its https:// "
+            "address.")
+    return check
+
+
+# --------------------------------------------------------------------------------------
+# Private files: the data folder holds personal data (leads, inbox replies) and the mailbox password
+# --------------------------------------------------------------------------------------
+
+PRIVATE_UMASK = 0o077
+
+
+def private_files() -> None:
+    """Files and folders this process creates are for this user only (Linux, macOS, Docker; Windows ignores it)."""
+    os.umask(PRIVATE_UMASK)
+
+
+def private_dir(path: Path) -> Path:
+    """Create `path`, and the parents it is missing, as folders only this user can open (0700). A folder that already
+    exists keeps its permissions: it may be one the user shares on purpose."""
+    path = Path(path)
+    missing: list[Path] = []
+    folder = path
+    while not folder.exists() and folder.parent != folder:
+        missing.append(folder)
+        folder = folder.parent
+    for folder in reversed(missing):
+        folder.mkdir(mode=0o700, exist_ok=True)
+    if not path.is_dir():  # a file in the way: the same error as mkdir gives
+        path.mkdir(mode=0o700, exist_ok=True)
+    return path
+
+
+def make_private(*paths: Path) -> None:
+    """chmod 0600 the files that exist among `paths` (the database and its -wal and -shm). Errors are ignored: a file
+    another user owns, or a file system without permissions."""
+    for path in paths:
+        try:
+            if path.is_file():
+                path.chmod(0o600)
+        except OSError:
+            pass

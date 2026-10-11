@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import db
+from .config import private_dir
 
 log = logging.getLogger(__name__)
 
@@ -129,8 +130,7 @@ def snapshot(kind: str, *, source: Path | None = None, now: datetime | None = No
     copies beyond what it keeps. Returns the new file. Raises (OSError, sqlite3.Error) when the copy fails: callers
     about to delete or change data stop then."""
     source = Path(source or db.db_path())
-    target = folder(source)
-    target.mkdir(parents=True, exist_ok=True)
+    target = private_dir(folder(source))
     n = 1
     while (dest := target / snapshot_name(kind, now, version, n)).exists():
         n += 1
@@ -284,8 +284,7 @@ def _busy(exc: sqlite3.Error) -> bool:
 
 def _raw_copy(live: Path, now: datetime | None) -> Path:
     """Keep a damaged file (and its -wal) as it is: SQLite can't read it to make a proper copy."""
-    target = folder(live)
-    target.mkdir(parents=True, exist_ok=True)
+    target = private_dir(folder(live))
     n = 1
     while (dest := target / snapshot_name(BEFORE_RESTORE, now, n=n)).exists():
         n += 1
@@ -344,7 +343,7 @@ def restore(backup: Path, *, app_running: Callable[[], bool] | None = None, now:
     version = check_backup_file(backup)
     if (app_running or _app_running)():
         raise RestoreRefused("OpenBerry is open. " + CLOSE_FIRST)
-    live.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(live.parent)
     incoming = live.with_name(f".{live.name}.restore-{os.getpid()}.tmp")
     db.backup_to(incoming, backup)  # the user's file stays where it is, untouched
     previous: Path | None = None

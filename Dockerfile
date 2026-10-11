@@ -9,7 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
-RUN pip install . && useradd --create-home --uid 1000 openberry && mkdir -p /data && chown openberry /data
+RUN pip install . && useradd --create-home --uid 1000 openberry && mkdir -p /data && chown openberry /data \
+    && chmod 700 /data
 
 USER openberry
 VOLUME ["/data"]

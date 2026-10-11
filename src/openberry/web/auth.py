@@ -48,7 +48,23 @@ SECURITY_HEADERS = {
     "x-frame-options": "DENY",
     "referrer-policy": "same-origin",
     "content-security-policy": CONTENT_SECURITY_POLICY,
+    "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    "cross-origin-opener-policy": "same-origin",
 }
+HSTS = "max-age=31536000"  # one year, sent when OPENBERRY_BASE_URL is https://
+# Pages, the API, CSV exports and backups hold personal data: browsers and proxies must not keep a copy. Static files
+# (CSS, JavaScript, icons) may be cached.
+CACHEABLE = ("/static",)
+
+
+def response_headers(path: str) -> dict[str, str]:
+    """The headers every response gets, unless it set its own value."""
+    headers = dict(SECURITY_HEADERS)
+    if get_settings().base_url.lower().startswith("https://"):
+        headers["strict-transport-security"] = HSTS
+    if not _under(path, CACHEABLE):
+        headers["cache-control"] = "no-store"
+    return headers
 
 
 def _under(path: str, prefixes: tuple[str, ...]) -> bool:
@@ -87,11 +103,38 @@ async def checked_form(request: Request) -> AsyncIterator[FormData]:
         await form.close()
 
 
+def sent_token(authorization: str) -> str:
+    """The token of an `Authorization: Bearer <token>` header, "" for anything else."""
+    scheme, _, token = authorization.partition(" ")
+    return token.strip() if scheme.lower() == "bearer" else ""
+
+
 def _bearer_ok(request: Request, settings: Settings) -> bool:
-    scheme, _, token = request.headers.get("authorization", "").partition(" ")
-    token = token.strip()
-    return (scheme.lower() == "bearer" and bool(settings.api_token) and bool(token)
-            and hmac.compare_digest(token.encode(), settings.api_token.encode()))
+    token = sent_token(request.headers.get("authorization", ""))
+    return bool(settings.api_token) and bool(token) and hmac.compare_digest(token.encode(),
+                                                                            settings.api_token.encode())
+
+
+TOO_MANY_TOKENS = "Too many wrong API tokens from your address. Try again in {minutes} minute{s}."
+
+
+def too_many_tokens(wait: float) -> str:
+    minutes = max(1, round(wait / 60))
+    return TOO_MANY_TOKENS.format(minutes=minutes, s="s" * (minutes != 1))
+
+
+def _checked_bearer(request: Request, settings: Settings) -> bool:
+    """True for the right API token. Each wrong one counts against the sender's address: after 20 in 10 minutes it
+    gets 429 until the oldest is 10 minutes old (limits.token_failures, shared with /mcp)."""
+    if not settings.api_token or not sent_token(request.headers.get("authorization", "")):
+        return False  # no token to guess, or no guess
+    failures, client = limits(request).token_failures, client_key(request)
+    if wait := failures.retry_after(client):
+        raise HTTPException(429, too_many_tokens(wait), headers=retry_header(wait))
+    if _bearer_ok(request, settings):
+        return True
+    failures.hit(client)
+    return False
 
 
 def is_anonymous(request: Request) -> bool:
@@ -112,7 +155,7 @@ def require_api_auth(request: Request) -> None:
     website can't make the visitor's browser start scans or add data.
     """
     settings = get_settings()
-    if _bearer_ok(request, settings):
+    if _checked_bearer(request, settings):
         return
     browser = csrf_valid(request, request.headers.get("x-csrf-token"))
     if not settings.password and not settings.api_token:
@@ -126,6 +169,14 @@ def require_api_auth(request: Request) -> None:
     detail = ("Missing or invalid bearer token." if settings.api_token
               else "The API is disabled: set OPENBERRY_API_TOKEN to use it in server mode.")
     raise HTTPException(401, detail, headers={"WWW-Authenticate": "Bearer"})
+
+
+def require_schema_access(request: Request) -> None:
+    """The OpenAPI schema (/api/openapi.json): for the API token and logged-in users (everyone in local mode), not for
+    anonymous visitors to a server, who could read every route and field from it."""
+    if is_logged_in(request) or _checked_bearer(request, get_settings()):
+        return
+    raise HTTPException(401, "Log in, or send the API token.", headers={"WWW-Authenticate": "Bearer"})
 
 
 # --------------------------------------------------------------------------------------
@@ -209,7 +260,7 @@ class SecurityHeadersMiddleware:
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
-                for key, value in SECURITY_HEADERS.items():
+                for key, value in response_headers(scope["path"]).items():
                     headers.setdefault(key, value)
             await send(message)
 

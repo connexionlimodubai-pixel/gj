@@ -342,7 +342,8 @@ def send_next_email(now: datetime | None = None) -> dict[str, Any]:
         log.info("email sent: message %s", job.message_id)
         return {"status": "sent", "message_id": job.message_id}
     repo.record_email_failure(job.message_id, claim, outcome.kind, outcome.text, box.address, now=now)
-    log.warning("email %s not sent (%s): %s", job.message_id, outcome.kind, outcome.text)
+    log.warning("email %s not sent (%s); the Outreach page says why", job.message_id, outcome.kind)
+    log.debug("email %s: %s", job.message_id, outcome.text)  # a mail server's reply can quote the address
     return {"status": outcome.kind, "message_id": job.message_id, "text": outcome.text}
 
 

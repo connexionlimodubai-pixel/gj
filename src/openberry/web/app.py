@@ -13,7 +13,7 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontext
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
@@ -22,7 +22,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .. import __version__, db, repo
-from ..config import Settings, get_settings, set_settings
+from ..config import Settings, get_settings, set_settings, start_check
 from . import api, auth, data, keys, leads, mail, pages, scans
 from .ratelimit import Limits
 from .ui import STATIC_DIR, render
@@ -129,9 +129,9 @@ def _database_error(request: Request, exc: sqlite3.Error) -> Response:
     return _safe_error_page(request, status, message, title=title, data_link=status == 500)
 
 
-def _with_security_headers(response: Response) -> Response:
+def _with_security_headers(request: Request, response: Response) -> Response:
     """ServerErrorMiddleware answers outside SecurityHeadersMiddleware: the headers are set here instead."""
-    for key, value in auth.SECURITY_HEADERS.items():
+    for key, value in auth.response_headers(request.url.path).items():
         response.headers.setdefault(key, value)
     return response
 
@@ -143,8 +143,8 @@ def _server_error(request: Request, exc: Exception) -> Response:
         log.error("%s %s failed: %s: %s", request.method, request.url.path, type(exc).__name__, exc)
         message = GENERIC_ERROR.format(log=db.log_location())
     if not _wants_html(request):
-        return _with_security_headers(JSONResponse({"detail": message}, status_code=500))
-    return _with_security_headers(_safe_error_page(request, 500, message, data_link=isinstance(exc, OSError)))
+        return _with_security_headers(request, JSONResponse({"detail": message}, status_code=500))
+    return _with_security_headers(request, _safe_error_page(request, 500, message, data_link=isinstance(exc, OSError)))
 
 
 def _too_large_id(request: Request, exc: OverflowError) -> Response:
@@ -199,19 +199,32 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await scans.cancel_all()
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    """Build the dashboard app. Passing `settings` also makes them the process-wide settings."""
+class UnsafeStart(RuntimeError):
+    """Serving on this address with these settings would let other computers in (config.start_check)."""
+
+
+def create_app(settings: Settings | None = None, host: str | None = None) -> FastAPI:
+    """Build the dashboard app. Passing `settings` also makes them the process-wide settings.
+
+    `host`, the address it will serve on (`openberry serve --host`), is checked: UnsafeStart when other computers could
+    open it without a password of 12 characters or more, and a logged warning for each weaker setting."""
     if settings is None:
         settings = get_settings()
     else:
         set_settings(settings)
+    if host is not None:
+        check = start_check(settings, host)
+        if check.refusals:
+            raise UnsafeStart(" ".join(check.refusals))
+        for warning in check.warnings:
+            log.warning("%s", warning)
     if not settings.secret_key:
         settings.secret_key = secrets.token_hex(32)
 
     app = FastAPI(
         title="OpenBerry", version=__version__, lifespan=_lifespan,
         description="Intent-signal lead generation. JSON API: send `Authorization: Bearer $OPENBERRY_API_TOKEN`.",
-        docs_url=None, redoc_url=None, openapi_url="/api/openapi.json",
+        docs_url=None, redoc_url=None, openapi_url=None,  # served below, for the API's users only
     )
     app.state.settings = settings
     app.state.limits = Limits()  # login and anonymous-form rate limits (see ratelimit.py)
@@ -250,6 +263,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             db.report_once(log, "health check", exc)
             return JSONResponse({"ok": False, "app": "openberry", "db": str(exc)}, status_code=503)
         return JSONResponse({"ok": True, "app": "openberry"})
+
+    @app.get("/api/openapi.json", include_in_schema=False, dependencies=[Depends(auth.require_schema_access)])
+    def openapi_schema() -> JSONResponse:
+        return JSONResponse(app.openapi())
 
     app.include_router(auth.router)
     app.include_router(api.router)

@@ -70,9 +70,11 @@ Data lives in `~/.openberry/openberry.db` (move it with `OPENBERRY_HOME` or `OPE
 
 ### With Docker
 ```bash
-cp .env.example .env      # set OPENBERRY_PASSWORD, OPENBERRY_SECRET_KEY and OPENBERRY_API_TOKEN if others can reach it
+cp .env.example .env      # set OPENBERRY_PASSWORD (12+ characters), OPENBERRY_SECRET_KEY and OPENBERRY_API_TOKEN
 docker compose up -d      # → http://localhost:8000
 ```
+Inside the container OpenBerry listens on all addresses, so it refuses to start without a password. If only you can
+reach it (compose publishes it on 127.0.0.1), you can set `OPENBERRY_ALLOW_NO_PASSWORD=true` instead.
 
 ## Connect Claude (the AI SDR)
 
@@ -160,8 +162,10 @@ or in the environment. See [`.env.example`](.env.example) for the other settings
 
 | Variable | Purpose |
 |---|---|
-| `OPENBERRY_PASSWORD`, `OPENBERRY_SECRET_KEY` | Dashboard login. **Required** if anyone but you can reach the server. |
+| `OPENBERRY_PASSWORD`, `OPENBERRY_SECRET_KEY` | Dashboard login. **Required** if anyone but you can reach the server: `openberry serve` on an address other than 127.0.0.1 refuses to start without a password of 12 characters or more |
+| `OPENBERRY_ALLOW_NO_PASSWORD=true` | Start on such an address without a password anyway: when something in front of OpenBerry asks for a login, or Docker publishes it on 127.0.0.1 only |
 | `OPENBERRY_API_TOKEN` | Bearer token for `/api` and the HTTP MCP endpoint `/mcp` |
+| `OPENBERRY_TRUSTED_PROXIES` | Behind a reverse proxy: its address or network (comma separated, `*` for any), so `X-Forwarded-For` gives each visitor's own address |
 | `OPENBERRY_BASE_URL` | Public URL of the dashboard: links in Claude replies, an allowed host name, and Secure login cookies when it starts with `https://` |
 | `OPENBERRY_ALLOWED_HOSTS` | Extra host names to answer to in local mode (no password), e.g. a LAN IP so `/mcp` works there |
 | `OPENBERRY_PUBLIC_REGISTRATION=true` | Let clients fill in the registration form themselves (agency intake). Their companies wait, paused, for your review |

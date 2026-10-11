@@ -110,7 +110,7 @@ def _merged_lines(lines: list[str], values: Mapping[str, str | None]) -> list[st
 
 def _write_private(path: Path, text: str) -> None:
     """Replace `path` atomically with a file only this user can read."""
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    config.private_dir(path.parent)
     if path.is_symlink():
         path = path.resolve()  # update the link's target, keep the user's link
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")

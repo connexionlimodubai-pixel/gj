@@ -161,6 +161,17 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   The JSON API and `/mcp` require `Authorization: Bearer $OPENBERRY_API_TOKEN`. Session cookies are `Secure` when `OPENBERRY_BASE_URL` is https.
   After 5 wrong passwords in 10 minutes an address gets 429 until the window passes. Password checks run one at a time, and each
   failure waits 0.5 s plus 0.5 s for every 5 recent failures from anyone (at most 5 s), so parallel guessing doesn't help.
+  After 20 wrong API tokens in 10 minutes (`/api` and `/mcp` together) an address gets 429 with `Retry-After`.
+- **Start-up checks** (`config.start_check`): `openberry serve` on an address other than loopback refuses to start
+  without `OPENBERRY_PASSWORD` (unless `OPENBERRY_ALLOW_NO_PASSWORD=true`) or with one shorter than 12 characters. It warns
+  when the secret key or the API token is missing or shorter than 32 characters, and when `OPENBERRY_BASE_URL` is `http://`
+  on a network address. On 127.0.0.1 nothing changes. `OPENBERRY_TRUSTED_PROXIES` sets uvicorn's `forwarded_allow_ips`.
+  The access log is off (it would hold every lead search's query string).
+- **Files:** `openberry` and the desktop app run with umask 077. The data folder, `logs/` and `backups/` are created with
+  mode 0700, and the database, its `-wal` and `-shm` and every backup are set to 0600 (Linux, macOS, Docker's `/data`).
+- **Headers:** a strict CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: same-origin`, `Permissions-Policy` and
+  `Cross-Origin-Opener-Policy: same-origin` on every response, error pages included; `Cache-Control: no-store` on everything
+  but `/static`; HSTS when `OPENBERRY_BASE_URL` is https. `/api/openapi.json` needs a login or the API token in server mode.
 - `OPENBERRY_PUBLIC_REGISTRATION=true` lets anyone submit the registration form (agency intake). Such visitors can't read any data.
   Their companies are saved paused, without RSS feeds or alert webhooks, and show as *Pending review* on the board until the
   operator activates them. Anonymous registrations and website auto-fills are limited to 5 a minute per address and 30 a minute

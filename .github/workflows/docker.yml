@@ -8,6 +8,7 @@ on:
     paths:
       - "Dockerfile"
       - "docker-compose.yml"
+      - "Caddyfile"
       - ".dockerignore"
       - "src/**"
       - "uv.lock"
@@ -19,6 +20,7 @@ on:
     paths:
       - "Dockerfile"
       - "docker-compose.yml"
+      - "Caddyfile"
       - ".dockerignore"
       - "src/**"
       - "uv.lock"
@@ -49,6 +51,7 @@ jobs:
           cp .env.example .env
           docker compose config --quiet
           docker compose --profile ollama config --quiet
+          docker compose --profile caddy config --quiet
 
       - name: Build the image
         run: docker compose build

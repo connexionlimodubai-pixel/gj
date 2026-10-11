@@ -167,6 +167,10 @@ Excluded keywords, never-contact companies and the `disqualified` lead status ca
   when the secret key or the API token is missing or shorter than 32 characters, and when `OPENBERRY_BASE_URL` is `http://`
   on a network address. On 127.0.0.1 nothing changes. `OPENBERRY_TRUSTED_PROXIES` sets uvicorn's `forwarded_allow_ips`.
   The access log is off (it would hold every lead search's query string).
+- **On a server:** the compose `caddy` profile puts Caddy in front (the `Caddyfile` serves `OPENBERRY_BASE_URL` and
+  forwards to `openberry:8000`), with a Let's Encrypt certificate, `http://` redirected to `https://`, and OpenBerry's
+  own port published on 127.0.0.1 only. Caddy gets `OPENBERRY_BASE_URL` and no other setting. The steps are in the
+  README, "Run it on a server".
 - **Files:** `openberry` and the desktop app run with umask 077. The data folder, `logs/` and `backups/` are created with
   mode 0700, and the database, its `-wal` and `-shm` and every backup are set to 0600 (Linux, macOS, Docker's `/data`).
 - **Headers:** a strict CSP, `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: same-origin`, `Permissions-Policy` and

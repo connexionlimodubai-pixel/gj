@@ -43,9 +43,10 @@ claude mcp add openberry -- uv --directory /ABSOLUTE/PATH/TO/gj run openberry mc
 ### Docker / remote (Streamable HTTP)
 The dashboard serves MCP at `/mcp`. With a token set (`OPENBERRY_API_TOKEN`):
 ```bash
-claude mcp add --transport http openberry http://localhost:8000/mcp \
+claude mcp add --transport http openberry http://127.0.0.1:8000/mcp \
   --header "Authorization: Bearer $OPENBERRY_API_TOKEN"
 ```
+On a server behind Caddy ([Run it on a server](../README.md#run-it-on-a-server)), use `https://your.domain/mcp`.
 Without a token (local mode) it only answers on localhost and the host of `OPENBERRY_BASE_URL`; add other host names or a
 LAN IP to `OPENBERRY_ALLOWED_HOSTS`. You can also use stdio through the container: `docker exec -i openberry openberry mcp`.
 A standalone HTTP server, with the same auth, is `openberry mcp --http --port 8001`.
@@ -67,7 +68,7 @@ OpenBerry gives Claude 25 tools.
 | `update_lead` / `delete_lead` | Change status, notes, tags or profile fields |
 | `assess_lead` | Give Claude's 0-100 fit/timing judgement and rationale (blended 30% into the score) |
 | `get_outreach_context` | Everything needed to write one message: sender, tone, offer, lead, signals, thread. Without a channel and step it prepares the next message in the sequence. For a connection note, `limits` gives your LinkedIn account's note length (`max_chars`: 200 free, 300 Premium) and, on a free account, the 5 notes a month and how many were sent in the last 30 days |
-| `save_outreach_message` | Store a draft. Enforces your LinkedIn account's connection-note limit (200 characters on a free account, 300 on Premium) and your banned words. **Never sends.** With [email sending](EMAIL_SENDING.md) on, an email you approve is then emailed from your mailbox (`get_outreach_context` gives `limits.email_sending` and the footer added when it is sent, and warns about an address on your never-email list). With auto-approve on, it says when the draft will be approved automatically (`auto_approves_at`), so Claude can tell you. A new version of a draft you held is held too |
+| `save_outreach_message` | Store a draft. Enforces your LinkedIn account's connection-note limit (200 characters on a free account, 300 on Premium) and your banned words. **The tool itself never sends.** With [email sending](EMAIL_SENDING.md) on, an email you approve is then emailed from your mailbox (`get_outreach_context` gives `limits.email_sending` and the footer added when it is sent, and warns about an address on your never-email list). With auto-approve on, it says when the draft will be approved automatically (`auto_approves_at`), so Claude can tell you. A new version of a draft you held is held too |
 | `list_outreach` / `update_message` | Review the queue, edit drafts, mark sent. Claude sets *approved* only when you approve that exact text; editing an approved message makes it a draft again. Messages show `auto_approved` and, with auto-approve on, each draft's `auto_approves_at` (or `auto_approve`: `held` or why not; `get_lead` too). `update_message` can hold a draft (`auto_hold=true`) so it is never approved automatically, and `status="draft"` on an approved message holds it; only you release a hold, in the dashboard |
 | `log_reply` | Record the lead's reply. This stops the follow-up sequence. With `opt_out=true` (they asked not to be contacted), the lead is disqualified and their address is never emailed again, for any company. Replies to emails sent from your connected mailbox are logged automatically |
 | `followups_due` | Leads waiting for their next follow-up, with the step and channel to use |

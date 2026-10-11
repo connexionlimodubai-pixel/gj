@@ -273,7 +273,7 @@
   {% if tab == "drafts" %}
     {% call m.empty("edit", "No drafts waiting for review") %}<p>Draft from any lead's page, switch the profile to auto-draft, or ask Claude: “Draft LinkedIn connection notes for all hot leads of company {{ company.id }} that have no message yet.”</p>{% endcall %}
   {% elif tab == "approved" %}
-    {% call m.empty("check", "Nothing approved yet") %}<p>Approved messages wait here until you send them and mark them sent{% if agent.enabled %}, or your AI agent sends them{% endif %}.</p>{% endcall %}
+    {% call m.empty("check", "Nothing approved yet") %}<p>Approved messages wait here until you send them and mark them sent{% if agent.enabled %}, or your AI agent sends the LinkedIn ones{% endif %}{% if email.enabled %}, or OpenBerry sends the emails from your mailbox{% endif %}.</p>{% endcall %}
   {% elif tab == "sent" %}
     {% call m.empty("send", "Nothing sent yet") %}<p>Messages you mark as sent appear here and start the follow-up timer.</p>{% endcall %}
   {% else %}

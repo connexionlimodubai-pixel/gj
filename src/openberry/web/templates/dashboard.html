@@ -259,7 +259,7 @@
           {% for r in runs %}
           <tr{% if r.places %} class="has-detail"{% endif %}>
             <td class="nowrap">{{ m.when(r.run.started_at) }}</td>
-            <td>{{ r.run.trigger|capitalize }}</td>
+            <td>{{ {"cli": "Command line", "api": "API"}.get(r.run.trigger, r.run.trigger|capitalize) }}</td>
             <td><span class="pill pill-run-{{ r.run.status if r.run.status in SCAN_STATUS_LABELS else 'other' }}">{{ r.run.status|scan_status }}</span></td>
             <td class="num">{{ r.signals_new if r.signals_new is not none else "—" }}</td>
             <td class="num">{{ r.leads_new if r.leads_new is not none else "—" }}</td>

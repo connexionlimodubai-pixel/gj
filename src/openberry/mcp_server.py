@@ -1,7 +1,7 @@
 """MCP server: Claude's interface to OpenBerry.
 
 Claude does the judgement work (research with companion MCP servers, qualification, writing);
-these tools read and write the same SQLite data the dashboard shows. Nothing here ever sends a
+these tools read and write the same SQLite data the dashboard shows. No tool here sends a
 message: drafts are stored for a human to review and send from their own LinkedIn or inbox. With
 AI agent sending turned on for a company, a browser agent the user runs in their own browser may
 send the LinkedIn messages they approved, through the send queue tools, whose guardrails live in
@@ -1426,8 +1426,8 @@ def save_outreach_message(
     LinkedIn account (200 characters free, 300 Premium: limits.max_chars), emails need a subject, the
     company's banned words are not allowed, and no unfilled placeholders. An older unsent draft for the
     same lead, channel and step is superseded (if a draft for that step was held, the new one is held too).
-    Nothing is sent: a human reviews the draft in the dashboard, sends it from their own LinkedIn or
-    email, then marks it sent. Never tell the user the message was sent. If the user turned on
+    Saving sends nothing: a human reviews the draft in the dashboard, sends it from their own LinkedIn
+    or email, then marks it sent. Never tell the user the message was sent. If the user turned on
     auto-approve for the company, the draft is approved automatically once its review window has passed
     (auto_approves_at) unless they approve, hold or skip it first (an edit starts the window again), and
     with AI agent sending on their agent may then send it: write it so it could go out exactly as it is.
@@ -1698,7 +1698,7 @@ def get_send_queue(
     """The approved LinkedIn messages a browser agent may send now, with the exact text and profile URL.
 
     Only for AI agent sending, which the user turns on per company in the dashboard (off by default).
-    OpenBerry sends nothing itself: you send each item from the user's own logged-in browser at their
+    OpenBerry sends no LinkedIn message itself: you send each item from the user's own logged-in browser at their
     normal pace, then record it with confirm_message_sent. The server enforces the guardrails: only
     messages the user approved; LinkedIn only (linkedin_connect, linkedin_dm; never email); never leads
     who replied, booked a meeting, were won, lost or disqualified, or are on the never-contact list or

@@ -1,6 +1,7 @@
 # One-command self-hosting:  cp .env.example .env  (edit it)  &&  docker compose up -d
-# Dashboard: http://localhost:8000      Claude (HTTP MCP): http://localhost:8000/mcp
+# Dashboard: http://127.0.0.1:8000      Claude (HTTP MCP): http://127.0.0.1:8000/mcp
 # Set OPENBERRY_PASSWORD in .env (12+ characters), or OPENBERRY_ALLOW_NO_PASSWORD=true if only you can reach it.
+# On a server, with HTTPS: docker compose --profile caddy up -d (the caddy service below, README "Run it on a server").
 services:
   openberry:
     build: .
@@ -9,7 +10,8 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "127.0.0.1:8000:8000"   # remove "127.0.0.1:" to expose on your network (set a password first!)
+      # Only this computer can open it. On a server, put Caddy in front (below) instead of removing "127.0.0.1:".
+      - "127.0.0.1:8000:8000"
     volumes:
       - openberry-data:/data
     # An email being sent gets time to finish when the container stops (the app waits up to 30 seconds for it).
@@ -19,6 +21,31 @@ services:
     cap_drop: [ALL]
     read_only: true
     tmpfs: [/tmp]
+
+  # Optional, on a server: Caddy gives OpenBerry HTTPS, with a free Let's Encrypt certificate it renews itself.
+  # In .env set OPENBERRY_BASE_URL=https://your.domain, OPENBERRY_TRUSTED_PROXIES=172.16.0.0/12,192.168.0.0/16 and a
+  # password; point the domain at the server and open ports 80 and 443. Then:  docker compose --profile caddy up -d
+  # OpenBerry stays on the server's 127.0.0.1:8000: from outside, only Caddy reaches it (as openberry:8000 inside Docker).
+  caddy:
+    image: caddy:2.11.7
+    container_name: openberry-caddy
+    profiles: ["caddy"]
+    restart: unless-stopped
+    depends_on: [openberry]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      # The address Caddy serves (Caddyfile). Caddy gets none of OpenBerry's other settings or passwords.
+      OPENBERRY_BASE_URL: ${OPENBERRY_BASE_URL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # the certificates
+      - caddy-config:/config
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
 
   # Optional: free local LLM for the "Local AI (Ollama)" writer in the lead page's Draft a message card.
   # Enable with:  docker compose --profile ollama up -d
@@ -35,3 +62,5 @@ services:
 volumes:
   openberry-data:
   ollama-models:
+  caddy-data:
+  caddy-config:

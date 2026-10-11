@@ -71,8 +71,9 @@ A Python app stores everything, collects free public signals, scores leads, and 
 - **email_suppressions**: addresses never emailed again, for every company (`opt_out`, `bounce`, `manual`). They
   outlive the lead. **email_events**: what the sender and the inbox check did (reply, opt_out, bounce, soft_bounce,
   policy_reject, auto_reply, send_failed, unknown, resolved, edited = its text changed after Send again);
-  `inbound_key` (the inbox message's Message-ID, else its folder and UID) handles each inbox message once. **email_mailbox**: one row per From address: its pause, failures
-  in a row, the last inbox check and the last UID read in each folder. Never a password.
+  `inbound_key` (the inbox message's Message-ID, else its folder and UID) handles each inbox message once.
+  **email_mailbox**: one row per From address: its pause, failures in a row, the last inbox check and the last UID read
+  in each folder. Never a password.
 - **api_usage**: paid API calls per service and calendar month (UTC), the monthly cap on Google Maps searches.
 - **place_searches**: when each company last read every page of each Google Maps search (a search runs at most once a
   week). **place_ids**: the Google Place IDs a company already handled (`added = 1`: became a lead, never added again,

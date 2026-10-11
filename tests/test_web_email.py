@@ -730,7 +730,8 @@ def test_a_colleagues_note_about_several_leads_is_one_reply(client, company, off
     assert "3 leads may not want to be emailed again" in dashboard
     for lead in leads:
         page = html_lib.unescape(client.get(f"{base}/leads/{lead}").text)
-        assert "pa@desert-pearl-hotel.example</bdi> wrote about" in page and "found in your inbox" in page
+        # "· found in your inbox" is the note's own line: the opt-out form's help also says "found in your inbox".
+        assert "pa@desert-pearl-hotel.example</bdi> wrote about" in page and "· found in your inbox" in page
         assert "please remove him from your list" in page and 'value="confirm"' in page
 
 

@@ -2,7 +2,7 @@
 # from uv.lock with its hash: the same versions CI tests. Dependabot proposes updates (.github/dependabot.yml), and
 # .github/workflows/docker.yml builds and runs the image on every change.
 
-FROM astral/uv:0.11.32@sha256:df4cae8f3a96d175e2e5f992e597550000edbe78fdc2594d5cd8de1a217f504c AS uv
+FROM astral/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
 
 FROM python:3.12.15-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS build
 ENV PIP_NO_CACHE_DIR=1 \
